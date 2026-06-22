@@ -633,67 +633,38 @@ class LoginPage(ctk.CTkFrame):
 
         # Tombol Masuk
         self.btn_login = ctk.CTkButton(
-            outer, text="🔓  MASUK", width=320, height=44,
+            outer, text="🔓  MASUK", width=280, height=44,
             fg_color=C_ACCENT2, hover_color="#5A0FCC",
             font=("Russo One", 12, "bold"), text_color="white",
             command=self._login)
-        self.btn_login.pack(pady=(0, 4), padx=40)
+        self.btn_login.pack(pady=(0, 4), padx=30)
 
         ctk.CTkLabel(outer,
                      text="Hubungi administrator untuk akses.",
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
 
-        ctk.CTkFrame(outer, height=1, fg_color=C_BORDER).pack(
-            fill="x", padx=40, pady=(4, 10))
-
         # Tombol Daftar
         ctk.CTkLabel(outer, text="Rental baru? Belum punya akun?",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(8, 4))
         ctk.CTkButton(
-            outer, text="📝  DAFTAR RENTAL BARU", width=320, height=36,
+            outer, text="📝  DAFTAR RENTAL BARU", width=280, height=36,
             fg_color="transparent", hover_color=C_BTN,
             border_width=1, border_color=C_ACCENT,
             font=("Russo One", 10, "bold"), text_color=C_ACCENT,
-            command=self._show_daftar_view).pack(pady=(0, 6), padx=40)
+            command=self._show_daftar_view).pack(pady=(0, 6), padx=30)
 
         # Tombol Lupa Password
         ctk.CTkButton(
-            outer, text="🔓  Lupa Password?", width=320, height=34,
+            outer, text="🔓  Lupa Password?", width=280, height=34,
             fg_color="transparent", hover_color=C_BTN,
             border_width=1, border_color=C_RED,
             font=("Russo One", 9, "bold"), text_color=C_RED,
-            command=self._show_lupa_password_view).pack(pady=(0, 16), padx=40)
+            command=self._show_lupa_password_view).pack(pady=(0, 10), padx=30)
 
-        # Version dan Cek Update di login page
-        version_frame = ctk.CTkFrame(outer, fg_color="transparent")
-        version_frame.pack(fill="x", padx=40, pady=(0, 6))
-        
-        ctk.CTkLabel(version_frame, text=f"v{APP_VERSION}",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(side="left")
-        
-        ctk.CTkButton(version_frame, text="🔄 Cek Update", width=140, height=28,
-                      fg_color="transparent", hover_color=C_BTN,
-                      border_width=1, border_color=C_ACCENT,
-                      font=("Russo One", 8, "bold"), text_color=C_ACCENT,
-                      command=self._check_update_at_login).pack(side="right")
+        # Version di login page
+        ctk.CTkLabel(outer, text=f"v{APP_VERSION}",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
 
-    def _check_update_at_login(self):
-        """Check for updates at login page."""
-        try:
-            from scripts import check_update
-            
-            cfg = ConfigManager.load()
-            manifest_url = cfg.get("update_manifest_url", "")
-            pubkey_path = cfg.get("update_pubkey_path", "update_pubkey.pem")
-            
-            if not manifest_url:
-                messagebox.showwarning("⚠ Update", "URL manifest tidak dikonfigurasi.")
-                return
-            
-            msg = check_update.check_for_update(manifest_url, pubkey_path, APP_VERSION)
-            messagebox.showinfo("ℹ Update Info", msg)
-        except Exception as e:
-            messagebox.showerror("✖ Cek Update Error", f"Error: {str(e)}")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  VIEW 2 — DAFTAR RENTAL BARU
