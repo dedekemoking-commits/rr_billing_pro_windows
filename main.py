@@ -682,6 +682,8 @@ class LoginPage(ctk.CTkFrame):
     def _check_update_at_login(self):
         """Check for updates at login page."""
         try:
+            from scripts import check_update
+            
             cfg = ConfigManager.load()
             manifest_url = cfg.get("update_manifest_url", "")
             pubkey_path = cfg.get("update_pubkey_path", "update_pubkey.pem")
@@ -2761,6 +2763,13 @@ class AutoRentApp(ctk.CTk):
                       fg_color="transparent", hover_color="#1A4A1A",
                       text_color=C_ACCENT, corner_radius=8,
                       command=self._on_check_update).pack(fill="x", padx=10, pady=3)
+        
+        # Tombol update via Git
+        ctk.CTkButton(self.sidebar, text="  📡  Update via Git", anchor="w", height=36,
+                      font=("Russo One", 9, "bold"),
+                      fg_color="transparent", hover_color="#1A4A1A",
+                      text_color="#00DD88", corner_radius=8,
+                      command=self._on_git_update).pack(fill="x", padx=10, pady=3)
 
         ctk.CTkLabel(self.sidebar, text=f"v{APP_VERSION} — 2026",
                      font=FONT_SMALL, text_color=C_MUTED).pack(side="bottom", pady=12)
@@ -2798,6 +2807,105 @@ class AutoRentApp(ctk.CTk):
             self.after(0, lambda: messagebox.showinfo("Cek Pembaruan", res))
         except Exception as e:
             self.after(0, lambda: messagebox.showerror("Cek Pembaruan - Error", str(e)))
+    
+    def _on_git_update(self):
+        """Check and update via Git, run in background thread."""
+        threading.Thread(target=self._git_update_thread, daemon=True).start()
+    
+    def _git_update_thread(self):
+        """Background thread untuk check dan update via Git."""
+        try:
+            from scripts.git_updater import GitUpdater
+            
+            # Inisialisasi Git updater
+            repo_path = os.path.dirname(os.path.abspath(__file__))
+            updater = GitUpdater(repo_path, remote="origin", branch="master")
+            
+            # Check for updates
+            has_update, msg, info = updater.check_for_updates()
+            
+            if not has_update:
+                self.after(0, lambda: messagebox.showinfo("📡 Update Git", msg))
+                return
+            
+            # Ada update tersedia, tanya user
+            commits_info = ""
+            if info and info.get("commits_info"):
+                commits_info = f"\n\nCommit yang akan di-pull:\n{info['commits_info'][:500]}"
+            
+            confirm_msg = (
+                f"{msg}\n"
+                f"Local: {info['local_commit']} → Remote: {info['remote_commit']}"
+                f"{commits_info}\n\n"
+                "Lanjutkan update dan restart aplikasi?"
+            )
+            
+            result = messagebox.askyesno("📡 Update via Git", confirm_msg)
+            if not result:
+                self.after(0, lambda: messagebox.showinfo("Dibatalkan", "Update dibatalkan."))
+                return
+            
+            # Show progress
+            dlg = messagebox.showinfo(
+                "Sedang Update",
+                "Sedang pull updates dari Git...\nSilakan tunggu...",
+                parent=self
+            )
+            
+            # Pull updates
+            success, pull_msg = updater.pull_updates()
+            
+            if not success:
+                self.after(0, lambda: messagebox.showerror("❌ Update Error", f"Update gagal:\n{pull_msg}"))
+                return
+            
+            # Success! Now restart
+            self.after(0, lambda: messagebox.showinfo(
+                "✅ Update Berhasil",
+                f"Update berhasil!\n\n{pull_msg}\n\nAplikasi akan restart..."
+            ))
+            
+            # Restart aplikasi
+            time.sleep(1)
+            app_exe = sys.executable if not hasattr(sys, 'frozen') else sys.executable
+            if hasattr(sys, 'frozen'):
+                app_exe = sys.executable
+            else:
+                # Running as script, restart dengan python
+                app_exe = os.path.abspath(__file__)
+            
+            # Save audit log sebelum restart
+            AuditLogger.log(
+                action="system_update",
+                username=self.current_user or "system",
+                status="success",
+                details={"type": "git", "message": pull_msg}
+            )
+            
+            # Restart aplikasi
+            if sys.platform == "win32":
+                # Windows: gunakan START command
+                subprocess.Popen(
+                    f'cmd /c start "" "{app_exe}"',
+                    shell=True,
+                    close_fds=True
+                )
+            else:
+                # Unix/Linux/Mac
+                subprocess.Popen([app_exe], close_fds=True)
+            
+            # Keluar dari aplikasi lama
+            time.sleep(0.5)
+            self.master.quit()
+            
+        except ImportError as e:
+            self.after(0, lambda: messagebox.showerror(
+                "❌ Module Error",
+                f"Git updater module tidak ditemukan:\n{e}\n\n"
+                "Pastikan scripts/git_updater.py ada."
+            ))
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("❌ Error", f"Update error:\n{str(e)}"))
 
     def _show_tab(self, key):
         for k, f in self.frames.items():
