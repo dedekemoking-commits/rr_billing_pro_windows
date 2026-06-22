@@ -4120,6 +4120,39 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkLabel(card, text="© 2026 RR CCTV — All Rights Reserved",
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(16, 24))
 
+        # ── PROFIL RENTAL USER ───────────────────────────────────────────
+        rental_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)
+        rental_card.pack(fill="x", pady=(0, 16))
+        
+        ctk.CTkLabel(rental_card, text="🏢  PROFIL RENTAL ANDA",
+                     font=("Russo One", 12, "bold"), text_color=C_ACCENT).pack(anchor="w", padx=20, pady=(16, 12))
+        
+        # Get rental profile data
+        cfg = ConfigManager.load()
+        profil_semua = cfg.get("profil_rental", {})
+        profil_user = profil_semua.get(self.current_user, {})
+        
+        # Display rental profile info
+        rental_info = [
+            ("🏪 Nama Rental",      profil_user.get("nama_rental", "-")),
+            ("👤 Nama Pemilik",     profil_user.get("nama_pemilik", "-")),
+            ("📱 No HP / WhatsApp",  profil_user.get("hp", "-")),
+            ("📧 Email / Gmail",    profil_user.get("email", "-")),
+            ("📍 Alamat Tempat",    profil_user.get("alamat", "-")),
+        ]
+        
+        for label, val in rental_info:
+            row = ctk.CTkFrame(rental_card, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=4)
+            ctk.CTkLabel(row, text=f"{label}:", font=FONT_LABEL,
+                        text_color=C_MUTED, width=140, anchor="w").pack(side="left")
+            # Handle long text wrapping
+            lbl_val = ctk.CTkLabel(row, text=val, font=FONT_BODY, 
+                                   text_color=C_TEXT, wraplength=300, justify="left")
+            lbl_val.pack(side="left", anchor="nw", fill="x", expand=True)
+        
+        ctk.CTkLabel(rental_card, text="",).pack(pady=4)
+
         if self.current_role == "admin":
             user_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)
             user_card.pack(fill="x", pady=(0, 16))
