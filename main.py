@@ -548,8 +548,7 @@ class LoginPage(ctk.CTkFrame):
     # Default passwords (hashed dengan bcrypt untuk keamanan)
     # Jika tidak ada users di config.json, gunakan ini sebagai fallback
     DEFAULT_USERS = {
-        # Hanya kasir user yang tersedia - admin dihapus
-        "kasir": {"password": "bcrypt$$2b$12$6n2XEhIb5PF/5cZmIEpdXeO8BKrTEUtXceknpdnGbFa8k3nsg3Uze", "role": "kasir"},
+        # Tidak ada default user - user harus register atau admin setup
     }
 
     LOGIN_MAX_ATTEMPTS = 5
@@ -578,7 +577,7 @@ class LoginPage(ctk.CTkFrame):
         outer = ctk.CTkFrame(self._view_container, fg_color=C_PANEL,
                               corner_radius=20, border_width=2,
                               border_color=C_ACCENT2)
-        outer.pack(ipadx=50, ipady=20)
+        outer.pack(ipadx=30, ipady=12)
 
         # Logo
         logo_ico = ctk.CTkFrame(outer, fg_color="white", corner_radius=16,
@@ -615,7 +614,6 @@ class LoginPage(ctk.CTkFrame):
             border_color=C_BORDER, font=("Consolas", 13),
             height=40, width=320)
         self.entry_user.pack(pady=(2, 10), padx=40)
-        self.entry_user.insert(0, "kasir")
 
         # Input password
         ctk.CTkLabel(outer, text="Password", font=FONT_LABEL,
@@ -2524,7 +2522,8 @@ class AutoRentApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("RR BILLING PRO — Billing TV System")
-        self.geometry("1280x800")
+        self.geometry("520x620")
+        self.resizable(False, False)
         self.configure(fg_color=C_BG)
 
         # ── Set ikon window dari logo.png ─────────────────────────────────────
@@ -2622,6 +2621,8 @@ class AutoRentApp(ctk.CTk):
 
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
+        self.geometry("520x620")
+        self.resizable(False, False)
         for w in self.winfo_children():
             w.destroy()
         login = LoginPage(self, on_login_success=self._on_login)
@@ -2630,6 +2631,8 @@ class AutoRentApp(ctk.CTk):
     def _on_login(self, username, role):
         self.current_user = username
         self.current_role = role
+        self.geometry("1280x800")
+        self.resizable(True, True)
         for w in self.winfo_children():
             w.destroy()
         self._build_layout()
@@ -2759,13 +2762,6 @@ class AutoRentApp(ctk.CTk):
                       text_color=C_RED, corner_radius=8,
                       command=self._logout).pack(fill="x", padx=10, pady=3)
 
-        # Tombol cek pembaruan: URL manifest dapat diset di config sebagai 'update_manifest_url'
-        ctk.CTkButton(self.sidebar, text="  🔄  Cek Pembaruan", anchor="w", height=36,
-                      font=("Russo One", 9, "bold"),
-                      fg_color="transparent", hover_color="#1A4A1A",
-                      text_color=C_ACCENT, corner_radius=8,
-                      command=self._on_check_update).pack(fill="x", padx=10, pady=3)
-        
         # Tombol update via Git
         ctk.CTkButton(self.sidebar, text="  📡  Update via Git", anchor="w", height=36,
                       font=("Russo One", 9, "bold"),
