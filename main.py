@@ -548,8 +548,7 @@ class LoginPage(ctk.CTkFrame):
     # Default passwords (hashed dengan bcrypt untuk keamanan)
     # Jika tidak ada users di config.json, gunakan ini sebagai fallback
     DEFAULT_USERS = {
-        # admin123 dan kasir123 hashed dengan bcrypt (rounds=12)
-        "admin": {"password": "bcrypt$$2b$12$VF.Jn6zATce1al8vxL8xeunwPXKYuIohXaXqpwxktKPbmvJT4nhA.", "role": "admin"},
+        # Hanya kasir user yang tersedia - admin dihapus
         "kasir": {"password": "bcrypt$$2b$12$6n2XEhIb5PF/5cZmIEpdXeO8BKrTEUtXceknpdnGbFa8k3nsg3Uze", "role": "kasir"},
     }
 
@@ -582,7 +581,7 @@ class LoginPage(ctk.CTkFrame):
         outer.pack(ipadx=50, ipady=20)
 
         # Logo
-        logo_ico = ctk.CTkFrame(outer, fg_color=C_ACCENT2, corner_radius=16,
+        logo_ico = ctk.CTkFrame(outer, fg_color="white", corner_radius=16,
                                   width=72, height=72)
         logo_ico.pack(pady=(28, 8))
         logo_ico.pack_propagate(False)
@@ -616,7 +615,7 @@ class LoginPage(ctk.CTkFrame):
             border_color=C_BORDER, font=("Consolas", 13),
             height=40, width=320)
         self.entry_user.pack(pady=(2, 10), padx=40)
-        self.entry_user.insert(0, "admin")
+        self.entry_user.insert(0, "kasir")
 
         # Input password
         ctk.CTkLabel(outer, text="Password", font=FONT_LABEL,
@@ -643,7 +642,7 @@ class LoginPage(ctk.CTkFrame):
         self.btn_login.pack(pady=(0, 4), padx=40)
 
         ctk.CTkLabel(outer,
-                     text="Default: admin / admin123  |  kasir / kasir123",
+                     text="Hubungi administrator untuk akses.",
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
 
         ctk.CTkFrame(outer, height=1, fg_color=C_BORDER).pack(
@@ -1004,26 +1003,26 @@ class LoginPage(ctk.CTkFrame):
             w.destroy()
         self._lp_username_verified = None
 
-        outer = ctk.CTkFrame(self._view_container, fg_color=C_PANEL,
-                              corner_radius=20, border_width=2,
-                              border_color=C_RED)
-        outer.pack()
+        self.lp_outer = ctk.CTkFrame(self._view_container, fg_color=C_PANEL,
+                                      corner_radius=20, border_width=2,
+                                      border_color=C_RED)
+        self.lp_outer.pack(fill="both", expand=True)
 
         # Header merah
-        hdr = ctk.CTkFrame(outer, fg_color=C_RED, corner_radius=0)
+        hdr = ctk.CTkFrame(self.lp_outer, fg_color=C_RED, corner_radius=0)
         hdr.pack(fill="x")
         ctk.CTkLabel(hdr, text="🔓  LUPA PASSWORD",
                      font=("Russo One", 14, "bold"),
                      text_color="white").pack(pady=14)
 
-        ctk.CTkLabel(outer,
+        ctk.CTkLabel(self.lp_outer,
                      text="Masukkan username dan email yang saat daftar.\n"
                           "Jika cocok, kamu bisa set password baru.",
                      font=FONT_SMALL, text_color=C_MUTED,
                      justify="center").pack(pady=(14, 4))
 
         # ── STEP 1: Verifikasi ────────────────────────────────────────────────
-        step1 = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=12)
+        step1 = ctk.CTkFrame(self.lp_outer, fg_color=C_CARD, corner_radius=12)
         step1.pack(fill="x", padx=28, pady=(6, 4))
 
         # Indikator step
@@ -1069,7 +1068,7 @@ class LoginPage(ctk.CTkFrame):
         self.btn_verif.pack(fill="x", padx=14, pady=(0, 14))
 
         # ── STEP 2: Set password baru (hidden, muncul setelah verifikasi) ─────
-        self.lp_step2 = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=12)
+        self.lp_step2 = ctk.CTkFrame(self.lp_outer, fg_color=C_CARD, corner_radius=12)
         # Belum di-pack — ditampilkan setelah verifikasi sukses
 
         step2_hdr = ctk.CTkFrame(self.lp_step2, fg_color=C_GREEN, corner_radius=8)
@@ -1105,7 +1104,7 @@ class LoginPage(ctk.CTkFrame):
         ).pack(fill="x", padx=14, pady=(0, 14))
 
         # Status
-        self.lp_lbl_status = ctk.CTkLabel(outer, text="",
+        self.lp_lbl_status = ctk.CTkLabel(self.lp_outer, text="",
                                             font=FONT_LABEL,
                                             text_color=C_RED,
                                             wraplength=380,
@@ -1113,7 +1112,7 @@ class LoginPage(ctk.CTkFrame):
         self.lp_lbl_status.pack(pady=(4, 6))
 
         # Kembali login
-        ctk.CTkButton(outer, text="← KEMBALI LOGIN", height=36,
+        ctk.CTkButton(self.lp_outer, text="← KEMBALI LOGIN", height=36,
                       fg_color="transparent", hover_color=C_BTN,
                       border_width=1, border_color=C_MUTED,
                       font=("Russo One", 9, "bold"), text_color=C_MUTED,
@@ -1255,28 +1254,27 @@ class LoginPage(ctk.CTkFrame):
         """Show verification code input form."""
         username = sanitize_text(self.lp_entry_username.get()).lower()
         
-        # Clear and redesign the view
-        for w in self.lp_entry_username.master.winfo_children():
-            if w not in [self.lp_lbl_status, self.lp_step2]:
-                w.destroy()
+        # Clear and redesign the view - destroy only step 1 form, keep status and step2
+        if hasattr(self, 'lp_step1_verif') and self.lp_step1_verif.winfo_exists():
+            self.lp_step1_verif.destroy()
 
         # Re-create step1 with verification code input
-        step1 = ctk.CTkFrame(self.lp_entry_username.master, fg_color=C_CARD, corner_radius=12)
-        step1.pack(fill="x", padx=28, pady=(6, 4))
+        self.lp_step1_verif = ctk.CTkFrame(self.lp_outer, fg_color=C_CARD, corner_radius=12)
+        self.lp_step1_verif.pack(fill="x", padx=28, pady=(6, 4), before=self.lp_lbl_status)
 
-        ctk.CTkLabel(step1, text="📧  Cek Email Anda",
+        ctk.CTkLabel(self.lp_step1_verif, text="📧  Cek Email Anda",
                      font=("Russo One", 12, "bold"),
                      text_color=C_GREEN).pack(pady=(12, 4))
 
-        ctk.CTkLabel(step1, text="Kami sudah mengirim kode verifikasi ke email Anda.\nMasukkan kode 6 digit di bawah.",
+        ctk.CTkLabel(self.lp_step1_verif, text="Kami sudah mengirim kode verifikasi ke email Anda.\nMasukkan kode 6 digit di bawah.",
                      font=FONT_SMALL, text_color=C_MUTED,
                      justify="center").pack(pady=(0, 10))
 
-        ctk.CTkLabel(step1, text="Kode Verifikasi (6 digit):", font=FONT_LABEL,
+        ctk.CTkLabel(self.lp_step1_verif, text="Kode Verifikasi (6 digit):", font=FONT_LABEL,
                      text_color=C_MUTED, anchor="w").pack(anchor="w", padx=14, pady=(0, 2))
         
         self.lp_entry_verif_code = ctk.CTkEntry(
-            step1, placeholder_text="mis. 123456",
+            self.lp_step1_verif, placeholder_text="mis. 123456",
             fg_color=C_BTN, text_color=C_ACCENT,
             border_color=C_BORDER,
             font=("Consolas", 16, "bold"), height=40)
@@ -1285,13 +1283,13 @@ class LoginPage(ctk.CTkFrame):
         self.lp_entry_verif_code.focus()
 
         ctk.CTkButton(
-            step1, text="✅  Verifikasi Kode", height=38,
+            self.lp_step1_verif, text="✅  Verifikasi Kode", height=38,
             fg_color=C_ACCENT2, hover_color="#4A20C8",
             font=("Russo One", 10, "bold"), text_color="white",
             command=self._verify_forgot_password_code).pack(fill="x", padx=14, pady=(0, 10))
 
         ctk.CTkButton(
-            step1, text="📧  Kirim Ulang Kode", height=36,
+            self.lp_step1_verif, text="📧  Kirim Ulang Kode", height=36,
             fg_color=C_BTN, hover_color=C_BORDER,
             font=("Russo One", 9, "bold"), text_color=C_MUTED,
             command=lambda: self._verifikasi_identitas()).pack(fill="x", padx=14, pady=(0, 14))
@@ -1344,12 +1342,12 @@ class LoginPage(ctk.CTkFrame):
             text=f"✅  Kode terverifikasi! Set password baru di bawah.",
             text_color=C_GREEN)
 
-        # Hide verification code input
-        for w in self.lp_entry_verif_code.master.winfo_children():
-            w.destroy()
-
+        # Hide verification code input step
+        if hasattr(self, 'lp_step1_verif'):
+            self.lp_step1_verif.pack_forget()
+        
         # Show password reset form
-        self.lp_step2.pack(fill="x", padx=28, pady=(0, 4))
+        self.lp_step2.pack(fill="x", padx=28, pady=(6, 4))
         self.lp_entry_pass1.focus()
 
     def _submit_reset_password(self):
@@ -1389,11 +1387,12 @@ class LoginPage(ctk.CTkFrame):
         ConfigManager.save(cfg)
         AuditLogger.log(
             action="password_reset",
-            username=uname,
+            username=self._lp_username_verified,
             status="success",
             details={"method": "forgot_password"}
         )
 
+        uname = self._lp_username_verified
         self._lp_username_verified = None
 
         # Kembali ke login dengan pesan sukses
@@ -2648,8 +2647,8 @@ class AutoRentApp(ctk.CTk):
         self._setup_wifi()
         self._setup_aktivasi()
         self._setup_profil()
-        # Admin-only users management tab
-        self._setup_users()
+        # Admin-only users management tab - DISABLED
+        # self._setup_users()
         self._show_tab("dashboard")
 
     def _build_sidebar(self):
@@ -2657,7 +2656,7 @@ class AutoRentApp(ctk.CTk):
         logo_f.pack(pady=(22, 6))
 
         # ── LOGO SIDEBAR: coba logo.png, fallback emoji ───────────────────────
-        ico_bg = ctk.CTkFrame(logo_f, fg_color=C_ACCENT2, corner_radius=14,
+        ico_bg = ctk.CTkFrame(logo_f, fg_color="white", corner_radius=14,
                                width=54, height=54)
         ico_bg.pack()
         ico_bg.pack_propagate(False)
@@ -2708,16 +2707,16 @@ class AutoRentApp(ctk.CTk):
             btn.pack(fill="x", padx=10, pady=3)
             self.nav_btns[key] = btn
 
-        # Tambahkan tab Users hanya untuk admin
-        if self.current_role == "admin":
-            btn = ctk.CTkButton(
-                self.sidebar, text=f"  👥  Users", anchor="w", height=44,
-                font=("Russo One", 10, "bold"),
-                fg_color="transparent", hover_color="#1E1E4A",
-                text_color=C_TEXT, corner_radius=8,
-                command=lambda k="users": self._show_tab(k))
-            btn.pack(fill="x", padx=10, pady=3)
-            self.nav_btns["users"] = btn
+        # Tambahkan tab Users hanya untuk admin - DISABLED
+        # if self.current_role == "admin":
+        #     btn = ctk.CTkButton(
+        #         self.sidebar, text=f"  👥  Users", anchor="w", height=44,
+        #         font=("Russo One", 10, "bold"),
+        #         fg_color="transparent", hover_color="#1E1E4A",
+        #         text_color=C_TEXT, corner_radius=8,
+        #         command=lambda k="users": self._show_tab(k))
+        #     btn.pack(fill="x", padx=10, pady=3)
+        #     self.nav_btns["users"] = btn
 
         sep2 = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
         sep2.pack(fill="x", padx=10, pady=(10, 4))
@@ -2750,8 +2749,12 @@ class AutoRentApp(ctk.CTk):
     def _on_check_update(self):
         """Triggered by UI button. Reads manifest URL from config and runs check in background."""
         manifest = ConfigManager.get('update_manifest_url')
-        if not manifest:
-            messagebox.showinfo("Cek Pembaruan", "URL manifest update belum dikonfigurasi. Set 'update_manifest_url' di config.")
+        if not manifest or manifest.strip() == "":
+            messagebox.showinfo("Cek Pembaruan", 
+                "Fitur pembaruan belum dikonfigurasi.\n\n"
+                "Untuk mengaktifkan:\n"
+                "1. Upload manifest.json ke GitHub release\n"
+                "2. Setel 'update_manifest_url' di config.json")
             return
         # Run in thread to avoid blocking UI
         threading.Thread(target=self._check_update_thread, args=(manifest,), daemon=True).start()
@@ -3949,7 +3952,7 @@ class AutoRentApp(ctk.CTk):
         # ── Logo profil: coba logo.png, fallback teks ─────────────────────────
         ctk_img_profil = load_ctk_image(size=(72, 72))
         if ctk_img_profil:
-            logo_container = ctk.CTkFrame(card, fg_color=C_ACCENT2, corner_radius=20,
+            logo_container = ctk.CTkFrame(card, fg_color="white", corner_radius=20,
                                            width=88, height=88)
             logo_container.pack(pady=(24, 8))
             logo_container.pack_propagate(False)
@@ -3983,18 +3986,9 @@ class AutoRentApp(ctk.CTk):
         if self.current_role == "admin":
             user_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)
             user_card.pack(fill="x", pady=(0, 16))
-            ctk.CTkLabel(user_card, text="👥  MANAJEMEN USER (Admin Only)",
-                         font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=20, pady=(16, 8))
-
-            users = ConfigManager.get("users", LoginPage.DEFAULT_USERS)
-            for uname, udata in users.items():
-                row_u = ctk.CTkFrame(user_card, fg_color=C_CARD, corner_radius=8)
-                row_u.pack(fill="x", padx=20, pady=4)
-                ctk.CTkLabel(row_u, text=f"👤 {uname}  [{udata.get('role','kasir')}]",
-                             font=FONT_BODY, text_color=C_TEXT).pack(side="left", padx=14, pady=10)
 
             ctk.CTkLabel(user_card, text="Ganti Password Akun Saya:",
-                         font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(8, 4))
+                         font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(16, 4))
             self.entry_new_pass = ctk.CTkEntry(user_card, placeholder_text="Password baru",
                                                 fg_color=C_BTN, text_color=C_ACCENT,
                                                 border_color=C_BORDER, font=FONT_BODY,

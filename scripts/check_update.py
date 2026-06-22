@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 import urllib.request
+import urllib.error
 import hashlib
 import base64
 import subprocess
@@ -23,8 +24,15 @@ from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 
 def _download_url(url: str, out_path: str):
-    with urllib.request.urlopen(url, timeout=30) as r:
-        data = r.read()
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"HTTP Error {e.code} saat mengakses {url}")
+    except urllib.error.URLError as e:
+        raise ValueError(f"Tidak dapat mengakses URL: {e.reason}")
+    except Exception as e:
+        raise ValueError(f"Gagal download dari {url}: {str(e)}")
     with open(out_path, 'wb') as f:
         f.write(data)
 
@@ -54,8 +62,17 @@ def _verify_signature(pubkey_path: str, message: bytes, signature_b64: str) -> b
 def check_for_update(manifest_url: str, public_key_path: str, current_version: str, app_exe_path: Optional[str] = None) -> str:
     """Return a human-readable message. May raise exceptions for fatal errors."""
     # 1) Fetch manifest
-    with urllib.request.urlopen(manifest_url, timeout=30) as r:
-        manifest = json.loads(r.read().decode('utf-8'))
+    try:
+        with urllib.request.urlopen(manifest_url, timeout=30) as r:
+            manifest = json.loads(r.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"Gagal membuka manifest (HTTP {e.code}): {manifest_url}\n\nPastikan URL tersedia dan file manifest.json ada di release.")
+    except urllib.error.URLError as e:
+        raise ValueError(f"Tidak dapat mengakses manifest: {e.reason}")
+    except json.JSONDecodeError:
+        raise ValueError(f"Manifest bukan JSON valid")
+    except Exception as e:
+        raise ValueError(f"Gagal fetch manifest: {str(e)}")
 
     version = manifest.get('version')
     asset_url = manifest.get('asset_url')
