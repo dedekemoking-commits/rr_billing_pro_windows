@@ -2668,7 +2668,7 @@ class AutoRentApp(ctk.CTk):
         self._build_sidebar()
 
         self.frames = {}
-        for name in ["dashboard", "harga", "riwayat", "wifi", "aktivasi", "profil", "cek_pembaruan", "users"]:
+        for name in ["dashboard", "harga", "riwayat", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
             f = ctk.CTkFrame(self.content, fg_color=C_BG, corner_radius=0)
             self.frames[name] = f
 
@@ -2678,7 +2678,7 @@ class AutoRentApp(ctk.CTk):
         self._setup_wifi()
         self._setup_aktivasi()
         self._setup_profil()
-        self._setup_cek_pembaruan()
+        self._setup_log_aplikasi()
         # Admin-only users management tab - DISABLED
         # self._setup_users()
         self._show_tab("dashboard")
@@ -2727,7 +2727,7 @@ class AutoRentApp(ctk.CTk):
             ("📡", "Koneksi WiFi",    "wifi"),
             ("🔑", "Aktivasi",        "aktivasi"),
             ("👤", "Profil",          "profil"),
-            ("⬇️", "Cek Pembaruan",   "cek_pembaruan"),
+            ("📋", "Log Aplikasi",    "log_aplikasi"),
         ]
         self.nav_btns = {}
         for ico, label, key in nav_items:
@@ -4196,10 +4196,10 @@ class AutoRentApp(ctk.CTk):
             messagebox.showerror("✖ Error", "User tidak ditemukan di config.")
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  TAB: CEK PEMBARUAN — Auto-update system tanpa perlu install EXE
+    #  TAB: LOG APLIKASI — Viewer lengkap untuk audit log
     # ══════════════════════════════════════════════════════════════════════════
-    def _setup_cek_pembaruan(self):
-        f = self.frames.get("cek_pembaruan")
+    def _setup_log_aplikasi(self):
+        f = self.frames.get("log_aplikasi")
         if not f:
             return
         for w in f.winfo_children():
@@ -4208,280 +4208,120 @@ class AutoRentApp(ctk.CTk):
         # Header
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="⬇️  CEK PEMBARUAN APLIKASI", font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
+        ctk.CTkLabel(hdr, text="📋  LOG APLIKASI LENGKAP", 
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
         
-        # Main content
+        # Filter bar
+        filter_frame = ctk.CTkFrame(f, fg_color=C_PANEL, height=44)
+        filter_frame.pack(fill="x", padx=0, pady=0)
+        filter_frame.pack_propagate(False)
+        
+        ctk.CTkLabel(filter_frame, text="Filter:", font=FONT_LABEL, 
+                     text_color=C_MUTED).pack(side="left", padx=16)
+        
+        self.log_filter_var = ctk.StringVar(value="all")
+        for val, lbl in [("all", "Semua"), ("login", "Login"), ("transaction", "Transaksi"), 
+                         ("rental", "Rental"), ("update", "Update"), ("error", "Error")]:
+            ctk.CTkRadioButton(filter_frame, text=lbl, variable=self.log_filter_var, 
+                              value=val, font=FONT_LABEL, text_color=C_TEXT,
+                              command=self._refresh_log_view).pack(side="left", padx=8)
+        
+        # Main log viewer
         content = ctk.CTkScrollableFrame(f, fg_color=C_BG)
-        content.pack(fill="both", expand=True, padx=16, pady=12)
+        content.pack(fill="both", expand=True, padx=6, pady=6)
         
-        # Status card
-        status_card = ctk.CTkFrame(content, fg_color=C_PANEL, corner_radius=14)
-        status_card.pack(fill="x", pady=(0, 16))
+        # Log textbox
+        self.log_textbox = ctk.CTkTextbox(content, fg_color=C_BTN, text_color=C_TEXT,
+                                          border_color=C_BORDER, border_width=1,
+                                          font=("Courier New", 9))
+        self.log_textbox.pack(fill="both", expand=True)
+        self.log_textbox.configure(state="disabled")
         
-        ctk.CTkLabel(status_card, text="📌  STATUS APLIKASI",
-                    font=("Russo One", 12, "bold"), text_color=C_ACCENT).pack(anchor="w", padx=20, pady=(16, 12))
-        
-        # Versi info
-        info_rows = [
-            ("Versi Saat Ini", APP_VERSION),
-            ("Sistem", "Windows" if os.name == 'nt' else "Linux"),
-            ("Lokasi App", os.path.dirname(os.path.abspath(__file__))[:50] + "..."),
-        ]
-        
-        for label, val in info_rows:
-            row = ctk.CTkFrame(status_card, fg_color="transparent")
-            row.pack(fill="x", padx=20, pady=4)
-            ctk.CTkLabel(row, text=f"{label}:", font=FONT_LABEL, text_color=C_MUTED, width=150, anchor="w").pack(side="left")
-            ctk.CTkLabel(row, text=val, font=FONT_BODY, text_color=C_TEXT).pack(side="left")
-        
-        ctk.CTkLabel(status_card, text="", font=FONT_SMALL).pack(pady=4)
-        
-        # Update checker card
-        update_card = ctk.CTkFrame(content, fg_color=C_CARD, corner_radius=14)
-        update_card.pack(fill="x", pady=(0, 16))
-        
-        ctk.CTkLabel(update_card, text="🔍  CEK UPDATE OTOMATIS",
-                    font=("Russo One", 12, "bold"), text_color=C_ACCENT2).pack(anchor="w", padx=20, pady=(16, 12))
-        
-        # Status label
-        self.lbl_update_status = ctk.CTkLabel(update_card, text="Klik tombol untuk cek pembaruan terbaru...",
-                                             font=FONT_BODY, text_color=C_MUTED, wraplength=400, justify="left")
-        self.lbl_update_status.pack(anchor="w", padx=20, pady=(0, 12))
-        
-        # Buttons
-        btn_frame = ctk.CTkFrame(update_card, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=20, pady=(0, 16))
-        
-        ctk.CTkButton(btn_frame, text="🔄  Cek Pembaruan Sekarang", width=180, height=40,
-                     fg_color=C_ACCENT2, font=FONT_SUB, text_color="white",
-                     command=self._check_and_update_flow).pack(side="left", padx=(0, 8))
-        
-        self.btn_install = ctk.CTkButton(btn_frame, text="✅  Pasang Pembaruan", width=160, height=40,
-                                        fg_color=C_GREEN, font=FONT_SUB, text_color="black",
-                                        state="disabled",
-                                        command=self._install_and_restart)
-        self.btn_install.pack(side="left", padx=(0, 8))
-        
-        ctk.CTkButton(btn_frame, text="🔄  Restart Aplikasi", width=140, height=40,
-                     fg_color=C_BTN, border_width=1, border_color=C_ACCENT,
-                     font=FONT_SUB, text_color=C_ACCENT,
-                     command=self._restart_app).pack(side="left")
-        
-        # Changelog card
-        changelog_card = ctk.CTkFrame(content, fg_color=C_PANEL, corner_radius=14)
-        changelog_card.pack(fill="both", expand=True, pady=(0, 16))
-        
-        ctk.CTkLabel(changelog_card, text="📋  CHANGELOG / RIWAYAT UPDATE",
-                    font=("Russo One", 12, "bold"), text_color=C_ACCENT).pack(anchor="w", padx=20, pady=(16, 8))
-        
-        # Changelog/update history
-        self.changelog_box = ctk.CTkTextbox(changelog_card, fg_color=C_BTN, text_color=C_TEXT,
-                                           border_color=C_BORDER, border_width=1, height=200)
-        self.changelog_box.pack(fill="both", expand=True, padx=20, pady=(0, 16))
-        self.changelog_box.configure(state="disabled")
-        
-        # Info card
-        info_card = ctk.CTkFrame(content, fg_color=C_PANEL, corner_radius=14)
-        info_card.pack(fill="x")
-        
-        info_text = """ℹ️  INFORMASI PEMBARUAN
-
-✓ Aplikasi akan otomatis download versi terbaru
-✓ File-file lama akan di-backup otomatis
-✓ Sesudah update, aplikasi akan restart otomatis
-✓ Tidak perlu install EXE baru, cukup klik "Pasang Pembaruan"
-✓ Data rental, user, dan konfigurasi tetap aman
-
-⚠️  Tips:
-• Pastikan koneksi internet stabil saat melakukan update
-• Jangan close aplikasi saat update sedang berjalan
-• Update biasanya membutuhkan waktu 30-60 detik"""
-        
-        ctk.CTkLabel(info_card, text=info_text, font=FONT_BODY, text_color=C_MUTED,
-                   justify="left", wraplength=450).pack(anchor="w", padx=20, pady=16)
-        
-        # Load changelog from update log
-        self._load_update_history()
-        
-        # Store update info for later use
-        self._pending_update = None
+        # Load logs
+        self._refresh_log_view()
     
-    def _check_and_update_flow(self):
-        """Check for updates dan mulai download jika ada."""
-        self.lbl_update_status.configure(text="⏳  Sedang cek update dari GitHub...", text_color=C_YELLOW)
-        self.lbl_update_status.update()
+    def _refresh_log_view(self):
+        """Refresh dan tampilkan logs berdasarkan filter."""
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.delete("1.0", "end")
         
-        threading.Thread(target=self._check_update_bg, daemon=True).start()
-    
-    def _check_update_bg(self):
-        """Background thread untuk cek update."""
         try:
-            from scripts.auto_updater import AutoUpdater
+            # Baca audit log
+            audit_file = "rr_billing_audit.jsonl"
+            if not os.path.exists(audit_file):
+                self.log_textbox.insert("end", "❌ File audit log tidak ditemukan.\n")
+                self.log_textbox.configure(state="disabled")
+                return
             
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            updater = AutoUpdater(app_dir, version=APP_VERSION)
+            logs = []
+            filter_type = self.log_filter_var.get()
             
-            # Check updates
-            result = updater.check_for_updates()
+            with open(audit_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        # Filter berdasarkan action
+                        if filter_type == "all":
+                            logs.append(entry)
+                        elif filter_type == "login" and "login" in entry.get("action", ""):
+                            logs.append(entry)
+                        elif filter_type == "transaction" and "transaksi" in entry.get("action", ""):
+                            logs.append(entry)
+                        elif filter_type == "rental" and "rental" in entry.get("action", ""):
+                            logs.append(entry)
+                        elif filter_type == "update" and "update" in entry.get("action", ""):
+                            logs.append(entry)
+                        elif filter_type == "error" and entry.get("status") == "failed":
+                            logs.append(entry)
+                    except json.JSONDecodeError:
+                        continue
             
-            def update_ui():
-               if result['update_available']:
-                   self.lbl_update_status.configure(
-                       text=f"✅  Update tersedia: {result['latest_version']}\n\n📝  Changelog:\n{result['changelog'][:300]}...",
-                       text_color=C_GREEN)
-                   self.btn_install.configure(state="normal")
-                    
-                   # Store updater & download URL
-                   self._pending_update = {
-                       'updater': updater,
-                       'url': result['download_url'],
-                       'version': result['latest_version']
-                   }
-                    
-                   # Auto-start download
-                   self._download_update()
-               else:
-                   self.lbl_update_status.configure(
-                       text=f"✅  {result['message']}",
-                       text_color=C_GREEN)
-                   self.btn_install.configure(state="disabled")
+            # Sort by timestamp (terbaru di atas)
+            logs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
             
-            self.after(0, update_ui)
-        
-        except Exception as e:
-            def error_ui():
-               self.lbl_update_status.configure(
-                   text=f"✖  Error cek update: {str(e)[:200]}",
-                   text_color=C_RED)
-            self.after(0, error_ui)
-    
-    def _download_update(self):
-        """Download update file."""
-        if not self._pending_update:
-            return
-        
-        self.lbl_update_status.configure(text="⬇️  Mengunduh pembaruan (0%)...", text_color=C_YELLOW)
-        
-        def progress_cb(percent):
-            self.after(0, lambda: self.lbl_update_status.configure(
-               text=f"⬇️  Mengunduh pembaruan ({percent}%)..."))
-        
-        def download_thread():
-            updater = self._pending_update['updater']
-            url = self._pending_update['url']
-            
-            success, result = updater.download_update(url, progress_callback=progress_cb)
-            
-            def update_ui():
-               if success:
-                   self.lbl_update_status.configure(
-                       text=f"✅  Download selesai! File siap dipasang.\n\nKlik 'Pasang Pembaruan' untuk melanjutkan.",
-                       text_color=C_GREEN)
-                   self._pending_update['zip_path'] = result
-                   self.btn_install.configure(state="normal")
-               else:
-                   self.lbl_update_status.configure(
-                       text=f"✖  Download gagal: {result}",
-                       text_color=C_RED)
-                   self.btn_install.configure(state="disabled")
-            
-            self.after(0, update_ui)
-        
-        threading.Thread(target=download_thread, daemon=True).start()
-    
-    def _install_and_restart(self):
-        """Install update dan restart aplikasi."""
-        if not self._pending_update or 'zip_path' not in self._pending_update:
-            messagebox.showwarning("⚠  Update", "Tidak ada file update untuk dipasang.")
-            return
-        
-        if not messagebox.askyesno("Pasang Update", 
-            "Update akan dipasang dan aplikasi akan restart otomatis.\n\n"
-            "Pastikan tidak ada transaksi yang sedang berjalan.\n\n"
-            "Lanjutkan?"):
-            return
-        
-        self.lbl_update_status.configure(text="📦  Sedang memasang pembaruan...", text_color=C_YELLOW)
-        self.btn_install.configure(state="disabled")
-        
-        def install_thread():
-            try:
-               updater = self._pending_update['updater']
-               zip_path = self._pending_update['zip_path']
-                
-               def progress_cb(percent, msg):
-                   self.after(0, lambda: self.lbl_update_status.configure(
-                       text=f"📦  {msg} ({percent}%)"))
-                
-               success, msg = updater.install_update(zip_path, progress_callback=progress_cb)
-                
-               def finish():
-                   if success:
-                       self.lbl_update_status.configure(
-                           text=f"✅  {msg}\n\nAplikasi akan restart dalam 3 detik...",
-                           text_color=C_GREEN)
-                       messagebox.showinfo("Update Sukses", msg)
-                        
-                       # Restart after 3 seconds
-                       self.after(3000, updater.restart_app)
-                       self.after(4000, self.quit)  # Close current app
-                   else:
-                       self.lbl_update_status.configure(
-                           text=f"✖  Error: {msg}",
-                           text_color=C_RED)
-                       self.btn_install.configure(state="normal")
-                       messagebox.showerror("Update Error", msg)
-                
-               self.after(0, finish)
-            
-            except Exception as e:
-               def error():
-                   self.lbl_update_status.configure(text=f"✖  Error: {str(e)}", text_color=C_RED)
-                   self.btn_install.configure(state="normal")
-                   messagebox.showerror("Error", str(e))
-               self.after(0, error)
-        
-        threading.Thread(target=install_thread, daemon=True).start()
-    
-    def _restart_app(self):
-        """Restart aplikasi."""
-        if messagebox.askyesno("Restart", "Restart aplikasi? Semua yang belum disimpan akan hilang."):
-            try:
-               from scripts.auto_updater import AutoUpdater
-               app_dir = os.path.dirname(os.path.abspath(__file__))
-               updater = AutoUpdater(app_dir)
-               updater.restart_app()
-               self.after(1000, self.quit)
-            except Exception as e:
-               messagebox.showerror("Error", f"Gagal restart: {e}")
-    
-    def _load_update_history(self):
-        """Load and display update history."""
-        try:
-            from scripts.auto_updater import AutoUpdater
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            updater = AutoUpdater(app_dir)
-            
-            history = updater.get_update_history(limit=30)
-            if history:
-               self.changelog_box.configure(state="normal")
-               self.changelog_box.delete("1.0", "end")
-                
-               # Display history
-               for line in reversed(history):
-                   self.changelog_box.insert("end", line)
-                
-               self.changelog_box.configure(state="disabled")
+            # Display logs
+            if not logs:
+                self.log_textbox.insert("end", f"✓ Tidak ada log untuk filter '{filter_type}'.\n")
             else:
-               self.changelog_box.configure(state="normal")
-               self.changelog_box.delete("1.0", "end")
-               self.changelog_box.insert("end", "[Belum ada riwayat update]\n\nUpdate log akan muncul di sini setelah setiap pembaruan.")
-               self.changelog_box.configure(state="disabled")
+                self.log_textbox.insert("end", f"📊 Total: {len(logs)} entri\n" + "="*80 + "\n\n")
+                
+                for entry in logs:
+                    timestamp = entry.get("timestamp", "N/A")
+                    action = entry.get("action", "unknown")
+                    username = entry.get("username", "system")
+                    status = entry.get("status", "unknown")
+                    details = entry.get("details", {})
+                    
+                    # Color based on status
+                    if status == "success":
+                        status_icon = "✅"
+                        status_color = C_GREEN
+                    elif status == "failed":
+                        status_icon = "❌"
+                        status_color = C_RED
+                    else:
+                        status_icon = "⚠️ "
+                        status_color = C_YELLOW
+                    
+                    log_line = f"{status_icon} [{timestamp}] {action.upper()}\n"
+                    log_line += f"   User: {username} | Status: {status}\n"
+                    
+                    if details:
+                        log_line += f"   Details: {json.dumps(details, ensure_ascii=False)[:120]}\n"
+                    
+                    log_line += "\n"
+                    
+                    self.log_textbox.insert("end", log_line)
+            
+            # Footer
+            self.log_textbox.insert("end", "\n" + "="*80 + "\n")
+            self.log_textbox.insert("end", f"✓ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            
         except Exception as e:
-            self.changelog_box.configure(state="normal")
-            self.changelog_box.delete("1.0", "end")
-            self.changelog_box.insert("end", f"Error loading history: {e}")
-            self.changelog_box.configure(state="disabled")
+            self.log_textbox.insert("end", f"❌ Error loading logs: {str(e)}\n")
+        
+        finally:
+            self.log_textbox.configure(state="disabled")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB: USERS (Admin-only) — CRUD untuk akun kasir/admin
