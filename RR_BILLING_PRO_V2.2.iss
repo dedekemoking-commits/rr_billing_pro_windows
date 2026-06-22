@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "RR BILLING PRO"
-#define MyAppVersion "2.2"
+#define MyAppVersion "2.2.1"
 #define MyAppPublisher "RR CCTV, Inc."
 #define MyAppURL "https://www.rrcctv.online"
 #define MyAppExeName "main.exe"
@@ -38,7 +38,7 @@ ChangesAssociations=yes
 DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
-OutputBaseFilename=mysetup
+OutputBaseFilename=RR_BILLING_PRO_v2.2.1_Setup
 SolidCompression=yes
 WizardStyle=modern dynamic
 
