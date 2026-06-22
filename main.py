@@ -1257,7 +1257,7 @@ class LoginPage(ctk.CTkFrame):
         
         # Clear and redesign the view
         for w in self.lp_entry_username.master.winfo_children():
-            if w not in [self.lp_lbl_status]:
+            if w not in [self.lp_lbl_status, self.lp_step2]:
                 w.destroy()
 
         # Re-create step1 with verification code input

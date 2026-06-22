@@ -267,5 +267,12 @@
     }
   },
   "update_manifest_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.0/manifest.json",
-  "update_pubkey_path": "update_pubkey.pem"
+  "update_pubkey_path": "update_pubkey.pem",
+  "pending_forgot_password_verifications": {
+    "rrgaming": {
+      "code": "627103",
+      "expires_at": "2026-06-22T17:09:54.516918",
+      "email": "dedekemoking@gmail.com"
+    }
+  }
 }

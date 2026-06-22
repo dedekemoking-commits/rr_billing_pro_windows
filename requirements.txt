@@ -1,0 +1,7 @@
+customtkinter
+openpyxl
+watchdog
+pywin32
+pytest
+bcrypt
+pillow

@@ -1,0 +1,185 @@
+{
+  "paket_main": {
+    "1 Jam": {
+      "harga": 5000,
+      "menit": 60
+    },
+    "2 Jam": {
+      "harga": 18000,
+      "menit": 120
+    },
+    "3 Jam": {
+      "harga": 25000,
+      "menit": 180
+    },
+    "5 Jam": {
+      "harga": 35000,
+      "menit": 300
+    },
+    "Overnight": {
+      "harga": 50000,
+      "menit": 540
+    },
+    "Main Bebas": {
+      "harga": 0,
+      "menit": 0
+    },
+    "Reguler": {
+      "harga": 12000,
+      "menit": 60
+    }
+  },
+  "menu_makanan": {
+    "Indomie Goreng": 8000,
+    "Indomie Kuah": 8000,
+    "Kentang Goreng": 12000,
+    "Burger": 20000,
+    "Roti Bakar": 10000,
+    "Nasi Goreng": 15000,
+    "Sosis Bakar": 7000
+  },
+  "menu_minuman": {
+    "Air Mineral": 3000,
+    "Es Teh Manis": 5000,
+    "Es Jeruk": 6000,
+    "Kopi Hitam": 6000,
+    "Susu Coklat": 8000,
+    "Jus Mangga": 10000,
+    "Soda Gembira": 10000,
+    "Pocari Sweat": 8000
+  },
+  "grup_tarif": {
+    "Reguler": {
+      "1 Jam": {
+        "harga": 5000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "PS3": {
+      "1 Jam": {
+        "harga": 5000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "PS4": {
+      "1 Jam": {
+        "harga": 10000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    }
+  },
+  "users": {
+    "admin": {
+      "password": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+      "role": "admin"
+    },
+    "kasir": {
+      "password": "f02b7c1e519e4fa436147f7e1399974f9510aa9c8e0cb8be29151eb540f9d214",
+      "role": "kasir"
+    },
+    "rrcctv": {
+      "password": "5db80d232bc072d86dd3adfa2a677d0cda2b92338eecd75e1b0e6bb1894ea70f",
+      "role": "admin"
+    },
+    "rrgaming": {
+      "password": "5db80d232bc072d86dd3adfa2a677d0cda2b92338eecd75e1b0e6bb1894ea70f",
+      "role": "admin"
+    }
+  },
+  "profil_rental": {
+    "rrcctv": {
+      "nama_pemilik": "rahmadani",
+      "nama_rental": "RR GAMING",
+      "email": "dedekemoking@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "napar",
+      "tanggal_daftar": "2026-06-21 03:43:04"
+    },
+    "rrgaming": {
+      "nama_pemilik": "dedek",
+      "nama_rental": "RR GAMING",
+      "email": "dedekemoking@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "napar",
+      "tanggal_daftar": "2026-06-21 23:30:29"
+    }
+  },
+  "trial_users": {
+    "testuser_pc_swap": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    }
+  }
+}
