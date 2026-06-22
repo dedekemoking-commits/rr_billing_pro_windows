@@ -166,12 +166,16 @@
       "role": "admin"
     },
     "rrgaming1": {
-      "password": "bcrypt$$2b$12$7h/6J2fujJ9YIHfcnQfbmepZtf2LqWopLB6XTxvCUWa/3mA3muI9G",
+      "password": "bcrypt$$2b$12$7LSL4Y/rWgsjscb.vzvX7.HI.eKzA1nW61o0mZ.QnIGIW7kFJfLaW",
       "role": "admin"
     },
     "rrgaming2": {
       "password": "bcrypt$$2b$12$l5r0anm560qGds.52m.fTel6M.FAidbJTCXKVL9UWI6LKMTj.9jdW",
       "role": "admin"
+    },
+    "kasir1": {
+      "password": "bcrypt$$2b$12$G00WEwgql/CoUf2G6hegcuTE4B3kYADAFLxAJYUZ26LUDAbmYaW82",
+      "role": "kasir"
     }
   },
   "profil_rental": {
@@ -228,6 +232,10 @@
     "rrgaming1": {
       "trial_start": "2026-06-22",
       "trial_days": 3
+    },
+    "kasir1": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
     }
   },
   "pending_email_verifications": {
@@ -266,7 +274,7 @@
       }
     }
   },
-  "update_manifest_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.0/manifest.json",
+  "update_manifest_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.1/manifest.json",
   "update_pubkey_path": "update_pubkey.pem",
   "pending_forgot_password_verifications": {
     "rrgaming": {

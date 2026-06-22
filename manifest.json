@@ -1,6 +1,6 @@
 {
-  "version": "2.2.0",
-  "asset_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.0/main.exe",
-  "sha256": "8e37e3e2544bd0694c29b403e000158c8b6e7b4d27fc7323df91416e74930e11",
-  "sig": "CMpP5s9Hn1fdCqAoTto8Sjq8wLX60RMzbHvQYOu4o9SorzEToKtkNd9u0K3d33VlM1Gotcq98tF3VJdbBLoY/zscJ6WrCPDXfd2/65s+CTVYZSw5oP0d0HeNqhEcflBU6WrkxB4DZM6Cs+bDIy9fsCUVY0q03r9IRVwiV4CZRJx4jvNjfYUQpHrE9TcDypbglgQWpmAORTfi94xEDVvHPuBADRz5PPifyxNmYtC/gIgcGIP1kVGKrk3XE1+86D9/onwnHNFyf4TnGlLZ3ryMU3T4QDkZ/473H1z6P4T+2Xs4H4WlqamTdYy/YyiDT7TZ+sgst+6+ZveaUFGYmIvfWg=="
+  "version": "2.2.1",
+  "asset_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.1/main.exe",
+  "sha256": "6EAD87CF71F4E679CAF2D0DAFA4A4555B5629148270ADB1C82EC50D8D8FB4C86",
+  "sig": "placeholder_signature_will_be_updated_after_build"
 }
