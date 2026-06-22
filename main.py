@@ -648,6 +648,22 @@ class LoginPage(ctk.CTkFrame):
         ctk.CTkFrame(outer, height=1, fg_color=C_BORDER).pack(
             fill="x", padx=40, pady=(4, 10))
 
+    def _check_update_at_login(self):
+        """Check for updates at login page."""
+        try:
+            cfg = ConfigManager.load()
+            manifest_url = cfg.get("update_manifest_url", "")
+            pubkey_path = cfg.get("update_pubkey_path", "update_pubkey.pem")
+            
+            if not manifest_url:
+                messagebox.showwarning("⚠ Update", "URL manifest tidak dikonfigurasi.")
+                return
+            
+            msg = check_update.check_for_update(manifest_url, pubkey_path, APP_VERSION)
+            messagebox.showinfo("ℹ Update Info", msg)
+        except Exception as e:
+            messagebox.showerror("✖ Cek Update Error", f"Error: {str(e)}")
+
         # Tombol Daftar
         ctk.CTkLabel(outer, text="Rental baru? Belum punya akun?",
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
@@ -664,7 +680,20 @@ class LoginPage(ctk.CTkFrame):
             fg_color="transparent", hover_color=C_BTN,
             border_width=1, border_color=C_RED,
             font=("Russo One", 9, "bold"), text_color=C_RED,
-            command=self._show_lupa_password_view).pack(pady=(0, 22), padx=40)
+            command=self._show_lupa_password_view).pack(pady=(0, 16), padx=40)
+
+        # Version dan Cek Update di login page
+        version_frame = ctk.CTkFrame(outer, fg_color="transparent")
+        version_frame.pack(fill="x", padx=40, pady=(0, 6))
+        
+        ctk.CTkLabel(version_frame, text=f"v{APP_VERSION}",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(side="left")
+        
+        ctk.CTkButton(version_frame, text="🔄 Cek Update", width=140, height=28,
+                      fg_color="transparent", hover_color=C_BTN,
+                      border_width=1, border_color=C_ACCENT,
+                      font=("Russo One", 8, "bold"), text_color=C_ACCENT,
+                      command=self._check_update_at_login).pack(side="right")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  VIEW 2 — DAFTAR RENTAL BARU
