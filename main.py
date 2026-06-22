@@ -648,22 +648,6 @@ class LoginPage(ctk.CTkFrame):
         ctk.CTkFrame(outer, height=1, fg_color=C_BORDER).pack(
             fill="x", padx=40, pady=(4, 10))
 
-    def _check_update_at_login(self):
-        """Check for updates at login page."""
-        try:
-            cfg = ConfigManager.load()
-            manifest_url = cfg.get("update_manifest_url", "")
-            pubkey_path = cfg.get("update_pubkey_path", "update_pubkey.pem")
-            
-            if not manifest_url:
-                messagebox.showwarning("⚠ Update", "URL manifest tidak dikonfigurasi.")
-                return
-            
-            msg = check_update.check_for_update(manifest_url, pubkey_path, APP_VERSION)
-            messagebox.showinfo("ℹ Update Info", msg)
-        except Exception as e:
-            messagebox.showerror("✖ Cek Update Error", f"Error: {str(e)}")
-
         # Tombol Daftar
         ctk.CTkLabel(outer, text="Rental baru? Belum punya akun?",
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
@@ -694,6 +678,22 @@ class LoginPage(ctk.CTkFrame):
                       border_width=1, border_color=C_ACCENT,
                       font=("Russo One", 8, "bold"), text_color=C_ACCENT,
                       command=self._check_update_at_login).pack(side="right")
+
+    def _check_update_at_login(self):
+        """Check for updates at login page."""
+        try:
+            cfg = ConfigManager.load()
+            manifest_url = cfg.get("update_manifest_url", "")
+            pubkey_path = cfg.get("update_pubkey_path", "update_pubkey.pem")
+            
+            if not manifest_url:
+                messagebox.showwarning("⚠ Update", "URL manifest tidak dikonfigurasi.")
+                return
+            
+            msg = check_update.check_for_update(manifest_url, pubkey_path, APP_VERSION)
+            messagebox.showinfo("ℹ Update Info", msg)
+        except Exception as e:
+            messagebox.showerror("✖ Cek Update Error", f"Error: {str(e)}")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  VIEW 2 — DAFTAR RENTAL BARU
