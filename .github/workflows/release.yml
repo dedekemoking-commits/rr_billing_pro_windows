@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release (e.g. v2.1.1)'
+        required: true
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build_and_release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller cryptography
+
+      - name: Build executable (PyInstaller)
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name RRBilling main.py
+
+      - name: Compute sha256
+        id: compute
+        run: |
+          python - <<'PY'
+import hashlib, os
+p = os.path.join('dist','RRBilling.exe')
+if not os.path.exists(p):
+    raise SystemExit('Built exe not found: '+p)
+h = hashlib.sha256()
+with open(p,'rb') as f:
+    while True:
+        b=f.read(8192)
+        if not b: break
+        h.update(b)
+print('sha256='+h.hexdigest())
+# set output
+with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+    out.write(f"sha256={h.hexdigest()}\n")
+PY
+
+      - name: Generate manifest and sign
+       id: gen_manifest
+       env:
+         SIGNING_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+       run: |
+         VERSION="${{ github.event.inputs.version || github.ref_name }}"
+         ASSET_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}/RRBilling.exe"
+         python scripts/generate_manifest_and_sign.py --version "$VERSION" --asset_url "$ASSET_URL" --sha256 "${{ steps.compute.outputs.sha256 }}" --signing_key "${SIGNING_KEY}" --out manifest.json
+
+      - name: Create GitHub Release
+       uses: softprops/action-gh-release@v1
+       with:
+         files: |
+           dist/RRBilling.exe
+           manifest.json
+         tag_name: ${{ github.event.inputs.version || github.ref_name }}
+         name: ${{ github.event.inputs.version || github.ref_name }}
+         body: "Automated release - RR Billing PRO"
+         draft: false
+         prerelease: false
+       env:
+         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
