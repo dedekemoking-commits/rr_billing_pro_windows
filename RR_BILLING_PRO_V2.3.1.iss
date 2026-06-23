@@ -61,6 +61,9 @@ Source: "C:\BillingPSkuDesktop\inno_build\app\update_pubkey.pem"; DestDir: "{app
 ; ── Git Repository (for Git update feature) ──────────────────────────────────
 Source: "C:\BillingPSkuDesktop\inno_build\app\.git\*"; DestDir: "{app}\.git"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; ── Python Scripts (for git update & other utilities) ──────────────────────────
+Source: "C:\BillingPSkuDesktop\inno_build\app\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Registry]
 ; ── File Associations ──────────────────────────────────────────────────────
 Root: HKCR; Subkey: ".rr"; ValueType: string; ValueName: ""; ValueData: "RRBillingFile"; Flags: uninsdeletevalue
