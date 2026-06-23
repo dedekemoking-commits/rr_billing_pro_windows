@@ -2991,9 +2991,6 @@ class AutoRentApp(ctk.CTk):
         # Admin-only users management tab - DISABLED
         # self._setup_users()
         self._show_tab("dashboard")
-        
-        # ── DEMO TV untuk testing (bisa dihapus nanti) ─────────────────────────────
-        self._tambah_tv("192.168.1.100", "📺 DEMO TV", 5555, "Reguler")
 
     def _build_sidebar(self):
         logo_f = ctk.CTkFrame(self.sidebar, fg_color="transparent")
