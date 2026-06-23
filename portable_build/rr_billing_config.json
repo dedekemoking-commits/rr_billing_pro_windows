@@ -1,0 +1,286 @@
+{
+  "paket_main": {
+    "1 Jam": {
+      "harga": 5000,
+      "menit": 60
+    },
+    "2 Jam": {
+      "harga": 18000,
+      "menit": 120
+    },
+    "3 Jam": {
+      "harga": 25000,
+      "menit": 180
+    },
+    "5 Jam": {
+      "harga": 35000,
+      "menit": 300
+    },
+    "Overnight": {
+      "harga": 50000,
+      "menit": 540
+    },
+    "Main Bebas": {
+      "harga": 0,
+      "menit": 0
+    },
+    "Reguler": {
+      "harga": 12000,
+      "menit": 60
+    }
+  },
+  "email_settings": {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "smtp_username": "dedekemoking@gmail.com",
+    "smtp_password": "sdaq umwh mmqp jxtz",
+    "from_address": "dedekemoking@gmail.com",
+    "use_tls": true
+  },
+  "menu_makanan": {
+    "Indomie Goreng": 8000,
+    "Indomie Kuah": 8000,
+    "Kentang Goreng": 12000,
+    "Burger": 20000,
+    "Roti Bakar": 10000,
+    "Nasi Goreng": 15000,
+    "Sosis Bakar": 7000
+  },
+  "menu_minuman": {
+    "Air Mineral": 3000,
+    "Es Teh Manis": 5000,
+    "Es Jeruk": 6000,
+    "Kopi Hitam": 6000,
+    "Susu Coklat": 8000,
+    "Jus Mangga": 10000,
+    "Soda Gembira": 10000,
+    "Pocari Sweat": 8000
+  },
+  "grup_tarif": {
+    "Reguler": {
+      "1 Jam": {
+        "harga": 5000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "PS3": {
+      "1 Jam": {
+        "harga": 5000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "PS4": {
+      "1 Jam": {
+        "harga": 10000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    }
+  },
+  "users": {
+    "kasir": {
+      "password": "f02b7c1e519e4fa436147f7e1399974f9510aa9c8e0cb8be29151eb540f9d214",
+      "role": "kasir"
+    },
+    "rrcctv": {
+      "password": "5db80d232bc072d86dd3adfa2a677d0cda2b92338eecd75e1b0e6bb1894ea70f",
+      "role": "admin"
+    },
+    "rrgaming": {
+      "password": "bcrypt$$2b$12$p9VGzJ4fvYfki/nrAaY.2OM5cUp2pFp9wd0sz0APcfoK3EjsVL2hm",
+      "role": "admin"
+    },
+    "rrgaming1": {
+      "password": "bcrypt$$2b$12$7LSL4Y/rWgsjscb.vzvX7.HI.eKzA1nW61o0mZ.QnIGIW7kFJfLaW",
+      "role": "admin"
+    },
+    "rrgaming2": {
+      "password": "bcrypt$$2b$12$l5r0anm560qGds.52m.fTel6M.FAidbJTCXKVL9UWI6LKMTj.9jdW",
+      "role": "admin"
+    },
+    "kasir1": {
+      "password": "bcrypt$$2b$12$G00WEwgql/CoUf2G6hegcuTE4B3kYADAFLxAJYUZ26LUDAbmYaW82",
+      "role": "kasir"
+    }
+  },
+  "profil_rental": {
+    "rrcctv": {
+      "nama_pemilik": "rahmadani",
+      "nama_rental": "RR GAMING",
+      "email": "dedekemoking@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "napar",
+      "tanggal_daftar": "2026-06-21 03:43:04"
+    },
+    "rrgaming": {
+      "nama_pemilik": "dedek",
+      "nama_rental": "RR GAMING",
+      "email": "dedekemoking@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "napar",
+      "tanggal_daftar": "2026-06-21 23:30:29"
+    },
+    "rrgaming1": {
+      "nama_pemilik": "dedek",
+      "nama_rental": "dedek",
+      "email": "dedekemoking1@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "payakumbuh",
+      "tanggal_daftar": "2026-06-22 03:21:32"
+    },
+    "rrgaming2": {
+      "nama_pemilik": "yoko",
+      "nama_rental": "yoko",
+      "email": "dedekemoking2@gmail.com",
+      "no_hp": "082387018539",
+      "alamat": "solok",
+      "tanggal_daftar": "2026-06-22 03:42:32"
+    }
+  },
+  "trial_users": {
+    "testuser_pc_swap": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "testuser_new": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "rrgaming2": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "rrgaming1": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "kasir1": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "kasir": {
+      "trial_start": "2026-06-23",
+      "trial_days": 3
+    },
+    "rrgaming": {
+      "trial_start": "2026-06-23",
+      "trial_days": 3
+    }
+  },
+  "pending_email_verifications": {
+    "rrgaming1": {
+      "code": "638863",
+      "expires_at": "2026-06-22T03:51:32.343364",
+      "email": "dedekemoking1@gmail.com",
+      "data": {
+        "password": "bcrypt$$2b$12$7h/6J2fujJ9YIHfcnQfbmepZtf2LqWopLB6XTxvCUWa/3mA3muI9G",
+        "role": "admin",
+        "profil": {
+          "nama_pemilik": "dedek",
+          "nama_rental": "dedek",
+          "email": "dedekemoking1@gmail.com",
+          "no_hp": "081270647744",
+          "alamat": "payakumbuh",
+          "tanggal_daftar": "2026-06-22 03:21:32"
+        }
+      }
+    },
+    "rrgaming2": {
+      "code": "081053",
+      "expires_at": "2026-06-22T04:12:32.017806",
+      "email": "dedekemoking2@gmail.com",
+      "data": {
+        "password": "bcrypt$$2b$12$l5r0anm560qGds.52m.fTel6M.FAidbJTCXKVL9UWI6LKMTj.9jdW",
+        "role": "admin",
+        "profil": {
+          "nama_pemilik": "yoko",
+          "nama_rental": "yoko",
+          "email": "dedekemoking2@gmail.com",
+          "no_hp": "082387018539",
+          "alamat": "solok",
+          "tanggal_daftar": "2026-06-22 03:42:32"
+        }
+      }
+    }
+  },
+  "update_manifest_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.1/manifest.json",
+  "update_pubkey_path": "update_pubkey.pem",
+  "pending_forgot_password_verifications": {
+    "rrgaming": {
+      "code": "627103",
+      "expires_at": "2026-06-22T17:09:54.516918",
+      "email": "dedekemoking@gmail.com"
+    }
+  }
+}

@@ -1,0 +1,91 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                     RR BILLING PRO v2.3 - Inno Setup Builder                 ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+📦 FOLDER STRUCTURE:
+───────────────────────────────────────────────────────────────────────────────
+inno_build/
+├── app/                          ← Application executable & assets
+│   ├── main.exe                  (24.7 MB - compiled application)
+│   ├── logo.png                  (21.6 KB - logo asset)
+│   ├── rr_billing_config.json    (configuration file)
+│   ├── rr_billing_license.json   (license info)
+│   └── update_pubkey.pem         (update verification key)
+├── RR_BILLING_PRO_v2.3.iss       (Inno Setup script)
+└── BUILD_INNO_SETUP.txt          (this file)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+🔧 BUILD WITH INNO SETUP:
+
+REQUIREMENT:
+- Inno Setup 6.x must be installed on your system
+  Download: https://jrsoftware.org/isdl.php
+
+STEPS TO BUILD:
+
+1. Open RR_BILLING_PRO_v2.3.iss with Inno Setup Compiler
+
+2. Click "Build" → "Compile"
+   The installer will be created in Output\ folder:
+   Output/RR_BILLING_PRO_v2.3_Setup.exe
+
+3. Distribute RR_BILLING_PRO_v2.3_Setup.exe to users
+
+═══════════════════════════════════════════════════════════════════════════════
+
+✨ INSTALLER FEATURES:
+
+✓ 64-bit Windows 10+
+✓ Admin installation with UAC
+✓ Program Files installation
+✓ Start Menu shortcuts
+✓ Desktop shortcut
+✓ File associations
+✓ Backup of user data
+✓ Uninstall support
+
+═══════════════════════════════════════════════════════════════════════════════
+
+📋 FILE DESCRIPTIONS:
+
+main.exe
+  - Compiled application (no console window)
+  - Ready to run standalone or via installer
+  - All dependencies bundled
+
+logo.png
+  - Application logo
+  - Displayed in title bar and sidebar
+
+rr_billing_config.json
+  - Runtime configuration
+  - Users can edit to customize settings
+
+rr_billing_license.json
+  - License information
+  - Version tracking
+
+update_pubkey.pem
+  - Public key for update verification
+  - Used when checking for updates
+
+═══════════════════════════════════════════════════════════════════════════════
+
+🚀 DEPLOYMENT OPTIONS:
+
+OPTION 1: Standalone (Portable)
+  → Copy app\ folder to user
+  → Run main.exe directly
+  → No installation required
+
+OPTION 2: Installer (Recommended)
+  → Run RR_BILLING_PRO_v2.3_Setup.exe
+  → Automated installation with Start Menu & Desktop shortcuts
+  → Uninstall from Control Panel
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Version: 2.3
+Build Date: 2026-06-24
+Ready for Production Release ✓

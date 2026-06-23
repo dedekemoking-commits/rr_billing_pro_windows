@@ -64,6 +64,11 @@ class GitUpdater:
         except Exception as e:
             print(f"Log error: {e}")
     
+    def _is_git_repository(self) -> bool:
+        """Check if the repo_path is a valid git repository."""
+        git_dir = os.path.join(self.repo_path, ".git")
+        return os.path.isdir(git_dir)
+    
     def check_for_updates(self) -> Tuple[bool, str, Optional[dict]]:
         """
         Cek apakah ada update tersedia di remote.
@@ -73,6 +78,12 @@ class GitUpdater:
             info contains: local_commit, remote_commit, behind_count, commits_info
         """
         self._log("Checking for updates...")
+        
+        # Cek apakah ini git repository
+        if not self._is_git_repository():
+            msg = f"Bukan git repository. App berjalan dari: {self.repo_path}"
+            self._log(msg)
+            return False, msg, None
         
         # Fetch latest info dari remote
         success, msg = self._run_git_command(
@@ -138,6 +149,12 @@ class GitUpdater:
             (success: bool, message: str)
         """
         self._log(f"Pulling updates dari {self.remote}/{self.branch}...")
+        
+        # Cek apakah ini git repository
+        if not self._is_git_repository():
+            msg = f"Bukan git repository. Tidak bisa pull dari: {self.repo_path}"
+            self._log(msg)
+            return False, msg
         
         # Stash uncommitted changes (local changes dibackup)
         success, stash_msg = self._run_git_command(["git", "stash"])

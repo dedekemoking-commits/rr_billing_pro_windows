@@ -58,3 +58,12 @@
 {"timestamp": "2026-06-23T12:47:42.801549", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-06-23T12:51:15.284648", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-06-23T12:54:07.154564", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T23:53:25.726897", "action": "system_update", "username": "rrgaming", "status": "success", "details": {"type": "git", "message": "Already up to date."}}
+{"timestamp": "2026-06-23T23:53:27.745346", "action": "restart_error", "username": "rrgaming", "status": "error", "details": {"error": "name 'sys' is not defined"}}
+{"timestamp": "2026-06-23T23:53:56.069079", "action": "logout", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-24T00:03:38.354259", "action": "registration_pending", "username": "dsdsfsfs", "status": "pending", "details": {"email": "dsajdhas@gmail.com"}}
+{"timestamp": "2026-06-24T00:04:38.194491", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-24T00:35:50.377503", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-24T00:51:43.602311", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-24T00:58:17.173912", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-24T01:04:42.994164", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}

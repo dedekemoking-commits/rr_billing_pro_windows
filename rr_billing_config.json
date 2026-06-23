@@ -272,15 +272,26 @@
           "tanggal_daftar": "2026-06-22 03:42:32"
         }
       }
+    },
+    "dsdsfsfs": {
+      "code": "005284",
+      "expires_at": "2026-06-24T00:33:34.604738",
+      "email": "dsajdhas@gmail.com",
+      "data": {
+        "password": "bcrypt$$2b$12$3f.5IxNL9earUCA0dCDElu8yaKw./iRhkaur3NwuyulKYPfT8bhPG",
+        "role": "admin",
+        "profil": {
+          "nama_pemilik": "skdaj",
+          "nama_rental": "sda",
+          "email": "dsajdhas@gmail.com",
+          "no_hp": "076543456765",
+          "alamat": "jabha",
+          "tanggal_daftar": "2026-06-24 00:03:34"
+        }
+      }
     }
   },
   "update_manifest_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.1/manifest.json",
   "update_pubkey_path": "update_pubkey.pem",
-  "pending_forgot_password_verifications": {
-    "rrgaming": {
-      "code": "627103",
-      "expires_at": "2026-06-22T17:09:54.516918",
-      "email": "dedekemoking@gmail.com"
-    }
-  }
+  "pending_forgot_password_verifications": {}
 }
