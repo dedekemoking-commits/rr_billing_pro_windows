@@ -2063,10 +2063,33 @@ class DialogPaket(ctk.CTkToplevel):
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=12, pady=(8, 12))
         
+        # Wrapper untuk debug button click
+        def on_mulai_click():
+            print("\n[LOG] Button MULAI SESI clicked!", flush=True)
+            paket_nm = self.paket_var.get()
+            print(f"[LOG] Selected paket: {paket_nm}", flush=True)
+            info = self.paket_data.get(paket_nm, {})
+            paket_harga = info.get("harga", 0)
+            paket_menit = info.get("menit", 0)
+            print(f"[LOG] Paket info: {paket_harga} Rp, {paket_menit} menit", flush=True)
+            
+            try:
+                pesanan = {}
+                total = paket_harga
+                print(f"[LOG] Calling self.on_confirm({paket_nm}, {paket_harga}, {paket_menit}, {pesanan}, {total})", flush=True)
+                self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+                print(f"[LOG] on_confirm called successfully", flush=True)
+                self.destroy()
+                print(f"[LOG] Dialog destroyed", flush=True)
+            except Exception as e:
+                print(f"[ERROR] {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        
         btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
                       font=("Russo One", 11, "bold"), height=44,
-                      command=self._on_mulai_sesi)
+                      command=on_mulai_click)
         btn_mulai.pack(fill="x", pady=(0, 6))
         
         ctk.CTkButton(btn_frame, text="✖  BATAL",
