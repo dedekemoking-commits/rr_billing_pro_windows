@@ -2317,7 +2317,7 @@ class KartuTV(ctk.CTkFrame):
                                           text_color=C_GREEN)
         self.lbl_estimasi.pack()
 
-        # Row 1: PWR button (large) + small buttons
+        # Row 1: PWR button (large) + control buttons
         r1 = ctk.CTkFrame(self, fg_color="transparent")
         r1.pack(pady=2, fill="x", padx=3)
         self.btn_power = ctk.CTkButton(r1, text="⚡ PWR", width=65, height=24,
@@ -2327,15 +2327,16 @@ class KartuTV(ctk.CTkFrame):
                                         command=self._toggle_power)
         self.btn_power.pack(side="left", padx=(0, 2))
         
-        # Small control buttons
-        for txt, cmd in [
-            ("🔧", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=True,  port=self.port))),
-            ("⊖", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=False, port=self.port))),
-            ("🔒", lambda: self._adb_action(lambda: ADBHelper.home(self.ip, port=self.port))),
+        # Control buttons with clear labels
+        for txt, color, cmd in [
+            ("VOL+", C_GREEN, lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=True,  port=self.port))),
+            ("VOL−", C_YELLOW, lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=False, port=self.port))),
+            ("HOME", C_ACCENT, lambda: self._adb_action(lambda: ADBHelper.home(self.ip, port=self.port))),
         ]:
-            ctk.CTkButton(r1, text=txt, width=24, height=24, fg_color=C_BTN, 
-                         hover_color=C_ACCENT2,
-                         font=("Courier New", 7), text_color=C_TEXT, 
+            ctk.CTkButton(r1, text=txt, width=36, height=24, fg_color=color, 
+                         hover_color="white" if color == C_ACCENT else None,
+                         font=("Courier New", 7, "bold"), text_color="black" if color == C_ACCENT else "white",
+                         border_width=1, border_color=color,
                          command=cmd).pack(side="left", padx=1)
 
         # Row 2: SELESAI dan PESANAN buttons (two columns)
