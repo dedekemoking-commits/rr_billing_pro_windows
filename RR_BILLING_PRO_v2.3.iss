@@ -40,7 +40,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
-Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked onlybelowversion0,6.1
+Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "sendto"; Description: "Add to Send To menu"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
@@ -51,8 +51,8 @@ Source: "C:\BillingPSkuDesktop\dist\main.exe"; DestDir: "{app}"; Flags: ignoreve
 Source: "C:\BillingPSkuDesktop\logo.png"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Configuration Files (user can customize) ────────────────────────────────
-Source: "C:\BillingPSkuDesktop\rr_billing_config.json"; DestDir: "{app}"; Flags: ignoreversion onisupgradeskipmissing
-Source: "C:\BillingPSkuDesktop\rr_billing_license.json"; DestDir: "{app}"; Flags: ignoreversion onisupgradeaskskipmissing
+Source: "C:\BillingPSkuDesktop\rr_billing_config.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\rr_billing_license.json"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Security & Update Keys ──────────────────────────────────────────────────
 Source: "C:\BillingPSkuDesktop\update_pubkey.pem"; DestDir: "{app}"; Flags: ignoreversion
