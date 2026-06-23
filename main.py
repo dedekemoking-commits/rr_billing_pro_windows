@@ -563,7 +563,7 @@ class LoginPage(ctk.CTkFrame):
 
         # Satu container — isinya diganti saat pindah view
         # Dengan width minimum agar tidak shrink terlalu kecil
-        self._view_container = ctk.CTkFrame(self, fg_color="transparent", width=500, height=680)
+        self._view_container = ctk.CTkFrame(self, fg_color="transparent", width=500, height=1050)
         self._view_container.pack(expand=True, padx=20, pady=20)
         self._view_container.pack_propagate(False)  # Maintain minimum size
 
@@ -641,27 +641,23 @@ class LoginPage(ctk.CTkFrame):
             command=self._login)
         self.btn_login.pack(pady=(0, 4), padx=30)
 
-        ctk.CTkLabel(outer,
-                     text="Hubungi administrator untuk akses.",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
-
-        # Tombol Daftar
-        ctk.CTkLabel(outer, text="Rental baru? Belum punya akun?",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(8, 4))
-        ctk.CTkButton(
-            outer, text="📝  DAFTAR RENTAL BARU", width=280, height=36,
-            fg_color="transparent", hover_color=C_BTN,
-            border_width=1, border_color=C_ACCENT,
-            font=("Russo One", 10, "bold"), text_color=C_ACCENT,
-            command=self._show_daftar_view).pack(pady=(0, 6), padx=30)
-
         # Tombol Lupa Password
         ctk.CTkButton(
             outer, text="🔓  Lupa Password?", width=280, height=34,
             fg_color="transparent", hover_color=C_BTN,
             border_width=1, border_color=C_RED,
             font=("Russo One", 9, "bold"), text_color=C_RED,
-            command=self._show_lupa_password_view).pack(pady=(0, 10), padx=30)
+            command=self._show_lupa_password_view).pack(pady=(0, 12), padx=30)
+
+        # Tombol Daftar
+        ctk.CTkLabel(outer, text="Rental baru? Belum punya akun?",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
+        ctk.CTkButton(
+            outer, text="📝  DAFTAR RENTAL BARU", width=300, height=52,
+            fg_color="transparent", hover_color=C_BTN,
+            border_width=1, border_color=C_ACCENT,
+            font=("Russo One", 10, "bold"), text_color=C_ACCENT,
+            command=self._show_daftar_view).pack(pady=(0, 10), padx=30)
 
         # Version di login page
         ctk.CTkLabel(outer, text=f"v{APP_VERSION}",
@@ -723,6 +719,18 @@ class LoginPage(ctk.CTkFrame):
                                         border_color=C_BORDER, border_width=1,
                                         font=FONT_BODY)
         self.d_alamat.pack(fill="x", padx=14, pady=(0, 10))
+
+        # Tombol di dalam scroll agar selalu terlihat
+        btn_scroll_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_scroll_frame.pack(fill="x", pady=(12, 0))
+        ctk.CTkButton(btn_scroll_frame, text="✅  DAFTAR SEKARANG", width=160, height=40,
+                      fg_color=C_ACCENT2, hover_color="#5A0FCC",
+                      font=("Russo One", 11, "bold"), text_color="white",
+                      command=self._submit_daftar).pack(side="left", padx=6)
+        ctk.CTkButton(btn_scroll_frame, text="❌  BATAL", width=120, height=40,
+                      fg_color=C_RED, hover_color="#8B0000",
+                      font=("Russo One", 11, "bold"), text_color="white",
+                      command=self._show_login_view).pack(side="left", padx=6)
 
         # Status & tombol
         self.lbl_daftar_status = ctk.CTkLabel(outer, text="",
@@ -2034,9 +2042,7 @@ class DialogPaket(ctk.CTkToplevel):
         self.expanded_groups = {"paket": True, "makanan": False, "minuman": False}
         
         self._build()
-        
-        # grab_set() dipindahkan ke sini - setelah UI fully rendered
-        self.after(100, self.grab_set)
+        self.grab_set()
     
     def _build(self):
         # Header
@@ -2211,11 +2217,14 @@ class DialogPaket(ctk.CTkToplevel):
             info = self.paket_data.get(paket_nm, {})
             paket_harga = info.get("harga", 0)
             paket_menit = info.get("menit", 0)
-            pesanan = {}  # Kosong - makanan/minuman di tab TV
-            total = paket_harga
             
-            print(f"[DEBUG] Calling on_confirm with: {paket_nm}, {paket_harga}, {paket_menit}")
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+            # Hitung total pesanan
+            all_menu = {**self.makanan_data, **self.minuman_data}
+            total_pesanan = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.pesanan_qty.items())
+            pesanan = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
+            
+            print(f"[DEBUG] Calling on_confirm with: {paket_nm}, {paket_harga}, {paket_menit}, total_pesanan={total_pesanan}")
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan)
             print(f"[DEBUG] Destroying dialog")
             self.destroy()
         except Exception as e:
@@ -2237,10 +2246,14 @@ class DialogPaket(ctk.CTkToplevel):
                 info = self.paket_data.get(paket_nm, {})
                 paket_harga = info.get("harga", 0)
                 paket_menit = info.get("menit", 0)
-                pesanan = {}
-                total = paket_harga
-                print(f"[LOG] Total: {total}, calling on_confirm", flush=True)
-                self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+                
+                # Hitung total pesanan
+                all_menu = {**self.makanan_data, **self.minuman_data}
+                total_pesanan = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.pesanan_qty.items())
+                pesanan = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
+                
+                print(f"[LOG] Total pesanan: {total_pesanan}, calling on_confirm", flush=True)
+                self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan)
                 print(f"[LOG] on_confirm executed, destroying dialog", flush=True)
                 self.destroy()
             except Exception as e:
@@ -2597,10 +2610,10 @@ class KartuTV(ctk.CTkFrame):
         else:
             self.lbl_timer.configure(text="∞ BEBAS", text_color=C_GREEN)
 
-        # Catat transaksi awal (harga paket berwaktu + pesanan).
-        # Untuk Main Bebas, biaya waktu belum final—dicatat detail saat Selesai.
-        if not self.is_bebas:
-            self.on_transaksi(self.label_tv, paket_nm, pesanan, paket_harga + total_pesanan)
+         # Jangan catat transaksi di sini — dicatat saat user klik tombol SELESAI atau WAKTU HABIS
+        # Untuk Main Bebas, biaya waktu belum final saat confirm awal.
+        # Untuk paket berwaktu, transaksi dicatat saat SELESAI agar final dan akurat.
+        pass
 
     # ── Timer paket berwaktu (mundur) ───────────────────────────────────────
     def _tick_waktu(self):
@@ -2671,11 +2684,20 @@ class KartuTV(ctk.CTkFrame):
             self.on_transaksi(self.label_tv, "Main Bebas", self.pesanan_aktif, total_akhir)
         else:
             total_akhir = self.paket_harga_tetap + self.biaya_pesanan
-            if not messagebox.askyesno(
-                    "⏹ Selesai", f"TV: {self.label_tv}\nAkhiri sesi '{self.paket_aktif}' sekarang?"):
+            pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
+            konfirmasi = messagebox.askyesno(
+                "⏹ Selesai",
+                f"TV: {self.label_tv}\n"
+                f"Paket: {self.paket_aktif}\n"
+                f"Harga paket: {fmt_rp(self.paket_harga_tetap)}\n"
+                f"Pesanan: {pesanan_str}\n"
+                f"Biaya pesanan: {fmt_rp(self.biaya_pesanan)}\n"
+                f"TOTAL: {fmt_rp(total_akhir)}\n\n"
+                f"Catat transaksi & akhiri sesi ini?")
+            if not konfirmasi:
                 return
-            # Transaksi paket berwaktu sudah dicatat saat konfirmasi awal,
-            # jadi di sini tidak dicatat ulang — cukup tutup sesi.
+            # Catat transaksi sekarang (sebelumnya tidak dicatat untuk paket berwaktu)
+            self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
 
         self.lbl_timer.configure(text="SELESAI ⏹", text_color=C_MUTED)
         self.lbl_estimasi.configure(text="")
@@ -2969,6 +2991,9 @@ class AutoRentApp(ctk.CTk):
         # Admin-only users management tab - DISABLED
         # self._setup_users()
         self._show_tab("dashboard")
+        
+        # ── DEMO TV untuk testing (bisa dihapus nanti) ─────────────────────────────
+        self._tambah_tv("192.168.1.100", "📺 DEMO TV", 5555, "Reguler")
 
     def _build_sidebar(self):
         logo_f = ctk.CTkFrame(self.sidebar, fg_color="transparent")
