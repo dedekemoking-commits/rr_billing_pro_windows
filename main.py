@@ -2066,25 +2066,7 @@ class DialogPaket(ctk.CTkToplevel):
         # Wrapper untuk debug button click
         def on_mulai_click():
             print("\n[LOG] Button MULAI SESI clicked!", flush=True)
-            paket_nm = self.paket_var.get()
-            print(f"[LOG] Selected paket: {paket_nm}", flush=True)
-            info = self.paket_data.get(paket_nm, {})
-            paket_harga = info.get("harga", 0)
-            paket_menit = info.get("menit", 0)
-            print(f"[LOG] Paket info: {paket_harga} Rp, {paket_menit} menit", flush=True)
-            
-            try:
-                pesanan = {}
-                total = paket_harga
-                print(f"[LOG] Calling self.on_confirm({paket_nm}, {paket_harga}, {paket_menit}, {pesanan}, {total})", flush=True)
-                self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
-                print(f"[LOG] on_confirm called successfully", flush=True)
-                self.destroy()
-                print(f"[LOG] Dialog destroyed", flush=True)
-            except Exception as e:
-                print(f"[ERROR] {e}", flush=True)
-                import traceback
-                traceback.print_exc()
+            self.after(50, self._handle_mulai_sesi)
         
         btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
@@ -2240,6 +2222,26 @@ class DialogPaket(ctk.CTkToplevel):
             self.destroy()
         except Exception as e:
             print(f"[ERROR] Exception in _on_mulai_sesi: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _handle_mulai_sesi(self):
+        """Actual handler - called via after() for better responsiveness."""
+        print("[LOG] _handle_mulai_sesi() executing", flush=True)
+        try:
+            paket_nm = self.paket_var.get()
+            print(f"[LOG] Paket: {paket_nm}", flush=True)
+            info = self.paket_data.get(paket_nm, {})
+            paket_harga = info.get("harga", 0)
+            paket_menit = info.get("menit", 0)
+            pesanan = {}
+            total = paket_harga
+            print(f"[LOG] Total: {total}, calling on_confirm", flush=True)
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+            print(f"[LOG] Dialog will be destroyed", flush=True)
+            self.destroy()
+        except Exception as e:
+            print(f"[ERROR] {e}", flush=True)
             import traceback
             traceback.print_exc()
     
