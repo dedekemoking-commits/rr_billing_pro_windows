@@ -2063,15 +2063,10 @@ class DialogPaket(ctk.CTkToplevel):
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=12, pady=(8, 12))
         
-        # Wrapper untuk debug button click
-        def on_mulai_click():
-            print("\n[LOG] Button MULAI SESI clicked!", flush=True)
-            self.after(50, self._handle_mulai_sesi)
-        
         btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
                       font=("Russo One", 11, "bold"), height=44,
-                      command=on_mulai_click)
+                      command=self._handle_mulai_sesi)
         btn_mulai.pack(fill="x", pady=(0, 6))
         
         ctk.CTkButton(btn_frame, text="✖  BATAL",
@@ -2226,24 +2221,32 @@ class DialogPaket(ctk.CTkToplevel):
             traceback.print_exc()
     
     def _handle_mulai_sesi(self):
-        """Actual handler - called via after() for better responsiveness."""
+        """Actual handler - called via button command."""
         print("[LOG] _handle_mulai_sesi() executing", flush=True)
-        try:
-            paket_nm = self.paket_var.get()
-            print(f"[LOG] Paket: {paket_nm}", flush=True)
-            info = self.paket_data.get(paket_nm, {})
-            paket_harga = info.get("harga", 0)
-            paket_menit = info.get("menit", 0)
-            pesanan = {}
-            total = paket_harga
-            print(f"[LOG] Total: {total}, calling on_confirm", flush=True)
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
-            print(f"[LOG] Dialog will be destroyed", flush=True)
-            self.destroy()
-        except Exception as e:
-            print(f"[ERROR] {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+        
+        # Test dengan messagebox dulu
+        from tkinter import messagebox
+        if messagebox.askyesno("Konfirmasi", "Mulai sesi sekarang?"):
+            print("[LOG] User confirmed", flush=True)
+            try:
+                paket_nm = self.paket_var.get()
+                print(f"[LOG] Paket: {paket_nm}", flush=True)
+                info = self.paket_data.get(paket_nm, {})
+                paket_harga = info.get("harga", 0)
+                paket_menit = info.get("menit", 0)
+                pesanan = {}
+                total = paket_harga
+                print(f"[LOG] Total: {total}, calling on_confirm", flush=True)
+                self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+                print(f"[LOG] on_confirm executed, destroying dialog", flush=True)
+                self.destroy()
+            except Exception as e:
+                print(f"[ERROR] {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror("Error", str(e))
+        else:
+            print("[LOG] User cancelled", flush=True)
     
     def _confirm(self):
         """Confirm order."""
