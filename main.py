@@ -2587,7 +2587,6 @@ class KartuTV(ctk.CTkFrame):
 
         self.btn_selesai.configure(state="normal")
         self.btn_tambah_pesanan.configure(state="normal")
-        self.btn_pindah.configure(state="normal")
         self.btn_paket.configure(text="📦 GANTI PESANAN", fg_color=C_BTN, border_width=1,
                                   border_color=C_ACCENT2, text_color=C_ACCENT2)
 
@@ -2705,7 +2704,6 @@ class KartuTV(ctk.CTkFrame):
         self.lbl_estimasi.configure(text="")
         self.btn_selesai.configure(state="disabled")
         self.btn_tambah_pesanan.configure(state="disabled")
-        self.btn_pindah.configure(state="disabled")
         self.btn_paket.configure(text="📦 PAKET & PESANAN", fg_color=C_ACCENT2,
                                   border_width=0, text_color="white")
 
@@ -2788,9 +2786,8 @@ class KartuTV(ctk.CTkFrame):
             target._tick_waktu()
         else:
             target.lbl_timer.configure(text="∞ BEBAS", text_color=C_GREEN)
-
         target.btn_selesai.configure(state="normal")
-        target.btn_pindah.configure(state="normal")
+        target.btn_selesai.configure(state="normal")
         target.btn_paket.configure(text="📦 GANTI PESANAN", fg_color=C_BTN, border_width=1,
                                     border_color=C_ACCENT2, text_color=C_ACCENT2)
 
