@@ -78,18 +78,18 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ─── PALET WARNA GAMING ──────────────────────────────────────────────────────
-C_BG        = "#0D0D1A"
-C_PANEL     = "#12122A"
-C_CARD      = "#1A1A3A"
-C_ACCENT    = "#00FFCC"
-C_ACCENT2   = "#7B2FFF"
+C_BG        = "#001A2E"  # Neon Sky Blue background
+C_PANEL     = "#003d5c"
+C_CARD      = "#00527a"
+C_ACCENT    = "#00E5FF"  # Neon Cyan
+C_ACCENT2   = "#00BFFF"  # Deep Sky Blue
 C_RED       = "#FF3366"
 C_GREEN     = "#39FF14"
 C_YELLOW    = "#FFD700"
-C_TEXT      = "#E0E0FF"
-C_MUTED     = "#6060A0"
-C_BTN       = "#1E1E4A"
-C_BORDER    = "#2A2A5A"
+C_TEXT      = "#E0FFFF"
+C_MUTED     = "#7EB3D6"
+C_BTN       = "#0A2A42"
+C_BORDER    = "#1A5F7A"
 C_ORANGE    = "#FF8C00"
 
 FONT_TITLE  = ("Russo One",  16, "bold")
@@ -562,8 +562,10 @@ class LoginPage(ctk.CTkFrame):
         self._lp_username_verified = None  # username yg terverifikasi di lupa password
 
         # Satu container — isinya diganti saat pindah view
-        self._view_container = ctk.CTkFrame(self, fg_color="transparent")
-        self._view_container.place(relx=0.5, rely=0.5, anchor="center")
+        # Dengan width minimum agar tidak shrink terlalu kecil
+        self._view_container = ctk.CTkFrame(self, fg_color="transparent", width=500, height=680)
+        self._view_container.pack(expand=True, padx=20, pady=20)
+        self._view_container.pack_propagate(False)  # Maintain minimum size
 
         self._show_login_view()
 
@@ -634,7 +636,7 @@ class LoginPage(ctk.CTkFrame):
         # Tombol Masuk
         self.btn_login = ctk.CTkButton(
             outer, text="🔓  MASUK", width=280, height=44,
-            fg_color=C_ACCENT2, hover_color="#5A0FCC",
+            fg_color=C_ACCENT2, hover_color=C_ACCENT,
             font=("Russo One", 12, "bold"), text_color="white",
             command=self._login)
         self.btn_login.pack(pady=(0, 4), padx=30)
@@ -888,7 +890,10 @@ class LoginPage(ctk.CTkFrame):
                                   fg_color=C_BTN, text_color=C_ACCENT,
                                   border_color=C_BORDER, font=FONT_BODY, height=40)
         entry_code.pack(fill="x", padx=30, pady=(0, 10))
-        entry_code.focus()
+        try:
+            entry_code.focus()
+        except Exception:
+            pass
 
         status_label = ctk.CTkLabel(dialog, text="", font=FONT_LABEL, text_color=C_RED,
                                     wraplength=380, justify="center")
@@ -992,7 +997,10 @@ class LoginPage(ctk.CTkFrame):
         self._show_login_view()
         self.entry_user.delete(0, "end")
         self.entry_user.insert(0, username)
-        self.entry_pass.focus()
+        try:
+            self.entry_pass.focus()
+        except Exception:
+            pass
         return True, ""
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1280,7 +1288,10 @@ class LoginPage(ctk.CTkFrame):
             font=("Consolas", 16, "bold"), height=40)
         self.lp_entry_verif_code.pack(fill="x", padx=14, pady=(0, 10))
         self.lp_entry_verif_code.bind("<Return>", lambda e: self._verify_forgot_password_code())
-        self.lp_entry_verif_code.focus()
+        try:
+            self.lp_entry_verif_code.focus()
+        except Exception:
+            pass
 
         ctk.CTkButton(
             self.lp_step1_verif, text="✅  Verifikasi Kode", height=38,
@@ -1348,7 +1359,10 @@ class LoginPage(ctk.CTkFrame):
         
         # Show password reset form
         self.lp_step2.pack(fill="x", padx=28, pady=(6, 4))
-        self.lp_entry_pass1.focus()
+        try:
+            self.lp_entry_pass1.focus()
+        except Exception:
+            pass
 
     def _submit_reset_password(self):
         if not self._lp_username_verified:
@@ -1370,7 +1384,10 @@ class LoginPage(ctk.CTkFrame):
                 text="⚠  Konfirmasi password tidak cocok.",
                 text_color=C_YELLOW)
             self.lp_entry_pass2.delete(0, "end")
-            self.lp_entry_pass2.focus()
+            try:
+                self.lp_entry_pass2.focus()
+            except Exception:
+                pass
             return
 
         cfg   = ConfigManager.load()
@@ -1399,7 +1416,10 @@ class LoginPage(ctk.CTkFrame):
         self._show_login_view()
         self.entry_user.delete(0, "end")
         self.entry_user.insert(0, uname)
-        self.entry_pass.focus()
+        try:
+            self.entry_pass.focus()
+        except Exception:
+            pass
         self.lbl_status.configure(
             text=f"✅  Password '{uname}' berhasil direset — silakan login.",
             text_color=C_GREEN)
@@ -1876,136 +1896,326 @@ class DialogTambahTV(ctk.CTkToplevel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  DIALOG TAMBAH PESANAN (MAKANAN/MINUMAN SAAT SESI BERJALAN)
+# ═══════════════════════════════════════════════════════════════════════════════
+class DialogTambahPesanan(ctk.CTkToplevel):
+    """Dialog untuk tambah pesanan makanan/minuman saat sesi TV sedang berjalan."""
+    def __init__(self, master, tv_label, on_confirm, makanan_data, minuman_data, pesanan_aktif=None):
+        super().__init__(master)
+        self.title(f"Tambah Pesanan — {tv_label}")
+        self.geometry("420x500")
+        self.configure(fg_color=C_BG)
+        self.grab_set()
+        
+        self.tv_label = tv_label
+        self.on_confirm = on_confirm
+        self.makanan_data = makanan_data or {}
+        self.minuman_data = minuman_data or {}
+        self.pesanan_aktif = pesanan_aktif or {}
+        self.order_qty = {}
+        
+        self._build()
+    
+    def _build(self):
+        # Header
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=12, pady=(12, 8))
+        ctk.CTkLabel(hdr, text=f"🛒 Pesanan Tambahan — {self.tv_label}",
+                     font=("Russo One", 13, "bold"), text_color=C_ACCENT).pack(anchor="w")
+        ctk.CTkLabel(hdr, text="Pilih item untuk ditambahkan atau perbarui jumlah",
+                     font=FONT_BODY, text_color=C_MUTED).pack(anchor="w")
+        
+        # Total display
+        self.lbl_total = ctk.CTkLabel(self, text="Total Pesanan: Rp 0",
+                                       font=("Russo One", 12, "bold"), text_color=C_YELLOW)
+        self.lbl_total.pack(pady=(0, 8))
+        
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG)
+        scroll.pack(fill="both", expand=True, padx=12, pady=0)
+        
+        # Makanan section
+        if self.makanan_data:
+            self._build_menu_section(scroll, "🍔  MAKANAN", self.makanan_data)
+        
+        # Minuman section
+        if self.minuman_data:
+            self._build_menu_section(scroll, "🥤  MINUMAN", self.minuman_data)
+        
+        if not self.makanan_data and not self.minuman_data:
+            ctk.CTkLabel(scroll, text="Tidak ada item tersedia",
+                        font=FONT_BODY, text_color=C_MUTED).pack(pady=20)
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(8, 12))
+        
+        ctk.CTkButton(btn_frame, text="✅  TAMBAHKAN PESANAN",
+                     fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                     font=("Russo One", 11, "bold"), height=44,
+                     command=self._confirm).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(btn_frame, text="✖  BATAL",
+                     fg_color=C_RED, hover_color="#CC0033",
+                     font=("Russo One", 10, "bold"), height=38,
+                     command=self.destroy).pack(fill="x")
+    
+    def _build_menu_section(self, parent, title, menu_dict):
+        """Build collapsible menu section."""
+        section = ctk.CTkFrame(parent, fg_color="transparent")
+        section.pack(fill="x", pady=6)
+        
+        # Header
+        header = ctk.CTkFrame(section, fg_color=C_PANEL, corner_radius=8)
+        header.pack(fill="x")
+        ctk.CTkLabel(header, text=title,
+                    font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(anchor="w", padx=10, pady=8)
+        
+        # Content
+        content = ctk.CTkFrame(section, fg_color=C_CARD, corner_radius=6)
+        content.pack(fill="x", padx=4, pady=(0, 4))
+        
+        for nama, harga in menu_dict.items():
+            row = ctk.CTkFrame(content, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=4)
+            
+            # Item name & price
+            ctk.CTkLabel(row, text=f"{nama}  •  {fmt_rp(harga)}",
+                        font=FONT_LABEL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
+            
+            # Qty control
+            var = ctk.IntVar(value=self.pesanan_aktif.get(nama, 0))
+            self.order_qty[nama] = var
+            
+            ctk.CTkButton(row, text="−", width=24, height=24, fg_color=C_BTN, hover_color=C_RED,
+                         font=("Consolas", 11, "bold"),
+                         command=lambda v=var: (v.set(max(0, v.get()-1)), self._update_total())
+                         ).pack(side="left", padx=2)
+            ctk.CTkLabel(row, textvariable=var, width=24,
+                        font=FONT_LABEL, text_color=C_ACCENT).pack(side="left")
+            ctk.CTkButton(row, text="+", width=24, height=24, fg_color=C_BTN, hover_color=C_GREEN,
+                         font=("Consolas", 11, "bold"),
+                         command=lambda v=var: (v.set(v.get()+1), self._update_total())
+                         ).pack(side="left", padx=2)
+    
+    def _update_total(self):
+        """Update total pesanan."""
+        all_menu = {**self.makanan_data, **self.minuman_data}
+        total = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.order_qty.items())
+        self.lbl_total.configure(text=f"Total Pesanan: {fmt_rp(total)}")
+    
+    def _confirm(self):
+        """Confirm and return new order data."""
+        pesanan_baru = {nm: v.get() for nm, v in self.order_qty.items() if v.get() > 0}
+        self.on_confirm(pesanan_baru)
+        self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  DIALOG PAKET + PESANAN
 # ═══════════════════════════════════════════════════════════════════════════════
 class DialogPaket(ctk.CTkToplevel):
     def __init__(self, master, tv_label, on_confirm, paket_data, makanan_data, minuman_data, nama_grup="Reguler"):
         super().__init__(master)
         self.title(f"Paket & Pesanan — {tv_label}")
-        self.geometry("620x700")
+        self.geometry("520x680")  # Lebih kecil & compact
         self.configure(fg_color=C_BG)
         self.grab_set()
+        
         self.on_confirm   = on_confirm
         self.tv_label     = tv_label
-        self.paket_data   = paket_data
-        self.makanan_data = makanan_data
-        self.minuman_data = minuman_data
+        self.paket_data   = paket_data or {"Paket Default": {"harga": 50000, "menit": 60}}
+        self.makanan_data = makanan_data or {}
+        self.minuman_data = minuman_data or {}
         self.nama_grup    = nama_grup
-        self.paket_var    = ctk.StringVar(value=list(paket_data.keys())[0])
+        self.paket_var    = ctk.StringVar(value=list(self.paket_data.keys())[0])
         self.pesanan_qty  = {}
+        
+        # State untuk collapse/expand
+        self.expanded_groups = {"paket": True, "makanan": False, "minuman": False}
+        
         self._build()
-
+    
     def _build(self):
-        ctk.CTkLabel(self, text=f"📺  {self.tv_label}",
-                     font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(18, 4))
-        ctk.CTkLabel(self, text=f"🏷  Grup Tarif: {self.nama_grup}",
-                     font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(pady=(0, 2))
-        ctk.CTkLabel(self, text="Pilih paket waktu & tambahan pesanan",
-                     font=FONT_BODY, text_color=C_MUTED).pack(pady=(0, 6))
-        self.lbl_total = ctk.CTkLabel(self, text="Total: —",
-                                       font=FONT_TITLE, text_color=C_YELLOW)
-        self.lbl_total.pack(pady=(0, 6))
-
-        scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG, height=520)
-        scroll.pack(fill="both", expand=True, padx=16, pady=4)
-
-        pf = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=10)
-        pf.pack(fill="x", pady=6)
-        ctk.CTkLabel(pf, text="⏱  PAKET WAKTU", font=FONT_SUB,
-                     text_color=C_ACCENT2).pack(anchor="w", padx=14, pady=6)
-
-        quick_row = ctk.CTkFrame(pf, fg_color="transparent")
-        quick_row.pack(fill="x", padx=14, pady=(0, 6))
-        for nm, color in [("Main Bebas", C_GREEN), ("Reguler", C_ORANGE)]:
-            if nm in self.paket_data:
-                ctk.CTkButton(quick_row, text=f"⚡ {nm}", width=130, height=30,
-                              fg_color=C_BTN, hover_color="#1A3A1A",
-                              border_width=1, border_color=color,
-                              font=FONT_SMALL, text_color=color,
-                              command=lambda n=nm: (self.paket_var.set(n), self._update_total())
-                              ).pack(side="left", padx=4)
-        ctk.CTkLabel(quick_row, text="← Klik cepat",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(side="left", padx=6)
-
-        sep = ctk.CTkFrame(pf, height=1, fg_color=C_BORDER)
-        sep.pack(fill="x", padx=14, pady=(0, 6))
-
+        # Header
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=12, pady=(12, 2))
+        ctk.CTkLabel(hdr, text=f"📺  {self.tv_label}",
+                     font=("Russo One", 14, "bold"), text_color=C_ACCENT).pack(anchor="w")
+        ctk.CTkLabel(hdr, text=f"🏷 {self.nama_grup}  •  Total: ",
+                     font=("Courier New", 9), text_color=C_MUTED).pack(anchor="w")
+        
+        # Total display inline
+        self.lbl_total = ctk.CTkLabel(self, text="Rp 0",
+                                       font=("Russo One", 13, "bold"), text_color=C_YELLOW)
+        self.lbl_total.pack(pady=(0, 8))
+        
+        # Scrollable content
+        scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG)
+        scroll.pack(fill="both", expand=True, padx=12, pady=0)
+        
+        # Grup 1: PAKET
+        self._build_collapsible_group(
+            scroll, "paket", "⏱  PAKET RENTAL PS", 
+            self._build_paket_content
+        )
+        
+        # Grup 2: MAKANAN
+        if self.makanan_data:
+            self._build_collapsible_group(
+                scroll, "makanan", "🍔  MAKANAN",
+                lambda f: self._build_menu_content(f, self.makanan_data)
+            )
+        
+        # Grup 3: MINUMAN
+        if self.minuman_data:
+            self._build_collapsible_group(
+                scroll, "minuman", "🥤  MINUMAN",
+                lambda f: self._build_menu_content(f, self.minuman_data)
+            )
+        
+        # BUTTONS — paling bawah
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(8, 12))
+        
+        ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
+                      fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                      font=("Russo One", 11, "bold"), height=44,
+                      command=self._confirm).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(btn_frame, text="✖  BATAL",
+                      fg_color=C_RED, hover_color="#CC0033",
+                      font=("Russo One", 10, "bold"), height=38,
+                      command=self.destroy).pack(fill="x")
+        
+        self._update_total()
+    
+    def _build_collapsible_group(self, parent, group_id, title, content_builder):
+        """Buat collapsible group dengan header dan content."""
+        group_container = ctk.CTkFrame(parent, fg_color="transparent")
+        group_container.pack(fill="x", pady=4)
+        
+        # Header dengan toggle
+        header = ctk.CTkFrame(group_container, fg_color=C_PANEL, corner_radius=8)
+        header.pack(fill="x")
+        header.bind("<Button-1>", lambda e: self._toggle_group(group_id, content_frame, header_btn))
+        
+        header_btn = ctk.CTkButton(
+            header, text=f"{'▼' if self.expanded_groups[group_id] else '▶'}  {title}",
+            fg_color="transparent", hover_color=C_CARD,
+            font=("Russo One", 10, "bold"), text_color=C_ACCENT2,
+            anchor="w", width=450
+        )
+        header_btn.pack(fill="x", padx=10, pady=8)
+        header_btn.bind("<Button-1>", lambda e: self._toggle_group(group_id, content_frame, header_btn))
+        
+        # Content frame
+        content_frame = ctk.CTkFrame(group_container, fg_color="transparent")
+        if self.expanded_groups[group_id]:
+            content_frame.pack(fill="x", padx=2, pady=(0, 4))
+            content_builder(content_frame)
+        
+        # Store reference untuk toggle
+        group_container.content_frame = content_frame
+        group_container.header_btn = header_btn
+    
+    def _toggle_group(self, group_id, content_frame, header_btn):
+        """Toggle expand/collapse untuk group."""
+        self.expanded_groups[group_id] = not self.expanded_groups[group_id]
+        
+        if self.expanded_groups[group_id]:
+            # Expand
+            content_frame.pack(fill="x", padx=2, pady=(0, 4))
+            header_btn.configure(text=header_btn.cget("text").replace("▶", "▼"))
+        else:
+            # Collapse
+            content_frame.pack_forget()
+            btn_text = header_btn.cget("text").replace("▼", "▶")
+            header_btn.configure(text=btn_text)
+    
+    def _build_paket_content(self, parent):
+        """Build paket options inside collapsible group."""
+        cf = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=6)
+        cf.pack(fill="x", padx=8, pady=4)
+        
         for nama, info in self.paket_data.items():
             harga = info.get("harga", 0)
             menit = info.get("menit", 0)
-            row = ctk.CTkFrame(pf, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=2)
+            
+            row = ctk.CTkFrame(cf, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=3)
+            
             color = C_GREEN if nama == "Main Bebas" else C_ORANGE if nama == "Reguler" else C_TEXT
             rb = ctk.CTkRadioButton(row, text=nama, variable=self.paket_var, value=nama,
                                      font=FONT_LABEL, text_color=color,
                                      fg_color=C_ACCENT, hover_color=C_ACCENT2,
                                      command=self._update_total)
             rb.pack(side="left")
+            
             if nama == "Main Bebas":
                 tarif_menit = hitung_tarif_per_menit(self.paket_data)
                 harga_txt = f"≈ {fmt_rp(tarif_menit)}/menit"
+                durasi_txt = "Bebas"
             else:
                 harga_txt = "Sesuai Durasi" if harga == 0 and menit == 0 else fmt_rp(harga)
-            durasi_txt = fmt_durasi(menit) if nama != "Main Bebas" else "Sampai ditekan Selesai"
-            ctk.CTkLabel(row, text=f"{harga_txt}  ·  ⏱ {durasi_txt}", font=FONT_LABEL,
-                         text_color=C_MUTED).pack(side="right")
-        ctk.CTkFrame(pf, fg_color="transparent", height=6).pack()
-
-        self._build_menu_section(scroll, "🍔  MAKANAN", self.makanan_data)
-        self._build_menu_section(scroll, "🥤  MINUMAN", self.minuman_data)
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(pady=10)
-        ctk.CTkButton(btn_frame, text="✅  Konfirmasi",
-                      fg_color=C_ACCENT2, hover_color="#5A0FCC",
-                      font=FONT_SUB, width=160,
-                      command=self._confirm).pack(side="left", padx=10)
-        ctk.CTkButton(btn_frame, text="✖  Batal",
-                      fg_color=C_RED, hover_color="#CC0033",
-                      font=FONT_SUB, width=120,
-                      command=self.destroy).pack(side="left", padx=10)
-        self._update_total()
-
-    def _build_menu_section(self, parent, judul, menu_dict):
-        mf = ctk.CTkFrame(parent, fg_color=C_PANEL, corner_radius=10)
-        mf.pack(fill="x", pady=6)
-        ctk.CTkLabel(mf, text=judul, font=FONT_SUB,
-                     text_color=C_ACCENT2).pack(anchor="w", padx=14, pady=6)
+                durasi_txt = fmt_durasi(menit) if menit > 0 else "—"
+            
+            ctk.CTkLabel(row, text=f"{harga_txt} • {durasi_txt}", font=FONT_LABEL,
+                        text_color=C_MUTED).pack(side="right")
+    
+    def _build_menu_content(self, parent, menu_dict):
+        """Build menu items (makanan/minuman) inside collapsible group."""
+        cf = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=6)
+        cf.pack(fill="x", padx=8, pady=4)
+        
         for nama, harga in menu_dict.items():
-            row_f = ctk.CTkFrame(mf, fg_color="transparent")
-            row_f.pack(fill="x", padx=14, pady=3)
-            ctk.CTkLabel(row_f, text=f"{nama}  ·  {fmt_rp(harga)}",
-                         font=FONT_LABEL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
+            row = ctk.CTkFrame(cf, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=3)
+            
+            ctk.CTkLabel(row, text=f"{nama}  •  {fmt_rp(harga)}",
+                        font=FONT_LABEL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
+            
             var = ctk.IntVar(value=0)
             self.pesanan_qty[nama] = var
-            ctk.CTkButton(row_f, text="−", width=26, height=26, fg_color=C_BTN, hover_color=C_RED,
-                          font=("Consolas", 13, "bold"),
-                          command=lambda v=var: (v.set(max(0, v.get()-1)), self._update_total())
-                          ).pack(side="left", padx=2)
-            ctk.CTkLabel(row_f, textvariable=var, width=26,
-                         font=FONT_SUB, text_color=C_ACCENT).pack(side="left")
-            ctk.CTkButton(row_f, text="+", width=26, height=26, fg_color=C_BTN, hover_color=C_GREEN,
-                          font=("Consolas", 13, "bold"),
-                          command=lambda v=var: (v.set(v.get()+1), self._update_total())
-                          ).pack(side="left", padx=2)
-        ctk.CTkFrame(mf, fg_color="transparent", height=6).pack()
+            
+            ctk.CTkButton(row, text="−", width=24, height=24, fg_color=C_BTN, hover_color=C_RED,
+                         font=("Consolas", 11, "bold"),
+                         command=lambda v=var: (v.set(max(0, v.get()-1)), self._update_total())
+                         ).pack(side="left", padx=2)
+            ctk.CTkLabel(row, textvariable=var, width=24,
+                        font=FONT_LABEL, text_color=C_ACCENT).pack(side="left")
+            ctk.CTkButton(row, text="+", width=24, height=24, fg_color=C_BTN, hover_color=C_GREEN,
+                         font=("Consolas", 11, "bold"),
+                         command=lambda v=var: (v.set(v.get()+1), self._update_total())
+                         ).pack(side="left", padx=2)
 
     def _update_total(self):
+        """Update total calculation."""
         info = self.paket_data.get(self.paket_var.get(), {})
         harga_paket = info.get("harga", 0)
         menit_paket = info.get("menit", 0)
         all_menu = {**self.makanan_data, **self.minuman_data}
         total_pesanan = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.pesanan_qty.items())
+        
         nm = self.paket_var.get()
         if nm == "Main Bebas":
             tarif_menit = hitung_tarif_per_menit(self.paket_data)
-            self.lbl_total.configure(
-                text=f"Main Bebas: ≈ {fmt_rp(tarif_menit)}/menit  ·  + pesanan {fmt_rp(total_pesanan)}")
+            total_txt = f"≈ {fmt_rp(tarif_menit)}/menit"
+            if total_pesanan > 0:
+                total_txt += f" + {fmt_rp(total_pesanan)}"
         else:
             total = harga_paket + total_pesanan
-            self.lbl_total.configure(text=f"Total: {fmt_rp(total)}  ·  ⏱ {fmt_durasi(menit_paket)}")
+            total_txt = fmt_rp(total)
+        
+        self.lbl_total.configure(text=total_txt)
 
     def _confirm(self):
+        """Confirm order."""
+        paket_nm    = self.paket_var.get()
+        info        = self.paket_data.get(paket_nm, {})
+        paket_harga = info.get("harga", 0)
+        paket_menit = info.get("menit", 0)
+        all_menu    = {**self.makanan_data, **self.minuman_data}
+        pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
+
         paket_nm    = self.paket_var.get()
         info        = self.paket_data.get(paket_nm, {})
         paket_harga = info.get("harga", 0)
@@ -2048,7 +2258,7 @@ class KartuTV(ctk.CTkFrame):
                  get_paket_data, get_makanan_data, get_minuman_data,
                  get_semua_kartu, nama_grup="Reguler", is_first=False,
                  get_daftar_grup=None, on_ganti_grup=None, **kwargs):
-        super().__init__(master, fg_color=C_CARD, corner_radius=12,
+        super().__init__(master, fg_color=C_CARD, corner_radius=8,
                          border_width=1, border_color=C_BORDER, **kwargs)
         self.nomor        = nomor
         self.ip           = ip
@@ -2085,8 +2295,11 @@ class KartuTV(ctk.CTkFrame):
         hdr.pack(fill="x", padx=4, pady=(3, 2))
         ctk.CTkLabel(hdr, text=self.ip, font=("Courier New", 7, "bold"), 
                      text_color=C_ACCENT).pack(side="left", padx=4, pady=1)
+        self.lbl_ip_port = ctk.CTkLabel(hdr, text=f"{self.ip}:{self.port}",
+                                         font=("Courier New", 6), text_color=C_MUTED, cursor="hand2")
+        self.lbl_ip_port.pack(side="right", padx=2)
+        self.lbl_ip_port.bind("<Button-1>", lambda e: self._buka_ganti_port())
 
-        # Status row: HIDE, Reguler
         st_row = ctk.CTkFrame(self, fg_color="transparent")
         st_row.pack(fill="x", padx=4, pady=1)
         self.lbl_power = ctk.CTkLabel(st_row, text="● HIDE", font=("Courier New", 6), text_color=C_GREEN)
@@ -2098,16 +2311,14 @@ class KartuTV(ctk.CTkFrame):
         self.lbl_paket = ctk.CTkLabel(st_row, text="—", font=("Courier New", 6), text_color=C_MUTED)
         self.lbl_paket.pack(side="right")
 
-        # Timer - centered, large
         self.lbl_timer = ctk.CTkLabel(self, text="00:00:00",
                                        font=("Russo One", 14, "bold"), text_color=C_ACCENT2)
         self.lbl_timer.pack(pady=2)
 
-        # Estimasi biaya (Main Bebas)
+        # Estimasi biaya berjalan (khusus Main Bebas)
         self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 6), text_color=C_GREEN)
         self.lbl_estimasi.pack()
 
-        # Row 1: Power controls (PWR, volume, home)
         r1 = ctk.CTkFrame(self, fg_color="transparent")
         r1.pack(pady=1, fill="x", padx=4)
         self.btn_power = ctk.CTkButton(r1, text="⚡ PWR", width=50, height=20,
@@ -2124,7 +2335,7 @@ class KartuTV(ctk.CTkFrame):
             ctk.CTkButton(r1, text=txt, width=30, height=20, fg_color=C_BTN, hover_color=C_ACCENT2,
                           font=("Courier New", 6), text_color=C_TEXT, command=cmd).pack(side="left", padx=1)
 
-        # Row 2: Action buttons (SELESAI, PESANAN, PINDAH)
+        # Row 2: Action buttons (SELESAI, PESANAN, PINDAH) - fit 3 columns
         r2 = ctk.CTkFrame(self, fg_color="transparent")
         r2.pack(pady=1, fill="x", padx=4)
         self.btn_selesai = ctk.CTkButton(r2, text="⏹", height=20,
@@ -2149,7 +2360,7 @@ class KartuTV(ctk.CTkFrame):
                                          command=self._klik_pindah)
         self.btn_pindah.pack(side="left", fill="x", expand=True, padx=(1, 0))
 
-        # Port button
+        # Port button - full width
         self.btn_ganti_port = ctk.CTkButton(self, text=f"Port {self.port}", height=18,
                                              fg_color=C_BTN, border_width=1, border_color=C_YELLOW,
                                              font=("Courier New", 6), text_color=C_YELLOW,
@@ -2269,6 +2480,38 @@ class KartuTV(ctk.CTkFrame):
                     self.get_paket_data(), self.get_makanan_data(), self.get_minuman_data(),
                     nama_grup=self.nama_grup)
 
+    def _buka_tambah_pesanan(self):
+        """Buka dialog untuk tambah pesanan makanan/minuman saat sesi berjalan."""
+        if not self.paket_aktif:
+            messagebox.showwarning("Tidak Ada Sesi", "Mulai sesi terlebih dahulu untuk memesan.")
+            return
+        
+        # Buka DialogTambahPesanan untuk add order
+        DialogTambahPesanan(self.winfo_toplevel(), self.label_tv, 
+                           self._on_tambah_pesanan_confirm,
+                           self.get_makanan_data(), self.get_minuman_data(),
+                           pesanan_aktif=self.pesanan_aktif.copy())
+
+    def _on_tambah_pesanan_confirm(self, pesanan_baru):
+        """Callback saat user confirm tambah pesanan."""
+        # Merge pesanan baru ke pesanan_aktif
+        all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+        total_baru = 0
+        
+        for nama, qty in pesanan_baru.items():
+            self.pesanan_aktif[nama] = qty
+            total_baru += all_menu.get(nama, 0) * qty
+        
+        # Hitung ulang total
+        total_semua = self.paket_harga_tetap + total_baru if not self.is_bebas else total_baru
+        self.biaya_pesanan = total_baru
+        
+        # Update display
+        if self.is_bebas:
+            self.lbl_paket.configure(text=f"Main Bebas 🕹️ +Pesanan {fmt_rp(total_baru)}")
+        else:
+            self.lbl_paket.configure(text=f"{self.paket_aktif} | {fmt_rp(total_semua)}")
+
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
         self.paket_aktif    = paket_nm
         self.pesanan_aktif  = pesanan
@@ -2295,6 +2538,7 @@ class KartuTV(ctk.CTkFrame):
             self.after_cancel(self._timer_job)
 
         self.btn_selesai.configure(state="normal")
+        self.btn_tambah_pesanan.configure(state="normal")
         self.btn_pindah.configure(state="normal")
         self.btn_paket.configure(text="📦 GANTI PESANAN", fg_color=C_BTN, border_width=1,
                                   border_color=C_ACCENT2, text_color=C_ACCENT2)
@@ -2321,7 +2565,16 @@ class KartuTV(ctk.CTkFrame):
             self.sisa_waktu -= 1
             self._timer_job = self.after(1000, self._tick_waktu)
         else:
-            self.lbl_timer.configure(text="SELESAI ⏹", text_color=C_RED)
+            # WAKTU HABIS — auto power off dan selesai sesi
+            self.lbl_timer.configure(text="WAKTU HABIS ⏹", text_color=C_RED)
+            total_akhir = self.paket_harga_tetap + self.biaya_pesanan
+            self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
+            
+            # Auto power off TV
+            threading.Thread(target=lambda: self._adb_action(
+                lambda: ADBHelper.power_toggle(self.ip, port=self.port)
+            ), daemon=True).start()
+            
             self._reset_sesi()
 
     # ── Timer Main Bebas (maju, hitung estimasi biaya berjalan) ─────────────
@@ -2379,6 +2632,12 @@ class KartuTV(ctk.CTkFrame):
 
         self.lbl_timer.configure(text="SELESAI ⏹", text_color=C_MUTED)
         self.lbl_estimasi.configure(text="")
+        
+        # AUTO POWER OFF TV
+        threading.Thread(target=lambda: self._adb_action(
+            lambda: ADBHelper.power_toggle(self.ip, port=self.port)
+        ), daemon=True).start()
+        
         self._reset_sesi()
 
     def _reset_sesi(self):
@@ -2397,6 +2656,7 @@ class KartuTV(ctk.CTkFrame):
         self.lbl_timer.configure(text="00:00:00", text_color=C_MUTED)
         self.lbl_estimasi.configure(text="")
         self.btn_selesai.configure(state="disabled")
+        self.btn_tambah_pesanan.configure(state="disabled")
         self.btn_pindah.configure(state="disabled")
         self.btn_paket.configure(text="📦 PAKET & PESANAN", fg_color=C_ACCENT2,
                                   border_width=0, text_color="white")
@@ -2836,20 +3096,11 @@ class AutoRentApp(ctk.CTk):
                 self.after(0, lambda: messagebox.showerror("❌ Update Error", f"Update gagal:\n{pull_msg}"))
                 return
             
-            # Success! Now restart
+            # Success! Now restart — jangan tunggu user close dialog
             self.after(0, lambda: messagebox.showinfo(
                 "✅ Update Berhasil",
-                f"Update berhasil!\n\n{pull_msg}\n\nAplikasi akan restart..."
+                f"Update berhasil!\n\n{pull_msg}\n\nAplikasi akan restart sekarang..."
             ))
-            
-            # Restart aplikasi
-            time.sleep(1)
-            app_exe = sys.executable if not hasattr(sys, 'frozen') else sys.executable
-            if hasattr(sys, 'frozen'):
-                app_exe = sys.executable
-            else:
-                # Running as script, restart dengan python
-                app_exe = os.path.abspath(__file__)
             
             # Save audit log sebelum restart
             AuditLogger.log(
@@ -2859,21 +3110,8 @@ class AutoRentApp(ctk.CTk):
                 details={"type": "git", "message": pull_msg}
             )
             
-            # Restart aplikasi
-            if sys.platform == "win32":
-                # Windows: gunakan START command
-                subprocess.Popen(
-                    f'cmd /c start "" "{app_exe}"',
-                    shell=True,
-                    close_fds=True
-                )
-            else:
-                # Unix/Linux/Mac
-                subprocess.Popen([app_exe], close_fds=True)
-            
-            # Keluar dari aplikasi lama
-            time.sleep(0.5)
-            self.master.quit()
+            # Restart aplikasi langsung (tanpa delay menunggu dialog ditutup)
+            self.after(2000, lambda: self._do_restart())
             
         except ImportError as e:
             self.after(0, lambda: messagebox.showerror(
@@ -2936,7 +3174,7 @@ class AutoRentApp(ctk.CTk):
         self._col_frames = []
         for i in range(3):
             col = ctk.CTkFrame(cf, fg_color="transparent")
-            col.grid(row=0, column=i, sticky="nsew", padx=5)
+            col.grid(row=0, column=i, sticky="nsew", padx=2)
             self._col_frames.append(col)
 
     def _unlock_tambah(self):
@@ -2971,7 +3209,7 @@ class AutoRentApp(ctk.CTk):
                         on_ganti_grup=self._on_kartu_ganti_grup,
                         nama_grup=nama_grup,
                         is_first=(self.jumlah_tv == 1))
-        kartu.pack(fill="x", pady=6)
+        kartu.pack(fill="x", pady=2)
         self._semua_kartu_tv.append(kartu)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
 
@@ -4030,6 +4268,35 @@ class AutoRentApp(ctk.CTk):
                 time.sleep(interval_hours * 3600)
             except Exception:
                 break
+
+    def _do_restart(self):
+        """Restart aplikasi dengan benar."""
+        try:
+            if sys.platform == "win32":
+                # Windows: gunakan python.exe atau python3.exe + script path
+                python_exe = sys.executable  # Path ke python.exe
+                script_path = os.path.abspath(__file__)
+                subprocess.Popen(
+                    f'cmd /c start "" "{python_exe}" "{script_path}"',
+                    shell=True,
+                    close_fds=True
+                )
+            else:
+                # Unix/Linux/Mac
+                python_exe = sys.executable
+                script_path = os.path.abspath(__file__)
+                subprocess.Popen([python_exe, script_path], close_fds=True)
+        except Exception as e:
+            AuditLogger.log(
+                action="restart_error",
+                username=self.current_user or "system",
+                status="error",
+                details={"error": str(e)}
+            )
+        finally:
+            # Keluar dari aplikasi lama
+            time.sleep(0.5)
+            self.master.quit()
 
     def _rebuild_sidebar_lic(self):
         self._refresh_license_ui()

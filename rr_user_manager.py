@@ -27,18 +27,18 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-C_BG     = "#0D0D1A"
-C_PANEL  = "#12122A"
-C_CARD   = "#1A1A3A"
-C_ACCENT = "#00FFCC"
-C_ACCENT2= "#7B2FFF"
+C_BG     = "#001A2E"  # Neon Sky Blue background
+C_PANEL  = "#003d5c"
+C_CARD   = "#00527a"
+C_ACCENT = "#00E5FF"  # Neon Cyan
+C_ACCENT2= "#00BFFF"  # Deep Sky Blue
 C_RED    = "#FF3366"
 C_GREEN  = "#39FF14"
 C_YELLOW = "#FFD700"
-C_TEXT   = "#E0E0FF"
-C_MUTED  = "#6060A0"
-C_BTN    = "#1E1E4A"
-C_BORDER = "#2A2A5A"
+C_TEXT   = "#E0FFFF"
+C_MUTED  = "#7EB3D6"
+C_BTN    = "#0A2A42"
+C_BORDER = "#1A5F7A"
 C_ORANGE = "#FF8C00"
 
 FONT_TITLE = ("Russo One", 15, "bold")
