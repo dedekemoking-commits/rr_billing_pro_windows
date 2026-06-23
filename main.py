@@ -2049,37 +2049,25 @@ class DialogPaket(ctk.CTkToplevel):
                                        font=("Russo One", 13, "bold"), text_color=C_YELLOW)
         self.lbl_total.pack(pady=(0, 8))
         
-        # Scrollable content
+        # Scrollable content - HANYA PAKET (makanan/minuman di tab TV)
         scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG)
         scroll.pack(fill="both", expand=True, padx=12, pady=0)
         
-        # Grup 1: PAKET
+        # Grup 1: PAKET SAJA
         self._build_collapsible_group(
             scroll, "paket", "⏱  PAKET RENTAL PS", 
             self._build_paket_content
         )
         
-        # Grup 2: MAKANAN - Always show (even if empty initially, syncs automatically)
-        self._build_collapsible_group(
-            scroll, "makanan", "🍔  MAKANAN",
-            lambda f: self._build_menu_content(f, self.makanan_data)
-        )
-        
-        # Grup 3: MINUMAN - Always show (even if empty initially, syncs automatically)
-        self._build_collapsible_group(
-            scroll, "minuman", "🥤  MINUMAN",
-            lambda f: self._build_menu_content(f, self.minuman_data)
-        )
-        
-        # BUTTONS — paling bawah (HARUS di luar scroll frame!)
+        # BUTTONS — paling bawah
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=12, pady=(8, 12), side="bottom")
+        btn_frame.pack(fill="x", padx=12, pady=(8, 12))
         
-        self.btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
+        btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
                       font=("Russo One", 11, "bold"), height=44,
-                      command=self._confirm)
-        self.btn_mulai.pack(fill="x", pady=(0, 6))
+                      command=lambda: self._on_mulai_sesi())
+        btn_mulai.pack(fill="x", pady=(0, 6))
         
         ctk.CTkButton(btn_frame, text="✖  BATAL",
                       fg_color=C_RED, hover_color="#CC0033",
@@ -2211,6 +2199,18 @@ class DialogPaket(ctk.CTkToplevel):
         
         self.lbl_total.configure(text=total_txt)
 
+    def _on_mulai_sesi(self):
+        """Handle MULAI SESI button click - simplified."""
+        paket_nm = self.paket_var.get()
+        info = self.paket_data.get(paket_nm, {})
+        paket_harga = info.get("harga", 0)
+        paket_menit = info.get("menit", 0)
+        pesanan = {}  # Kosong - makanan/minuman di tab TV
+        total = paket_harga
+        
+        self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+        self.destroy()
+    
     def _confirm(self):
         """Confirm order."""
         try:
