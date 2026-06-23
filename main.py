@@ -179,9 +179,17 @@ APP_VERSION = "2.2.1"
 #  HELPER LOGO
 # ═══════════════════════════════════════════════════════════════════════════════
 def _get_logo_path():
-    """Cari logo.png di folder yang sama dengan main.py (atau script yang berjalan)."""
+    """Cari logo.png atau logo.ico di folder yang sama dengan main.py (atau script yang berjalan)."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, "logo.png")
+    # Coba ico dulu (lebih baik untuk Windows icon)
+    ico_path = os.path.join(base_dir, "logo.ico")
+    if os.path.exists(ico_path):
+        return ico_path
+    # Fallback ke png
+    png_path = os.path.join(base_dir, "logo.png")
+    if os.path.exists(png_path):
+        return png_path
+    return None
 
 
 def load_ctk_image(size=(54, 54)):
@@ -189,7 +197,8 @@ def load_ctk_image(size=(54, 54)):
     Muat logo.png sebagai CTkImage untuk dipakai di CTkLabel.
     Kembalikan CTkImage jika berhasil, None jika gagal.
     """
-    path = _get_logo_path()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "logo.png")
     if not os.path.exists(path):
         return None
     try:
@@ -202,23 +211,28 @@ def load_ctk_image(size=(54, 54)):
 
 def set_window_icon(window):
     """
-    Set logo.png sebagai ikon window (titlebar & taskbar).
-    Bekerja di Windows dan Linux/macOS.
+    Set logo.ico atau logo.png sebagai ikon window (titlebar & taskbar).
+    Coba .ico dulu (lebih baik untuk Windows), fallback ke .png.
     """
     path = _get_logo_path()
-    if not os.path.exists(path):
+    if not path:
         return
+    
     try:
+        # Coba dengan iconbitmap untuk .ico file (Windows)
+        if path.endswith('.ico'):
+            window.iconbitmap(path)
+            return
+        
+        # Fallback: gunakan PNG dengan ImageTk.PhotoImage
         img = Image.open(path)
-        # Buat beberapa ukuran supaya taskbar & titlebar sama-sama bagus
         sizes = [(16,16),(32,32),(48,48),(64,64),(128,128)]
         icons = []
         for s in sizes:
             resized = img.resize(s, Image.LANCZOS)
             icons.append(ImageTk.PhotoImage(resized))
-        # Simpan referensi agar tidak di-garbage-collect
         window._icon_images = icons
-        window.iconphoto(True, *icons[::-1])  # urutan besar → kecil
+        window.iconphoto(True, *icons[::-1])
     except Exception as e:
         print(f"[logo] Gagal set window icon: {e}")
 
