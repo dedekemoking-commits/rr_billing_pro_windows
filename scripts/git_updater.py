@@ -65,9 +65,29 @@ class GitUpdater:
             print(f"Log error: {e}")
     
     def _is_git_repository(self) -> bool:
-        """Check if the repo_path is a valid git repository."""
+        """Check if the repo_path is a valid git repository, looking in multiple locations."""
+        # 1. Cek di repo_path langsung
         git_dir = os.path.join(self.repo_path, ".git")
-        return os.path.isdir(git_dir)
+        if os.path.isdir(git_dir):
+            return True
+        
+        # 2. Cek di parent folder (untuk portable/installed builds)
+        parent_dir = os.path.dirname(self.repo_path)
+        git_dir_parent = os.path.join(parent_dir, ".git")
+        if os.path.isdir(git_dir_parent):
+            self.repo_path = parent_dir  # Update repo_path ke parent
+            self.log_file = os.path.join(parent_dir, "update.log")
+            return True
+        
+        # 3. Cek di parent's parent (2 levels up)
+        grandparent_dir = os.path.dirname(parent_dir)
+        git_dir_grandparent = os.path.join(grandparent_dir, ".git")
+        if os.path.isdir(git_dir_grandparent):
+            self.repo_path = grandparent_dir
+            self.log_file = os.path.join(grandparent_dir, "update.log")
+            return True
+        
+        return False
     
     def check_for_updates(self) -> Tuple[bool, str, Optional[dict]]:
         """
