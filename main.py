@@ -2066,7 +2066,7 @@ class DialogPaket(ctk.CTkToplevel):
         btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
                       font=("Russo One", 11, "bold"), height=44,
-                      command=lambda: self._on_mulai_sesi())
+                      command=self._on_mulai_sesi)
         btn_mulai.pack(fill="x", pady=(0, 6))
         
         ctk.CTkButton(btn_frame, text="✖  BATAL",
@@ -2201,15 +2201,24 @@ class DialogPaket(ctk.CTkToplevel):
 
     def _on_mulai_sesi(self):
         """Handle MULAI SESI button click - simplified."""
-        paket_nm = self.paket_var.get()
-        info = self.paket_data.get(paket_nm, {})
-        paket_harga = info.get("harga", 0)
-        paket_menit = info.get("menit", 0)
-        pesanan = {}  # Kosong - makanan/minuman di tab TV
-        total = paket_harga
-        
-        self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
-        self.destroy()
+        print(f"[DEBUG] _on_mulai_sesi() called")
+        try:
+            paket_nm = self.paket_var.get()
+            print(f"[DEBUG] Paket selected: {paket_nm}")
+            info = self.paket_data.get(paket_nm, {})
+            paket_harga = info.get("harga", 0)
+            paket_menit = info.get("menit", 0)
+            pesanan = {}  # Kosong - makanan/minuman di tab TV
+            total = paket_harga
+            
+            print(f"[DEBUG] Calling on_confirm with: {paket_nm}, {paket_harga}, {paket_menit}")
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+            print(f"[DEBUG] Destroying dialog")
+            self.destroy()
+        except Exception as e:
+            print(f"[ERROR] Exception in _on_mulai_sesi: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _confirm(self):
         """Confirm order."""
