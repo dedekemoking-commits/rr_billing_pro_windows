@@ -2310,6 +2310,8 @@ class KartuTV(ctk.CTkFrame):
                                       text_color=C_ACCENT2, cursor="hand2")
         self.lbl_grup.pack(side="left", padx=2)
         self.lbl_grup.bind("<Button-1>", lambda e: self._buka_ganti_grup())
+        self.lbl_paket = ctk.CTkLabel(st_row, text="—", font=("Courier New", 7), text_color=C_MUTED)
+        self.lbl_paket.pack(side="right")
 
         # Timer display (large)
         self.lbl_timer = ctk.CTkLabel(self, text="00:00:00",
