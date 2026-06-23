@@ -32,17 +32,24 @@ echo [*] Creating installation directory...
 mkdir "%INSTALL_DIR%" 2>nul
 
 echo [*] Copying application files...
-copy /Y "main.exe" "%INSTALL_DIR%\" >nul
+if exist "dist\main.exe" (
+    copy /Y "dist\main.exe" "%INSTALL_DIR%\" >nul
+) else if exist "main.exe" (
+    copy /Y "main.exe" "%INSTALL_DIR%\" >nul
+) else (
+    echo [ERROR] main.exe not found in dist or current directory
+    goto ERROR
+)
 if errorlevel 1 (
     echo [ERROR] Failed to copy main.exe
     goto ERROR
 )
 
 echo [*] Copying configuration files...
-copy /Y "rr_billing_config.json" "%INSTALL_DIR%\" >nul
-copy /Y "logo.png" "%INSTALL_DIR%\" >nul
-copy /Y "rr_billing_license.json" "%INSTALL_DIR%\" >nul
-copy /Y "update_pubkey.pem" "%INSTALL_DIR%\" >nul
+if exist "rr_billing_config.json" copy /Y "rr_billing_config.json" "%INSTALL_DIR%\" >nul
+if exist "logo.png" copy /Y "logo.png" "%INSTALL_DIR%\" >nul
+if exist "rr_billing_license.json" copy /Y "rr_billing_license.json" "%INSTALL_DIR%\" >nul
+if exist "update_pubkey.pem" copy /Y "update_pubkey.pem" "%INSTALL_DIR%\" >nul
 
 echo [*] Creating shortcuts...
 powershell -Command "^
