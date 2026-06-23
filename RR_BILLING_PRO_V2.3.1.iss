@@ -21,7 +21,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
-SetupIconFile=logo.ico
+SetupIconFile=C:\BillingPSkuDesktop\inno_build\app\logo.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesAssociations=no
@@ -45,18 +45,18 @@ Name: "sendto"; Description: "Add to Send To menu"; GroupDescription: "{cm:Addit
 
 [Files]
 ; ── Main Application ────────────────────────────────────────────────────────
-Source: "app\main.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\main.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Essential Assets ────────────────────────────────────────────────────────
-Source: "app\logo.png"; DestDir: "{app}"; Flags: ignoreversion
-Source: "app\logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\logo.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Configuration Files (user can customize) ────────────────────────────────
-Source: "app\rr_billing_config.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: "app\rr_billing_license.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\rr_billing_config.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\rr_billing_license.json"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Security & Update Keys ──────────────────────────────────────────────────
-Source: "app\update_pubkey.pem"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\update_pubkey.pem"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 ; ── File Associations ──────────────────────────────────────────────────────
