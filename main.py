@@ -2290,97 +2290,98 @@ class KartuTV(ctk.CTkFrame):
         self._build()
 
     def _build(self):
-        # Header dengan IP saja (simple)
-        hdr = ctk.CTkFrame(self, fg_color="#0F0F28", corner_radius=4)
-        hdr.pack(fill="x", padx=4, pady=(3, 2))
-        ctk.CTkLabel(hdr, text=self.ip, font=("Courier New", 7, "bold"), 
-                     text_color=C_ACCENT).pack(side="left", padx=4, pady=1)
-        self.lbl_ip_port = ctk.CTkLabel(hdr, text=f"{self.ip}:{self.port}",
-                                         font=("Courier New", 6), text_color=C_MUTED, cursor="hand2")
-        self.lbl_ip_port.pack(side="right", padx=2)
-        self.lbl_ip_port.bind("<Button-1>", lambda e: self._buka_ganti_port())
+        # Header dengan IP di box biru
+        hdr = ctk.CTkFrame(self, fg_color=C_ACCENT2, corner_radius=6)
+        hdr.pack(fill="x", padx=3, pady=(2, 1))
+        ctk.CTkLabel(hdr, text=self.ip, font=("Courier New", 10, "bold"), 
+                     text_color="white").pack(padx=6, pady=3)
 
+        # Status row: HIDEN/Reguler indicators
         st_row = ctk.CTkFrame(self, fg_color="transparent")
-        st_row.pack(fill="x", padx=4, pady=1)
-        self.lbl_power = ctk.CTkLabel(st_row, text="● HIDE", font=("Courier New", 6), text_color=C_GREEN)
+        st_row.pack(fill="x", padx=3, pady=1)
+        self.lbl_power = ctk.CTkLabel(st_row, text="● HIDEN", font=("Courier New", 7, "bold"), 
+                                       text_color=C_GREEN)
         self.lbl_power.pack(side="left", padx=2)
-        self.lbl_grup = ctk.CTkLabel(st_row, text=f"🏷 {self.nama_grup}", font=("Courier New", 6),
+        self.lbl_grup = ctk.CTkLabel(st_row, text="↻ Reguler", font=("Courier New", 7, "bold"),
                                       text_color=C_ACCENT2, cursor="hand2")
-        self.lbl_grup.pack(side="left", padx=4)
+        self.lbl_grup.pack(side="left", padx=2)
         self.lbl_grup.bind("<Button-1>", lambda e: self._buka_ganti_grup())
-        self.lbl_paket = ctk.CTkLabel(st_row, text="—", font=("Courier New", 6), text_color=C_MUTED)
-        self.lbl_paket.pack(side="right")
 
+        # Timer display (large)
         self.lbl_timer = ctk.CTkLabel(self, text="00:00:00",
-                                       font=("Russo One", 14, "bold"), text_color=C_ACCENT2)
-        self.lbl_timer.pack(pady=2)
+                                       font=("Russo One", 22, "bold"), text_color=C_ACCENT2)
+        self.lbl_timer.pack(pady=(4, 2))
 
         # Estimasi biaya berjalan (khusus Main Bebas)
-        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 6), text_color=C_GREEN)
+        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 7), 
+                                          text_color=C_GREEN)
         self.lbl_estimasi.pack()
 
+        # Row 1: PWR button (large) + small buttons
         r1 = ctk.CTkFrame(self, fg_color="transparent")
-        r1.pack(pady=1, fill="x", padx=4)
-        self.btn_power = ctk.CTkButton(r1, text="⚡ PWR", width=50, height=20,
+        r1.pack(pady=2, fill="x", padx=3)
+        self.btn_power = ctk.CTkButton(r1, text="⚡ PWR", width=65, height=24,
                                         fg_color=C_RED, hover_color="#FF6666",
-                                        border_width=1, border_color=C_RED,
-                                        font=("Courier New", 6, "bold"), text_color="white",
+                                        border_width=2, border_color=C_RED,
+                                        font=("Courier New", 7, "bold"), text_color="white",
                                         command=self._toggle_power)
-        self.btn_power.pack(side="left", padx=1)
+        self.btn_power.pack(side="left", padx=(0, 2))
+        
+        # Small control buttons
         for txt, cmd in [
-            ("🔊+", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=True,  port=self.port))),
-            ("🔉−", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=False, port=self.port))),
-            ("🏠",  lambda: self._adb_action(lambda: ADBHelper.home(self.ip, port=self.port))),
+            ("🔧", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=True,  port=self.port))),
+            ("⊖", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=False, port=self.port))),
+            ("🔒", lambda: self._adb_action(lambda: ADBHelper.home(self.ip, port=self.port))),
         ]:
-            ctk.CTkButton(r1, text=txt, width=30, height=20, fg_color=C_BTN, hover_color=C_ACCENT2,
-                          font=("Courier New", 6), text_color=C_TEXT, command=cmd).pack(side="left", padx=1)
+            ctk.CTkButton(r1, text=txt, width=24, height=24, fg_color=C_BTN, 
+                         hover_color=C_ACCENT2,
+                         font=("Courier New", 7), text_color=C_TEXT, 
+                         command=cmd).pack(side="left", padx=1)
 
-        # Row 2: Action buttons (SELESAI, PESANAN, PINDAH) - fit 3 columns
+        # Row 2: SELESAI dan PESANAN buttons (two columns)
         r2 = ctk.CTkFrame(self, fg_color="transparent")
-        r2.pack(pady=1, fill="x", padx=4)
-        self.btn_selesai = ctk.CTkButton(r2, text="⏹", height=20,
-                                          fg_color=C_BTN, hover_color="#3A0000",
-                                          border_width=1, border_color=C_RED,
-                                          font=("Courier New", 6, "bold"), text_color=C_RED,
-                                          state="disabled",
-                                          command=self._klik_selesai)
+        r2.pack(pady=1, fill="x", padx=3)
+        self.btn_selesai = ctk.CTkButton(r2, text="⏹", height=22,
+                                         fg_color=C_BTN, hover_color="#3A0000",
+                                         border_width=2, border_color=C_RED,
+                                         font=("Courier New", 8, "bold"), text_color=C_RED,
+                                         state="disabled",
+                                         command=self._klik_selesai)
         self.btn_selesai.pack(side="left", fill="x", expand=True, padx=(0, 1))
-        self.btn_tambah_pesanan = ctk.CTkButton(r2, text="🍔", height=20,
+        
+        self.btn_tambah_pesanan = ctk.CTkButton(r2, text="🔒", height=22,
                                                 fg_color=C_BTN, hover_color=C_ACCENT2,
-                                                border_width=1, border_color=C_ACCENT,
-                                                font=("Courier New", 6), text_color=C_ACCENT,
+                                                border_width=2, border_color=C_ACCENT,
+                                                font=("Courier New", 8, "bold"), text_color=C_ACCENT,
                                                 state="disabled",
                                                 command=self._buka_tambah_pesanan)
         self.btn_tambah_pesanan.pack(side="left", fill="x", expand=True, padx=1)
-        self.btn_pindah = ctk.CTkButton(r2, text="↔", height=20,
-                                         fg_color=C_BTN, hover_color="#1A1A4A",
-                                         border_width=1, border_color=C_ACCENT,
-                                         font=("Courier New", 6), text_color=C_ACCENT,
-                                         state="disabled",
-                                         command=self._klik_pindah)
-        self.btn_pindah.pack(side="left", fill="x", expand=True, padx=(1, 0))
 
-        # Port button - full width
-        self.btn_ganti_port = ctk.CTkButton(self, text=f"Port {self.port}", height=18,
-                                             fg_color=C_BTN, border_width=1, border_color=C_YELLOW,
-                                             font=("Courier New", 6), text_color=C_YELLOW,
+        # Port button - full width (green)
+        self.btn_ganti_port = ctk.CTkButton(self, text=f"Port {self.port}", height=20,
+                                             fg_color=C_GREEN, border_width=1, 
+                                             border_color=C_GREEN,
+                                             font=("Courier New", 7, "bold"), 
+                                             text_color="white",
                                              command=self._buka_ganti_port)
-        self.btn_ganti_port.pack(fill="x", padx=4, pady=(1, 0))
+        self.btn_ganti_port.pack(fill="x", padx=3, pady=(2, 1))
 
-        # Cek ADB button (only first TV)
+        # Cek ADB button (only first TV) - green
         if self.is_first:
-            self.btn_cek_adb = ctk.CTkButton(self, text="🔍 Cek Koneksi ADB", height=18,
-                                              fg_color=C_BTN, border_width=1, border_color=C_GREEN,
-                                              font=("Courier New", 6), text_color=C_GREEN,
+            self.btn_cek_adb = ctk.CTkButton(self, text="🔌 Cek Koneksi ADB", height=20,
+                                              fg_color=C_GREEN, border_width=1, 
+                                              border_color=C_GREEN,
+                                              font=("Courier New", 7, "bold"), 
+                                              text_color="white",
                                               command=self._cek_koneksi_adb)
-            self.btn_cek_adb.pack(fill="x", padx=4, pady=1)
+            self.btn_cek_adb.pack(fill="x", padx=3, pady=1)
 
-        # Main button: PAKET & PESANAN
-        self.btn_paket = ctk.CTkButton(self, text="📦 PAKET & PESANAN", height=24,
-                                        fg_color=C_ACCENT, hover_color="#00FFFF",
-                                        font=("Russo One", 7, "bold"), text_color="black",
+        # Main button: PAKET & PESANAN (cyan)
+        self.btn_paket = ctk.CTkButton(self, text="📦 PAKET & PESANAN", height=26,
+                                        fg_color=C_ACCENT, hover_color="#00E5FF",
+                                        font=("Russo One", 8, "bold"), text_color="white",
                                         command=self._pilih_paket)
-        self.btn_paket.pack(fill="x", padx=4, pady=(2, 3))
+        self.btn_paket.pack(fill="x", padx=3, pady=(2, 3))
 
     # ── Util status sesi ─────────────────────────────────────────────────────
     def sesi_kosong(self):
