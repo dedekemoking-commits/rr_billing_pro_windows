@@ -2019,7 +2019,7 @@ class DialogPaket(ctk.CTkToplevel):
         self.title(f"Paket & Pesanan — {tv_label}")
         self.geometry("520x680")  # Lebih kecil & compact
         self.configure(fg_color=C_BG)
-        self.grab_set()
+        # JANGAN grab_set() di sini - lakukan nanti setelah UI fully rendered!
         
         self.on_confirm   = on_confirm
         self.tv_label     = tv_label
@@ -2034,6 +2034,9 @@ class DialogPaket(ctk.CTkToplevel):
         self.expanded_groups = {"paket": True, "makanan": False, "minuman": False}
         
         self._build()
+        
+        # grab_set() dipindahkan ke sini - setelah UI fully rendered
+        self.after(100, self.grab_set)
     
     def _build(self):
         # Header
