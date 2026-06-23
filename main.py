@@ -2059,28 +2059,27 @@ class DialogPaket(ctk.CTkToplevel):
             self._build_paket_content
         )
         
-        # Grup 2: MAKANAN
-        if self.makanan_data:
-            self._build_collapsible_group(
-                scroll, "makanan", "🍔  MAKANAN",
-                lambda f: self._build_menu_content(f, self.makanan_data)
-            )
+        # Grup 2: MAKANAN - Always show (even if empty initially, syncs automatically)
+        self._build_collapsible_group(
+            scroll, "makanan", "🍔  MAKANAN",
+            lambda f: self._build_menu_content(f, self.makanan_data)
+        )
         
-        # Grup 3: MINUMAN
-        if self.minuman_data:
-            self._build_collapsible_group(
-                scroll, "minuman", "🥤  MINUMAN",
-                lambda f: self._build_menu_content(f, self.minuman_data)
-            )
+        # Grup 3: MINUMAN - Always show (even if empty initially, syncs automatically)
+        self._build_collapsible_group(
+            scroll, "minuman", "🥤  MINUMAN",
+            lambda f: self._build_menu_content(f, self.minuman_data)
+        )
         
         # BUTTONS — paling bawah
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=12, pady=(8, 12))
         
-        ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
+        self.btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
                       font=("Russo One", 11, "bold"), height=44,
-                      command=self._confirm).pack(fill="x", pady=(0, 6))
+                      command=self._confirm)
+        self.btn_mulai.pack(fill="x", pady=(0, 6))
         ctk.CTkButton(btn_frame, text="✖  BATAL",
                       fg_color=C_RED, hover_color="#CC0033",
                       font=("Russo One", 10, "bold"), height=38,
@@ -2165,6 +2164,10 @@ class DialogPaket(ctk.CTkToplevel):
         """Build menu items (makanan/minuman) inside collapsible group."""
         cf = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=6)
         cf.pack(fill="x", padx=8, pady=4)
+        
+        if not menu_dict:
+            ctk.CTkLabel(cf, text="(Tidak ada item)", font=FONT_SMALL, text_color=C_MUTED).pack(pady=8)
+            return
         
         for nama, harga in menu_dict.items():
             row = ctk.CTkFrame(cf, fg_color="transparent")
