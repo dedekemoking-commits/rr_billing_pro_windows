@@ -58,6 +58,9 @@ Source: "C:\BillingPSkuDesktop\inno_build\app\rr_billing_license.json"; DestDir:
 ; ── Security & Update Keys ──────────────────────────────────────────────────
 Source: "C:\BillingPSkuDesktop\inno_build\app\update_pubkey.pem"; DestDir: "{app}"; Flags: ignoreversion
 
+; ── Git Repository (for Git update feature) ──────────────────────────────────
+Source: "C:\BillingPSkuDesktop\inno_build\app\.git\*"; DestDir: "{app}\.git"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Registry]
 ; ── File Associations ──────────────────────────────────────────────────────
 Root: HKCR; Subkey: ".rr"; ValueType: string; ValueName: ""; ValueData: "RRBillingFile"; Flags: uninsdeletevalue
