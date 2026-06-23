@@ -58,11 +58,13 @@ Source: "C:\BillingPSkuDesktop\inno_build\app\rr_billing_license.json"; DestDir:
 ; ── Security & Update Keys ──────────────────────────────────────────────────
 Source: "C:\BillingPSkuDesktop\inno_build\app\update_pubkey.pem"; DestDir: "{app}"; Flags: ignoreversion
 
-; ── Git Repository (for Git update feature) ──────────────────────────────────
-Source: "C:\BillingPSkuDesktop\inno_build\app\.git\*"; DestDir: "{app}\.git"; Flags: ignoreversion recursesubdirs createallsubdirs
+; ── Git Repository - OPTIONAL (too large ~1.5GB for installer)
+; NOTE: For Git update support, users can run: git clone <repo> from app folder
+; Or download prebuilt portable with .git included
+; Source: "C:\BillingPSkuDesktop\inno_build\app\.git\*"; DestDir: "{app}\.git"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; ── Python Scripts (for git update & other utilities) ──────────────────────────
-Source: "C:\BillingPSkuDesktop\inno_build\app\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
+; ── Python Scripts - OPTIONAL (included in dist/scripts, can be deployed separately)
+; Source: "C:\BillingPSkuDesktop\inno_build\app\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 ; ── File Associations ──────────────────────────────────────────────────────
