@@ -54,3 +54,5 @@
 {"timestamp": "2026-06-23T12:27:49.396853", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-06-23T12:30:14.882683", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-06-23T12:34:09.675464", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:47:37.162358", "action": "login_failed", "username": "rrgaming", "status": "failed", "details": {"attempts": 1}}
+{"timestamp": "2026-06-23T12:47:42.801549", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}

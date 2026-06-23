@@ -2071,15 +2071,16 @@ class DialogPaket(ctk.CTkToplevel):
             lambda f: self._build_menu_content(f, self.minuman_data)
         )
         
-        # BUTTONS — paling bawah
+        # BUTTONS — paling bawah (HARUS di luar scroll frame!)
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=12, pady=(8, 12))
+        btn_frame.pack(fill="x", padx=12, pady=(8, 12), side="bottom")
         
         self.btn_mulai = ctk.CTkButton(btn_frame, text="✅  MULAI SESI",
                       fg_color=C_ACCENT2, hover_color=C_ACCENT,
                       font=("Russo One", 11, "bold"), height=44,
                       command=self._confirm)
         self.btn_mulai.pack(fill="x", pady=(0, 6))
+        
         ctk.CTkButton(btn_frame, text="✖  BATAL",
                       fg_color=C_RED, hover_color="#CC0033",
                       font=("Russo One", 10, "bold"), height=38,
@@ -2212,25 +2213,28 @@ class DialogPaket(ctk.CTkToplevel):
 
     def _confirm(self):
         """Confirm order."""
-        paket_nm    = self.paket_var.get()
-        info        = self.paket_data.get(paket_nm, {})
-        paket_harga = info.get("harga", 0)
-        paket_menit = info.get("menit", 0)
-        all_menu    = {**self.makanan_data, **self.minuman_data}
-        pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
-        
-        # Hitung total pesanan dengan aman (hindari KeyError)
-        total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
-        
-        if paket_nm == "Main Bebas":
-            # Total biaya waktu belum diketahui sampai pemain selesai main.
-            # Yang dikirim di sini hanya total pesanan tambahan (makanan/minuman).
-            total = total_pesanan
-        else:
-            total = paket_harga + total_pesanan
-        
-        self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
-        self.destroy()
+        try:
+            paket_nm    = self.paket_var.get()
+            info        = self.paket_data.get(paket_nm, {})
+            paket_harga = info.get("harga", 0)
+            paket_menit = info.get("menit", 0)
+            all_menu    = {**self.makanan_data, **self.minuman_data}
+            pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
+            
+            # Hitung total pesanan dengan aman (hindari KeyError)
+            total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            
+            if paket_nm == "Main Bebas":
+                # Total biaya waktu belum diketahui sampai pemain selesai main.
+                # Yang dikirim di sini hanya total pesanan tambahan (makanan/minuman).
+                total = total_pesanan
+            else:
+                total = paket_harga + total_pesanan
+            
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror("Error", f"Terjadi kesalahan: {str(e)}")
 
 
 def hitung_tarif_per_menit(paket_data):
