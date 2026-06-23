@@ -2218,20 +2218,17 @@ class DialogPaket(ctk.CTkToplevel):
         paket_menit = info.get("menit", 0)
         all_menu    = {**self.makanan_data, **self.minuman_data}
         pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
-
-        paket_nm    = self.paket_var.get()
-        info        = self.paket_data.get(paket_nm, {})
-        paket_harga = info.get("harga", 0)
-        paket_menit = info.get("menit", 0)
-        all_menu    = {**self.makanan_data, **self.minuman_data}
-        pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
-        total_pesanan = sum(all_menu[nm]*qty for nm, qty in pesanan.items())
+        
+        # Hitung total pesanan dengan aman (hindari KeyError)
+        total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+        
         if paket_nm == "Main Bebas":
             # Total biaya waktu belum diketahui sampai pemain selesai main.
             # Yang dikirim di sini hanya total pesanan tambahan (makanan/minuman).
             total = total_pesanan
         else:
             total = paket_harga + total_pesanan
+        
         self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
         self.destroy()
 
