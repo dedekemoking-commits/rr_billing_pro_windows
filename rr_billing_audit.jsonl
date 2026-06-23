@@ -37,3 +37,6 @@
 {"timestamp": "2026-06-22T22:55:01.628521", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-06-22T23:59:58.749600", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-06-23T00:00:21.762045", "action": "logout", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T01:48:05.539029", "action": "login_success", "username": "kasir", "status": "success", "details": {"role": "kasir"}}
+{"timestamp": "2026-06-23T09:36:34.842258", "action": "login_failed", "username": "admin", "status": "failed", "details": {"attempts": 1}}
+{"timestamp": "2026-06-23T09:36:44.453812", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}

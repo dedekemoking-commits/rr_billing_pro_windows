@@ -228,6 +228,14 @@
     "kasir1": {
       "trial_start": "2026-06-22",
       "trial_days": 3
+    },
+    "kasir": {
+      "trial_start": "2026-06-23",
+      "trial_days": 3
+    },
+    "rrgaming": {
+      "trial_start": "2026-06-23",
+      "trial_days": 3
     }
   },
   "pending_email_verifications": {
