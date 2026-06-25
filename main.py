@@ -2837,6 +2837,13 @@ class KartuTV(ctk.CTkFrame):
                         updated_row = (waktu, app.current_user, self.label_tv, self.paket_aktif, pesanan_str, total_str)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
+                        # update meta if present
+                        try:
+                            app.riwayat_meta[idx]['pesanan_total'] = sum(
+                                app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            app.riwayat_meta[idx]['total'] = total_akhir
+                        except Exception:
+                            pass
                         if hasattr(app, '_refresh_riwayat_summary'):
                             app._refresh_riwayat_summary()
             else:
@@ -3041,6 +3048,8 @@ class KartuTV(ctk.CTkFrame):
 #  APLIKASI UTAMA
 # ═══════════════════════════════════════════════════════════════════════════════
 class AutoRentApp(ctk.CTk):
+    pass
+
     def __init__(self):
         super().__init__()
         self.title("RR BILLING PRO — Billing TV System")
@@ -3055,9 +3064,11 @@ class AutoRentApp(ctk.CTk):
         self.current_role  = None
         self.jumlah_tv     = 0
         self.riwayat_transaksi = []
+        self.riwayat_meta = []  # parallel metadata: dicts with keys: source('tv'|'warnet'), pesanan_total(int), total(int)
         self._tree_item_to_index = {}
         self._tambah_btn_enabled = True
         self._semua_kartu_tv  = []   # daftar semua KartuTV yang sedang ada di Dashboard
+        self._semua_kartu_warnet = []  # daftar kartu warnet
 
         cfg = ConfigManager.load()
         self.grup_tarif   = self._migrasi_grup_tarif(cfg.get("grup_tarif"), cfg.get("paket_main"))
@@ -3195,11 +3206,12 @@ class AutoRentApp(ctk.CTk):
         self._build_sidebar()
 
         self.frames = {}
-        for name in ["dashboard", "harga", "riwayat", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
+        for name in ["dashboard", "warnet", "harga", "riwayat", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
             f = ctk.CTkFrame(self.content, fg_color=C_BG, corner_radius=0)
             self.frames[name] = f
 
         self._setup_dashboard()
+        self._setup_warnet()
         self._setup_harga()
         self._setup_riwayat()
         self._setup_wifi()
@@ -3249,6 +3261,7 @@ class AutoRentApp(ctk.CTk):
 
         nav_items = [
             ("📺", "Dashboard TV",    "dashboard"),
+            ("🖥️", "Dashboard Warnet", "warnet"),
             ("⚙️", "Kontrol Harga",   "harga"),
             ("📊", "Riwayat",         "riwayat"),
             ("📡", "Koneksi WiFi",    "wifi"),
@@ -3438,19 +3451,67 @@ class AutoRentApp(ctk.CTk):
             self.lbl_dashboard_total_pesanan.configure(text=f"Total Pesanan: {fmt_rp(total)}")
 
     def _refresh_riwayat_summary(self):
-        total_uang = sum(
-            int(r[5].replace("Rp ", "").replace(".", ""))
-            for r in self.riwayat_transaksi
-            if r[5] and "Rp" in r[5]
+        # Compute totals split by source
+        total_tv = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
+        total_all = total_tv + total_warnet
+        summary_text = (
+            f"Total TV: {fmt_rp(total_tv)}  |  Total Warnet: {fmt_rp(total_warnet)}  |  "
+            f"Total Pesanan Makanan/Minuman: {fmt_rp(total_pesanan)}  |  TOTAL: {fmt_rp(total_all)}"
         )
-        summary_text = f"Total Transaksi: {len(self.riwayat_transaksi)}  |  Total Pendapatan: {fmt_rp(total_uang)}"
-        self.lbl_rekap.configure(text=summary_text)
+        # Keep a short summary in the left label as before
+        short_text = f"Total Transaksi: {len(self.riwayat_transaksi)}  |  Total Pendapatan: {fmt_rp(total_all)}"
+        self.lbl_rekap.configure(text=short_text)
         if hasattr(self, 'lbl_rekap_footer'):
+            # show full breakdown in footer
             self.lbl_rekap_footer.configure(text=summary_text)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 1: Dashboard
     # ══════════════════════════════════════════════════════════════════════════
+    def _setup_warnet(self):
+        f = self.frames["warnet"]
+        hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
+        hdr.pack(fill="x")
+        ctk.CTkLabel(hdr, text="💻  DASHBOARD WARnet",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
+        self.lbl_total_warnet = ctk.CTkLabel(hdr, text="Total Kursi: 0",
+                                             font=FONT_BODY, text_color=C_MUTED)
+        self.lbl_total_warnet.pack(side="left", padx=20)
+        self.btn_warnet_demo = ctk.CTkButton(hdr, text="🧪 Demo Warnet", width=140, height=34,
+                                            fg_color=C_BTN, hover_color=C_ACCENT2,
+                                            border_width=1, border_color=C_ACCENT2,
+                                            font=("Russo One", 10, "bold"),
+                                            text_color=C_ACCENT2,
+                                            command=self._tambah_warnet_demo)
+        self.btn_warnet_demo.pack(side="right", padx=10, pady=10)
+        self.btn_tambah_warnet = ctk.CTkButton(hdr, text="➕  Tambah Kursi", width=150, height=34,
+                                             fg_color=C_ACCENT2, hover_color="#5A0FCC",
+                                             font=("Russo One", 10, "bold"),
+                                             command=self._buka_dialog_tambah_warnet)
+        self.btn_tambah_warnet.pack(side="right", padx=8, pady=10)
+
+        self.scroll_warnet = ctk.CTkScrollableFrame(f, fg_color=C_BG)
+        self.scroll_warnet.pack(fill="both", expand=True, padx=6, pady=6)
+        cf = ctk.CTkFrame(self.scroll_warnet, fg_color="transparent")
+        cf.pack(fill="both", expand=True)
+        cf.columnconfigure(0, weight=1); cf.columnconfigure(1, weight=1); cf.columnconfigure(2, weight=1)
+        self._grid_container_warnet = cf
+        self._col_frames_warnet = []
+        for i in range(3):
+            col = ctk.CTkFrame(cf, fg_color="transparent")
+            col.grid(row=0, column=i, sticky="nsew", padx=2)
+            self._col_frames_warnet.append(col)
+
+        footer = ctk.CTkFrame(f, fg_color=C_PANEL, height=40, corner_radius=0)
+        footer.pack(fill="x", padx=6, pady=(0, 6))
+        footer.pack_propagate(False)
+        self.lbl_warnet_total_pendapatan = ctk.CTkLabel(footer,
+                                                       text="Total Pendapatan Warnet: Rp 0",
+                                                       font=FONT_BODY, text_color=C_YELLOW)
+        self.lbl_warnet_total_pendapatan.pack(side="right", padx=18, pady=8)
+
     def _setup_dashboard(self):
         f = self.frames["dashboard"]
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
@@ -3557,6 +3618,43 @@ class AutoRentApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 2: Kontrol Harga
     # ══════════════════════════════════════════════════════════════════════════
+    def _buka_dialog_tambah_warnet(self):
+        if not self._tambah_btn_enabled: return
+        self._tambah_btn_enabled = False
+        self.btn_tambah_warnet.configure(state="disabled", text="⏳ Menunggu...")
+        # Simple input dialog using CTkInputDialog for name
+        dlg = ctk.CTkInputDialog(text="Nama Kursi / PC:", title=f"Tambah Kursi Warnet")
+        nama = dlg.get_input()
+        if nama:
+            self._tambah_warnet(nama=nama)
+        self._tambah_btn_enabled = True
+        self.btn_tambah_warnet.configure(state="normal", text="➕  Tambah Kursi")
+
+    def _tambah_warnet_demo(self):
+        demo_count = sum(1 for k in self._semua_kartu_warnet if k.label_kursi.startswith("Demo PC")) + 1
+        demo_name = f"Demo PC {demo_count}"
+        self._tambah_warnet(nama=demo_name)
+
+    def _tambah_warnet(self, nama):
+        self.jumlah_warnet = getattr(self, 'jumlah_warnet', 0) + 1
+        kolom = (self.jumlah_warnet - 1) % 3
+        kartu = KartuWarnet(self._col_frames_warnet[kolom], self.jumlah_warnet,
+                            label_kursi=nama,
+                            on_transaksi=self._catat_transaksi,
+                            get_paket_data=lambda g=None: self.get_paket_data(),
+                            get_makanan_data=self.get_makanan_data,
+                            get_minuman_data=self.get_minuman_data)
+        kartu.pack(fill="x", pady=2)
+        self._semua_kartu_warnet.append(kartu)
+        self.lbl_total_warnet.configure(text=f"Total Kursi: {self.jumlah_warnet}")
+        self._refresh_warnet_footer()
+
+    def _refresh_warnet_footer(self):
+        # Sum warnet totals from riwayat_meta
+        total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
+        if hasattr(self, 'lbl_warnet_total_pendapatan'):
+            self.lbl_warnet_total_pendapatan.configure(text=f"Total Pendapatan Warnet: {fmt_rp(total_warnet)}")
+
     def _setup_harga(self):
         f = self.frames["harga"]
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
@@ -3992,6 +4090,7 @@ class AutoRentApp(ctk.CTk):
     #  TAB 3: Riwayat
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_riwayat(self):
+        # (riwayat unchanged UI)
         f = self.frames["riwayat"]
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
@@ -4043,21 +4142,48 @@ class AutoRentApp(ctk.CTk):
         self.lbl_rekap_footer.pack(side="left", padx=18, pady=8)
 
     def _catat_transaksi(self, kota, paket, pesanan, total):
+        """Catat transaksi ke riwayat.
+        pesanan: dict nama->qty
+        kota: string (use prefix 'Warnet' or 'Warnet:' to mark source warnet)
+        total: int (total rupiah)
+        """
         waktu       = datetime.now().strftime("%Y-%m-%d %H:%M")
+        pesanan = pesanan or {}
         pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in pesanan.items()) or "—"
-        row = (waktu, self.current_user, kota, paket, pesanan_str, fmt_rp(total))
+
+        # Determine source: warnet if kota startswith 'Warnet' (case-insensitive), else tv
+        src = 'warnet' if isinstance(kota, str) and kota.strip().lower().startswith('warnet') else 'tv'
+
+        # compute pesanan total (money) using menu prices
+        all_menu = {**self.menu_makanan, **self.menu_minuman}
+        pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in (pesanan.items() if isinstance(pesanan, dict) else []))
+
+        # ensure total is int
+        try:
+            total_int = int(total)
+        except Exception:
+            # try to extract from formatted string
+            try:
+                total_int = int(str(total).replace('Rp ', '').replace('.', '').strip())
+            except Exception:
+                total_int = pesanan_total
+
+        row = (waktu, self.current_user, kota, paket, pesanan_str, fmt_rp(total_int))
         self.riwayat_transaksi.append(row)
+        # maintain parallel meta
+        self.riwayat_meta.append({'source': src, 'pesanan_total': pesanan_total, 'total': total_int})
+
         item_id = self.tree.insert("", 0, values=row)
         self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
-        total_uang = sum(
-            int(r[5].replace("Rp ", "").replace(".", ""))
-            for r in self.riwayat_transaksi
-            if r[5] != "—"
-        )
-        rekap_text = f"Total Transaksi: {len(self.riwayat_transaksi)}  |  Total Pendapatan: {fmt_rp(total_uang)}"
-        self.lbl_rekap.configure(text=rekap_text)
-        if hasattr(self, 'lbl_rekap_footer'):
-            self.lbl_rekap_footer.configure(text=rekap_text)
+
+        # refresh summaries
+        if hasattr(self, '_refresh_riwayat_summary'):
+            self._refresh_riwayat_summary()
+        if hasattr(self, '_refresh_warnet_footer'):
+            self._refresh_warnet_footer()
+        if hasattr(self, '_refresh_dashboard_total_pesanan'):
+            self._refresh_dashboard_total_pesanan()
+
         return item_id
 
     def _bersihkan_riwayat(self):
@@ -4091,6 +4217,23 @@ class AutoRentApp(ctk.CTk):
         finally:
             menu.grab_release()
 
+    def _rebuild_tree_item_index(self):
+        # Rebuild mapping item_id -> riwayat_transaksi index (best-effort by matching row values)
+        self._tree_item_to_index.clear()
+        items = list(self.tree.get_children())
+        for item_id in items:
+            vals = tuple(self.tree.item(item_id, 'values'))
+            # find matching index in riwayat_transaksi
+            idx = None
+            for i, r in enumerate(self.riwayat_transaksi):
+                if tuple(r) == vals:
+                    idx = i
+                    break
+            if idx is None:
+                # fallback: use position-based mapping (assume newest at 0)
+                idx = max(0, len(self.riwayat_transaksi) - 1 - items.index(item_id))
+            self._tree_item_to_index[item_id] = idx
+
     def _ask_admin_and_delete(self, iid):
         # Dialog kecil untuk meminta username + password admin untuk otorisasi
         dlg = ctk.CTkToplevel(self)
@@ -4121,25 +4264,37 @@ class AutoRentApp(ctk.CTk):
                 AuditLogger.log(action="authorize_delete_failed", username=uname, status="bad_password")
                 return
             # authorized
-            row_values = self.tree.item(iid, "values")
-            # remove from internal list
-            try:
-                self.riwayat_transaksi.remove(row_values)
-            except ValueError:
-                pass
+            row_values = tuple(self.tree.item(iid, "values"))
+            # find index in riwayat_transaksi
+            idx = None
+            for i, r in enumerate(self.riwayat_transaksi):
+                if tuple(r) == row_values:
+                    idx = i
+                    break
+            if idx is not None:
+                try:
+                    self.riwayat_transaksi.pop(idx)
+                except Exception:
+                    pass
+                try:
+                    self.riwayat_meta.pop(idx)
+                except Exception:
+                    pass
+            else:
+                # fallback: try to remove by value
+                try:
+                    self.riwayat_transaksi.remove(list(row_values))
+                except Exception:
+                    pass
             self.tree.delete(iid)
             AuditLogger.log(action="transaction_deleted", username=uname, status="success", details={"row": row_values})
             dlg.destroy()
-            # refresh rekap
-            total_uang = sum(
-                int(r[5].replace("Rp ", "").replace(".", ""))
-                for r in self.riwayat_transaksi
-                if r[5] != "—"
-            )
-            summary_text = f"Total Transaksi: {len(self.riwayat_transaksi)}  |  Total Pendapatan: {fmt_rp(total_uang)}"
-            self.lbl_rekap.configure(text=summary_text)
+            # rebuild index mapping and refresh rekap
+            self._rebuild_tree_item_index()
+            if hasattr(self, '_refresh_riwayat_summary'):
+                self._refresh_riwayat_summary()
             if hasattr(self, 'lbl_rekap_footer'):
-                self.lbl_rekap_footer.configure(text=summary_text)
+                self.lbl_rekap_footer.configure(text=self.lbl_rekap.cget('text'))
 
         btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
         btn_frame.pack(fill="x", padx=16, pady=(8, 16))
