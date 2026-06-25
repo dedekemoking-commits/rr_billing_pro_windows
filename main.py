@@ -4005,11 +4005,6 @@ class AutoRentApp(ctk.CTk):
                       border_width=1, border_color=C_GREEN,
                       font=("Russo One", 10, "bold"), text_color=C_GREEN,
                       command=self._export_excel).pack(side="left", padx=4)
-        ctk.CTkButton(btn_row, text="🗑 Bersihkan", width=100, height=34,
-                      fg_color="#4A0000", hover_color="#3A0000",
-                      border_width=1, border_color=C_RED,
-                      font=("Russo One", 9, "bold"), text_color=C_RED,
-                      command=self._bersihkan_riwayat).pack(side="left", padx=4)
 
         rekap_f = ctk.CTkFrame(f, fg_color=C_PANEL, height=44, corner_radius=0)
         rekap_f.pack(fill="x")
@@ -4100,15 +4095,17 @@ class AutoRentApp(ctk.CTk):
         # Dialog kecil untuk meminta username + password admin untuk otorisasi
         dlg = ctk.CTkToplevel(self)
         dlg.title("Otorisasi Admin")
-        dlg.geometry("360x200")
+        dlg.geometry("420x260")
+        dlg.resizable(False, False)
+        dlg.transient(self)
         dlg.grab_set()
-        ctk.CTkLabel(dlg, text="Masukkan akun admin untuk menghapus transaksi", font=FONT_BODY, text_color=C_MUTED).pack(pady=(12,8))
+        ctk.CTkLabel(dlg, text="Masukkan akun admin untuk menghapus transaksi", font=FONT_BODY, text_color=C_MUTED).pack(pady=(16,12), padx=16)
         entry_user = ctk.CTkEntry(dlg, placeholder_text="username admin", fg_color=C_BTN, text_color=C_TEXT)
-        entry_user.pack(padx=24, pady=(4,8))
+        entry_user.pack(padx=24, pady=(4,10), fill="x")
         entry_pass = ctk.CTkEntry(dlg, placeholder_text="password admin", show="●", fg_color=C_BTN, text_color=C_TEXT)
-        entry_pass.pack(padx=24, pady=(0,12))
+        entry_pass.pack(padx=24, pady=(0,12), fill="x")
         status = ctk.CTkLabel(dlg, text="", text_color=C_RED)
-        status.pack()
+        status.pack(padx=16, pady=(0,10))
 
         def submit():
             uname = entry_user.get().strip()
@@ -4144,8 +4141,13 @@ class AutoRentApp(ctk.CTk):
             if hasattr(self, 'lbl_rekap_footer'):
                 self.lbl_rekap_footer.configure(text=summary_text)
 
-        ctk.CTkButton(dlg, text="🔒 Authorize & Hapus", fg_color=C_ACCENT2, command=submit).pack(pady=(8,6))
-        ctk.CTkButton(dlg, text="✖ Batal", fg_color=C_RED, command=dlg.destroy).pack()
+        btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=16, pady=(8, 16))
+        ctk.CTkButton(btn_frame, text="✖ Batal", width=120, height=36,
+                      fg_color=C_RED, hover_color="#7A1A1A", command=dlg.destroy).pack(side="left")
+        ctk.CTkButton(btn_frame, text="🔒 Authorize & Hapus", width=180, height=36,
+                      fg_color=C_ACCENT2, hover_color="#5A0FCC", command=submit).pack(side="right")
+
 
     def _export_excel(self):
         if not self.riwayat_transaksi:
