@@ -4,6 +4,7 @@ from tkinter import ttk, messagebox, filedialog
 import subprocess
 import threading
 import time
+import socket
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ import shutil
 import json
 import hashlib
 import bcrypt  # ← Password hashing with salt
+import jwt  # ← JWT tokens
 import re
 import webbrowser
 import smtplib
@@ -44,6 +46,410 @@ def verify_password(password: str, password_hash: str) -> bool:
     except Exception as e:
         print(f"Password verification error: {e}")
         return False
+
+
+WARNET_ADMIN_CODE_SECRET = "RR_WARNET_CFG_LOCK_V1"
+
+
+def generate_warnet_admin_code(client_ip: str, day: datetime = None) -> str:
+    """Generate kode akses pengaturan client berdasarkan IP + tanggal."""
+    ip = (client_ip or "").strip()
+    if not ip:
+        return ""
+    day = day or datetime.now()
+    date_key = day.strftime("%Y%m%d")
+    digest = hashlib.sha256(f"{ip}|{date_key}|{WARNET_ADMIN_CODE_SECRET}".encode("utf-8")).hexdigest().upper()
+    return f"{digest[0:4]}-{digest[8:12]}-{digest[20:24]}"
+
+
+# ─── WARNET SOCKET SERVER FOR CLIENT APPS ──────────────────────────────────────
+
+class TokenManager:
+    """JWT token manager untuk warnet client authentication."""
+    SECRET_KEY = "rr_billing_warnet_secret_2024"
+    ALGORITHM = "HS256"
+    TOKEN_EXPIRY_DAYS = 180  # 6 months
+    
+    @classmethod
+    def generate_token(cls, client_id: str) -> str:
+        """Generate JWT token dengan 6-month expiry."""
+        now = datetime.now()
+        exp_time = now + timedelta(days=cls.TOKEN_EXPIRY_DAYS)
+        
+        payload = {
+            "client_id": client_id,
+            "iat": int(now.timestamp()),
+            "exp": int(exp_time.timestamp())
+        }
+        return jwt.encode(payload, cls.SECRET_KEY, algorithm=cls.ALGORITHM)
+    
+    @classmethod
+    def verify_token(cls, token: str) -> dict:
+        """Verify token dan return payload, raise exception jika invalid."""
+        try:
+            payload = jwt.decode(token, cls.SECRET_KEY, algorithms=[cls.ALGORITHM])
+            return payload
+        except jwt.ExpiredSignatureError as e:
+            raise Exception(f"Token expired: {e}")
+        except jwt.InvalidSignatureError as e:
+            raise Exception(f"Invalid signature: {e}")
+        except jwt.DecodeError as e:
+            raise Exception(f"Decode error: {e}")
+        except jwt.InvalidTokenError as e:
+            raise Exception(f"Invalid token: {e}")
+        except ValueError as e:
+            # jwt.decode can raise ValueError for malformed tokens
+            raise Exception(f"Malformed token: {e}")
+        except Exception as e:
+            raise Exception(f"Token verification error ({type(e).__name__}): {e}")
+    
+    @classmethod
+    def is_token_valid(cls, token: str) -> bool:
+        """Quick check if token is valid."""
+        try:
+            cls.verify_token(token)
+            return True
+        except:
+            return False
+
+
+class WarnetSocketServer:
+    """Socket server untuk warnet client app connections."""
+    
+    def __init__(self, config_manager=None, listen_port=5000):
+        self.config_manager = config_manager or ConfigManager
+        self.listen_port = listen_port
+        self.listen_address = "0.0.0.0"
+        self.server_socket = None
+        self.running = False
+        self.sessions = {}  # {session_token: {client_id, last_heartbeat, address}}
+        self.sessions_lock = threading.Lock()
+        self.token_manager = TokenManager()
+    
+    def start(self):
+        """Start socket server di background thread."""
+        if self.running:
+            return
+        
+        self.running = True
+        server_thread = threading.Thread(target=self._accept_connections, daemon=True)
+        server_thread.start()
+        print(f"[WARNET SERVER] Started on {self.listen_address}:{self.listen_port}")
+    
+    def stop(self):
+        """Stop socket server."""
+        self.running = False
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
+    
+    def _accept_connections(self):
+        """Accept incoming client connections."""
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.listen_address, self.listen_port))
+            self.server_socket.listen(20)
+            
+            while self.running:
+                try:
+                    self.server_socket.settimeout(1)
+                    client_socket, address = self.server_socket.accept()
+                    client_thread = threading.Thread(
+                        target=self._handle_client,
+                        args=(client_socket, address),
+                        daemon=True
+                    )
+                    client_thread.start()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"[WARNET SERVER] Accept error: {e}")
+        
+        except Exception as e:
+            print(f"[WARNET SERVER] Server error: {e}")
+        finally:
+            self.running = False
+    
+    def _handle_client(self, client_socket, address):
+        """Handle single client connection."""
+        session_token = None
+        try:
+            while self.running:
+                client_socket.settimeout(5)
+                data = client_socket.recv(4096).decode('utf-8')
+                
+                if not data:
+                    break
+                
+                message = json.loads(data)
+                response = self._process_message(message)
+                
+                # Track session if AUTH successful
+                if message.get("type") == "AUTH" and response.get("status") == "OK":
+                    session_token = response.get("session_token")
+                    with self.sessions_lock:
+                        self.sessions[session_token] = {
+                            "client_id": message.get("client_id"),
+                            "last_heartbeat": time.time(),
+                            "address": address
+                        }
+                
+                # Update heartbeat
+                if session_token and message.get("type") in ["COMMAND", "PING"]:
+                    with self.sessions_lock:
+                        if session_token in self.sessions:
+                            self.sessions[session_token]["last_heartbeat"] = time.time()
+                
+                client_socket.sendall(json.dumps(response).encode('utf-8'))
+        
+        except socket.timeout:
+            pass
+        except json.JSONDecodeError:
+            try:
+                error_response = {"type": "ERROR", "message": "Invalid JSON"}
+                client_socket.sendall(json.dumps(error_response).encode('utf-8'))
+            except:
+                pass
+        except Exception as e:
+            print(f"[WARNET SERVER] Client error ({address}): {e}")
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
+            
+            # Remove session on disconnect
+            if session_token:
+                with self.sessions_lock:
+                    self.sessions.pop(session_token, None)
+    
+    def _process_message(self, message: dict) -> dict:
+        """Process incoming message and return response."""
+        msg_type = message.get("type")
+        
+        if msg_type == "AUTH":
+            return self._handle_auth(message)
+        elif msg_type == "COMMAND":
+            return self._handle_command(message)
+        elif msg_type == "PING":
+            return self._handle_ping(message)
+        elif msg_type == "GET_STATUS":
+            return self._handle_get_status(message)
+        else:
+            return {"type": "ERROR", "message": f"Unknown message type: {msg_type}"}
+    
+    def _handle_auth(self, message: dict) -> dict:
+        """Handle AUTH: verify client_id and password, return token."""
+        client_id = message.get("client_id")
+        password = message.get("password")
+        
+        cfg = self.config_manager.load()
+        warnet_clients = cfg.get("warnet_clients", [])
+        
+        # Find client
+        client_data = None
+        for c in warnet_clients:
+            if c.get("client_id") == client_id:
+                client_data = c
+                break
+        
+        if not client_data:
+            return {
+                "type": "AUTH_RESPONSE",
+                "status": "FAIL",
+                "message": f"Client {client_id} not found"
+            }
+        
+        # Verify password
+        password_hash = client_data.get("password_hash", "")
+        if not verify_password(password, password_hash):
+            return {
+                "type": "AUTH_RESPONSE",
+                "status": "FAIL",
+                "message": "Invalid password"
+            }
+        
+        # Generate token
+        session_token = self.token_manager.generate_token(client_id)
+        
+        # Return token + PC list
+        return {
+            "type": "AUTH_RESPONSE",
+            "status": "OK",
+            "client_id": client_id,
+            "session_token": session_token,
+            "pcs": client_data.get("pcs", []),
+            "timestamp": int(time.time())
+        }
+    
+    def _handle_command(self, message: dict) -> dict:
+        """Handle COMMAND: execute action on PC."""
+        session_token = message.get("session_token")
+        pc_id = message.get("pc_id")
+        action = message.get("action")
+        
+        # Verify token is present
+        if not session_token:
+            return {
+                "type": "COMMAND_RESPONSE",
+                "status": "FAIL",
+                "message": "Missing session_token"
+            }
+        
+        # Debug: log token details
+        # print(f"[WARNET SERVER] Token received: {session_token[:50]}...")
+        
+        # Verify token
+        try:
+            payload = self.token_manager.verify_token(session_token)
+            client_id = payload.get("client_id")
+        except Exception as e:
+            # Debug error
+            error_str = f"{type(e).__name__}: {str(e)}"
+            print(f"[WARNET SERVER] Token verification failed: {error_str}")
+            return {
+                "type": "COMMAND_RESPONSE",
+                "status": "FAIL",
+                "message": f"Token error: {error_str}"
+            }
+        
+        # Get client config
+        cfg = self.config_manager.load()
+        warnet_clients = cfg.get("warnet_clients", [])
+        
+        client_data = None
+        for c in warnet_clients:
+            if c.get("client_id") == client_id:
+                client_data = c
+                break
+        
+        if not client_data:
+            return {
+                "type": "COMMAND_RESPONSE",
+                "status": "FAIL",
+                "message": f"Client {client_id} not found"
+            }
+        
+        # Verify PC ownership
+        pc_data = None
+        for pc in client_data.get("pcs", []):
+            if pc.get("pc_id") == pc_id:
+                pc_data = pc
+                break
+        
+        if not pc_data:
+            return {
+                "type": "COMMAND_RESPONSE",
+                "status": "FAIL",
+                "message": f"PC {pc_id} not found for client {client_id}"
+            }
+        
+        # Verify action is allowed
+        allowed_actions = client_data.get("allowed_actions", ["ON", "OFF", "VOL+", "VOL-"])
+        if action not in allowed_actions:
+            return {
+                "type": "COMMAND_RESPONSE",
+                "status": "FAIL",
+                "message": f"Action {action} not allowed"
+            }
+        
+        # Execute command
+        success = self._execute_pc_command(pc_data, action)
+        
+        # Log activity
+        self._log_warnet_activity({
+            "timestamp": datetime.now().isoformat(),
+            "client_id": client_id,
+            "pc_id": pc_id,
+            "action": action,
+            "success": success
+        })
+        
+        return {
+            "type": "COMMAND_RESPONSE",
+            "status": "OK" if success else "FAIL",
+            "message": f"{action} executed on {pc_id}",
+            "timestamp": int(time.time())
+        }
+    
+    def _handle_ping(self, message: dict) -> dict:
+        """Handle PING: heartbeat."""
+        return {
+            "type": "PONG",
+            "server_timestamp": int(time.time())
+        }
+    
+    def _handle_get_status(self, message: dict) -> dict:
+        """Handle GET_STATUS: return billing status for a PC.
+        Request: {"type": "GET_STATUS", "session_token": "...", "pc_id": "PC_1"}
+        Response: {"type": "STATUS_RESPONSE", "status": "OK", "billing": {...}}
+        """
+        session_token = message.get("session_token")
+        pc_id = message.get("pc_id")
+        
+        # Verify token
+        try:
+            payload = self.token_manager.verify_token(session_token)
+            client_id = payload.get("client_id")
+        except Exception as e:
+            return {
+                "type": "STATUS_RESPONSE",
+                "status": "FAIL",
+                "message": f"Token error: {str(e)}"
+            }
+        
+        # Return status with dummy billing data for demo
+        # In production, this would query actual billing state from DB/app
+        billing_status = {
+            "pc_id": pc_id,
+            "time_left": 0,  # seconds
+            "paket_aktif": "-",
+            "total_biaya": 0,
+            "is_playing": False,
+            "timestamp": int(time.time())
+        }
+        
+        return {
+            "type": "STATUS_RESPONSE",
+            "status": "OK",
+            "billing": billing_status
+        }
+    
+    def _execute_pc_command(self, pc_data: dict, action: str) -> bool:
+        """Execute actual command on PC via ADB. Currently stub."""
+        pc_ip = pc_data.get("ip")
+        adb_port = pc_data.get("adb_port", 5555)
+        
+        # TODO: Real ADB integration
+        # action mapping:
+        # - ON: adb shell input power (turn on)
+        # - OFF: adb shell input power (turn off)
+        # - VOL+: adb shell input keyevent 24
+        # - VOL-: adb shell input keyevent 25
+        
+        print(f"[WARNET SERVER] Would execute {action} on {pc_ip}:{adb_port}")
+        return True  # Stub: always succeed for now
+    
+    def _log_warnet_activity(self, activity: dict):
+        """Log warnet activity to config file."""
+        try:
+            cfg = self.config_manager.load()
+            if "warnet_activity_log" not in cfg:
+                cfg["warnet_activity_log"] = []
+            
+            cfg["warnet_activity_log"].append(activity)
+            
+            # Keep only last 1000 activities
+            if len(cfg["warnet_activity_log"]) > 1000:
+                cfg["warnet_activity_log"] = cfg["warnet_activity_log"][-1000:]
+            
+            self.config_manager.save(cfg)
+        except Exception as e:
+            print(f"[WARNET SERVER] Logging error: {e}")
 
 
 def is_valid_username(username: str) -> bool:
@@ -565,6 +971,281 @@ class ADBHelper:
         elif status_akhir == "unauthorized":
             return False, status_awal, "Perlu otorisasi di TV."
         return False, status_awal, msg_connect or "Reconnect gagal."
+
+
+class SocketHelper:
+    @staticmethod
+    def send(host, port, message, timeout=15):
+        if not host or not port or not message:
+            return False, "Socket host, port, dan perintah harus diisi."
+
+        try:
+            port = int(port)
+        except Exception:
+            return False, "Port socket tidak valid."
+
+        try:
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                sock.settimeout(timeout)
+                payload = message.strip()
+                if not payload.endswith("\n"):
+                    payload += "\n"
+                sock.sendall(payload.encode("utf-8"))
+
+                response_chunks = []
+                while True:
+                    try:
+                        chunk = sock.recv(4096)
+                    except socket.timeout:
+                        break
+                    if not chunk:
+                        break
+                    response_chunks.append(chunk)
+
+                response = b"".join(response_chunks).decode("utf-8", errors="ignore").strip()
+                return True, response or "Perintah socket berhasil dikirim."
+        except socket.timeout:
+            return False, "Socket connection timeout."
+        except ConnectionRefusedError:
+            return False, "Koneksi socket ditolak oleh host."
+        except Exception as e:
+            return False, str(e)
+
+
+class DialogSocketConfig(ctk.CTkToplevel):
+    def __init__(self, master, config=None, on_save=None, on_test=None):
+        super().__init__(master)
+        self.title("Konfigurasi Koneksi Client")
+        self.geometry("620x380")
+        self.configure(fg_color=C_BG)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self.on_save = on_save
+        self.on_test = on_test
+
+        cfg = config or {}
+        host = cfg.get("host", "")
+        port = cfg.get("port", DEFAULT_PORT)
+        self.start_cmd = cfg.get("on_start_command", "START {kursi}")
+        self.finish_cmd = cfg.get("on_finish_command", "STOP {kursi}")
+
+        ctk.CTkLabel(
+            self,
+            text="Konfigurasi Koneksi PC Client",
+            font=FONT_TITLE,
+            text_color=C_ACCENT,
+        ).pack(pady=(18, 6))
+        ctk.CTkLabel(
+            self,
+            text="Isi alamat server billing yang akan dipakai aplikasi client warnet.",
+            font=FONT_BODY,
+            text_color=C_MUTED,
+        ).pack(pady=(0, 10))
+
+        body = ctk.CTkFrame(
+            self,
+            fg_color=C_CARD,
+            corner_radius=12,
+            border_width=1,
+            border_color=C_ACCENT2,
+        )
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=0)
+
+        self.host_var = tk.StringVar(value=host)
+        self.port_var = tk.StringVar(value=str(port))
+
+        ctk.CTkLabel(
+            body,
+            text="Host / IP Server",
+            font=FONT_LABEL,
+            text_color=C_MUTED,
+        ).grid(row=0, column=0, padx=(18, 10), pady=(18, 6), sticky="w")
+        ctk.CTkLabel(
+            body,
+            text="Port",
+            font=FONT_LABEL,
+            text_color=C_MUTED,
+        ).grid(row=0, column=1, padx=(0, 18), pady=(18, 6), sticky="w")
+
+        entry_host = ctk.CTkEntry(
+            body,
+            textvariable=self.host_var,
+            fg_color=C_BTN,
+            text_color=C_TEXT,
+            border_color=C_ACCENT,
+            font=("Consolas", 13, "bold"),
+            height=38,
+        )
+        entry_host.grid(row=1, column=0, padx=(18, 10), pady=(0, 8), sticky="ew")
+
+        entry_port = ctk.CTkEntry(
+            body,
+            textvariable=self.port_var,
+            fg_color=C_BTN,
+            text_color=C_TEXT,
+            border_color=C_ACCENT,
+            font=("Consolas", 13, "bold"),
+            width=120,
+            height=38,
+        )
+        entry_port.grid(row=1, column=1, padx=(0, 18), pady=(0, 8), sticky="ew")
+
+        info_box = ctk.CTkFrame(body, fg_color=C_PANEL, corner_radius=10)
+        info_box.grid(row=2, column=0, columnspan=2, padx=18, pady=(4, 10), sticky="ew")
+        ctk.CTkLabel(
+            info_box,
+            text="Panduan cepat:",
+            font=FONT_SUB,
+            text_color=C_ACCENT,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        self.info_label = ctk.CTkLabel(
+            info_box,
+            text=(
+                "• Host/IP diisi alamat laptop/PC server billing.\n"
+                "• Port harus sama dengan port server socket warnet.\n"
+                "• Klik Tes Koneksi dulu, lalu Simpan jika sudah benar."
+            ),
+            font=FONT_SMALL,
+            text_color=C_TEXT,
+            justify="left",
+        )
+        self.info_label.pack(anchor="w", padx=12, pady=(0, 10))
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(
+            btn_frame,
+            text="🔍 Tes Koneksi",
+            width=150,
+            height=38,
+            fg_color=C_ACCENT2,
+            hover_color="#5A0FCC",
+            font=FONT_SUB,
+            command=self._test_connection,
+        ).pack(side="left")
+        ctk.CTkButton(
+            btn_frame,
+            text="✖ Batal",
+            width=120,
+            height=38,
+            fg_color=C_RED,
+            hover_color="#7A1A1A",
+            font=FONT_SUB,
+            command=self.destroy,
+        ).pack(side="right")
+        ctk.CTkButton(
+            btn_frame,
+            text="✅ Simpan Config",
+            width=170,
+            height=38,
+            fg_color=C_GREEN,
+            hover_color="#2F7A2F",
+            font=FONT_SUB,
+            command=self._save,
+        ).pack(side="right", padx=(0, 8))
+
+        entry_host.focus_set()
+
+    def _test_connection(self):
+        if callable(self.on_test):
+            self.on_test(self._collect_config())
+
+    def _collect_config(self):
+        try:
+            port_value = int(self.port_var.get().strip() or DEFAULT_PORT)
+        except ValueError:
+            port_value = DEFAULT_PORT
+        return {
+            "host": self.host_var.get().strip(),
+            "port": port_value,
+            "on_start_command": self.start_cmd,
+            "on_finish_command": self.finish_cmd,
+        }
+
+    def _save(self):
+        cfg = self._collect_config()
+        if not cfg["host"]:
+            messagebox.showwarning("Lengkapi Konfigurasi", "Host/IP wajib diisi terlebih dahulu.", parent=self)
+            return
+        if callable(self.on_save):
+            self.on_save(cfg)
+        self.destroy()
+
+
+class DialogWarnetAdminCode(ctk.CTkToplevel):
+    """Dialog kecil untuk generate kode admin pengaturan client dari IP."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Generator Kode Pengaturan Client")
+        self.geometry("470x260")
+        self.configure(fg_color=C_BG)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        ctk.CTkLabel(
+            self,
+            text="🔐 Generator Kode Pengaturan Client",
+            font=FONT_TITLE,
+            text_color=C_ACCENT,
+        ).pack(pady=(14, 8))
+
+        ctk.CTkLabel(
+            self,
+            text="Masukkan IP PC client, lalu generate kode untuk buka tombol ⚙ di app client.",
+            font=FONT_SMALL,
+            text_color=C_MUTED,
+        ).pack(pady=(0, 10))
+
+        form = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
+        form.pack(fill="x", padx=16, pady=6)
+        form.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form, text="IP Client", font=FONT_LABEL, text_color=C_MUTED).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        self.ip_var = tk.StringVar()
+        self.entry_ip = ctk.CTkEntry(form, textvariable=self.ip_var)
+        self.entry_ip.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+
+        ctk.CTkLabel(form, text="Kode Hari Ini", font=FONT_LABEL, text_color=C_MUTED).grid(row=1, column=0, padx=10, pady=(0, 10), sticky="w")
+        self.code_var = tk.StringVar(value="-")
+        self.entry_code = ctk.CTkEntry(form, textvariable=self.code_var, state="readonly")
+        self.entry_code.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="ew")
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(8, 6))
+        ctk.CTkButton(btns, text="Generate", fg_color=C_ACCENT2, hover_color="#5A0FCC", command=self._generate).pack(side="left")
+        ctk.CTkButton(btns, text="Copy Kode", fg_color=C_GREEN, hover_color="#2F7A2F", command=self._copy_code).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text="Tutup", fg_color=C_RED, hover_color="#7A1A1A", command=self.destroy).pack(side="right")
+
+        self.info = ctk.CTkLabel(self, text="", font=FONT_SMALL, text_color=C_MUTED)
+        self.info.pack(fill="x", padx=16, pady=(0, 8))
+        self.entry_ip.focus_set()
+
+    def _generate(self):
+        ip = self.ip_var.get().strip()
+        if not ip:
+            messagebox.showwarning("IP Belum Diisi", "Masukkan IP client terlebih dahulu.", parent=self)
+            return
+        code = generate_warnet_admin_code(ip)
+        if not code:
+            messagebox.showwarning("Gagal Generate", "Kode gagal dibuat. Periksa IP.", parent=self)
+            return
+        self.code_var.set(code)
+        self.info.configure(text=f"IP: {ip} | Tanggal: {datetime.now().strftime('%d-%m-%Y')}")
+
+    def _copy_code(self):
+        code = self.code_var.get().strip()
+        if not code or code == "-":
+            messagebox.showwarning("Belum Ada Kode", "Generate kode terlebih dahulu.", parent=self)
+            return
+        self.clipboard_clear()
+        self.clipboard_append(code)
+        self.update()
+        messagebox.showinfo("Berhasil", "Kode berhasil disalin ke clipboard.", parent=self)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2148,7 +2829,8 @@ class DialogTambahPesanan(ctk.CTkToplevel):
 #  DIALOG PAKET + PESANAN
 # ═══════════════════════════════════════════════════════════════════════════════
 class DialogPaket(ctk.CTkToplevel):
-    def __init__(self, master, tv_label, on_confirm, paket_data, makanan_data, minuman_data, nama_grup="Reguler"):
+    def __init__(self, master, tv_label, on_confirm, paket_data, makanan_data, minuman_data, nama_grup="Reguler", for_warnet=False):
+        self.for_warnet = for_warnet
         super().__init__(master)
         self.title(f"Paket & Pesanan — {tv_label}")
         self.geometry("460x560")  # Lebih kecil & compact
@@ -2190,8 +2872,9 @@ class DialogPaket(ctk.CTkToplevel):
         scroll.pack(fill="both", expand=True, padx=12, pady=0)
         
         # Grup 1: PAKET SAJA
+        paket_title = "⏱  PAKET WARNET" if getattr(self, 'for_warnet', False) else "⏱  PAKET RENTAL PS"
         self._build_collapsible_group(
-            scroll, "paket", "⏱  PAKET RENTAL PS", 
+            scroll, "paket", paket_title,
             self._build_paket_content
         )
         
@@ -2405,6 +3088,100 @@ def hitung_tarif_per_menit(paket_data):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  DIALOG TAMBAH WARNET
+# ═══════════════════════════════════════════════════════════════════════════════
+class DialogTambahWarnet(ctk.CTkToplevel):
+    def __init__(self, master, on_confirm, on_close_cb, daftar_grup=None, lock_group=False):
+        super().__init__(master)
+        self.title("Tambah Kursi Warnet")
+        self.geometry("420x260")
+        self.configure(fg_color=C_BG)
+        self.transient(master)
+        self.resizable(False, False)
+        self.on_confirm = on_confirm
+        self.on_close_cb = on_close_cb
+        self.daftar_grup = daftar_grup or [NAMA_GRUP_DEFAULT]
+        # lock_group: jika True, pengguna tidak dapat mengganti grup saat menambah kursi (dikunci ke grup warnet)
+        self.lock_group = bool(lock_group)
+        self.grup_var = ctk.StringVar(value=self.daftar_grup[0])
+        self._confirmed = False
+        self._build()
+        center_window(self, master, width=420, height=260)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(50, self.grab_set)
+
+    def _build(self):
+        ctk.CTkLabel(self, text="➕ Tambah Kursi Warnet", font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(18, 8))
+        ctk.CTkLabel(self, text="Masukkan nama kursi dan pilih grup tarif:", font=FONT_BODY, text_color=C_MUTED).pack(pady=(0, 8))
+
+        row = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
+        row.pack(fill="x", padx=18, pady=(0, 8))
+        ctk.CTkLabel(row, text="Nama:", width=90, anchor="w", font=FONT_LABEL, text_color=C_MUTED).pack(side="left", padx=(10, 0))
+        self.entry_nama = ctk.CTkEntry(row, fg_color=C_BTN, text_color=C_ACCENT,
+                                      border_color=C_BORDER, font=("Consolas", 12, "bold"), height=34)
+        self.entry_nama.pack(side="left", fill="x", expand=True, padx=(6, 10))
+
+        grp_row = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
+        grp_row.pack(fill="x", padx=18, pady=(0, 8))
+        ctk.CTkLabel(grp_row, text="Grup:", width=90, anchor="w", font=FONT_LABEL, text_color=C_MUTED).pack(side="left", padx=(10, 0))
+        self.opt_grup = ctk.CTkOptionMenu(
+            grp_row,
+            values=self.daftar_grup,
+            variable=self.grup_var,
+            fg_color=C_BTN,
+            button_color=C_ACCENT2,
+            button_hover_color="#5A0FCC",
+            text_color=C_TEXT,
+            font=FONT_BODY,
+            dropdown_font=FONT_BODY,
+            dropdown_fg_color=C_CARD,
+            dropdown_text_color=C_TEXT,
+        )
+        self.opt_grup.pack(side="left", fill="x", expand=True, padx=(6, 10))
+        # Jika dialog dipanggil untuk menambah warnet dan harus dikunci ke grup warnet,
+        # matikan kemampuan mengganti grup di dialog ini (prevent accidental assignment ke grup lain)
+        if getattr(self, 'lock_group', False):
+            try:
+                self.opt_grup.configure(state="disabled")
+            except Exception:
+                # CTkOptionMenu kadang tidak mendukung state config pada versi tertentu; sebagai fallback,
+                # sembunyikan dropdown button sehingga user tidak bisa ubah pilihan.
+                try:
+                    self.opt_grup.pack_forget()
+                    lbl = ctk.CTkLabel(grp_row, textvariable=self.grup_var, font=FONT_BODY, text_color=C_TEXT)
+                    lbl.pack(side="left", fill="x", expand=True, padx=(6,10))
+                except Exception:
+                    pass
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkButton(btn_frame, text="✅ Tambah Kursi", fg_color=C_ACCENT2,
+                      hover_color=C_ACCENT, font=FONT_SUB, text_color="white",
+                      command=self._on_confirm).pack(side="left", fill="x", expand=True, padx=(0, 6), pady=0, ipady=6)
+        ctk.CTkButton(btn_frame, text="✖ Batal", fg_color=C_RED,
+                      hover_color="#FF5C5C", font=FONT_SUB, text_color="white",
+                      command=self._on_close).pack(side="left", fill="x", expand=True, padx=(6, 0), pady=0, ipady=6)
+
+    def _on_confirm(self):
+        nama = self.entry_nama.get().strip()
+        grup = self.grup_var.get().strip() if self.grup_var.get() else ""
+        if not nama:
+            messagebox.showwarning("Input Salah", "Nama kursi wajib diisi.", parent=self)
+            return
+        if not grup:
+            messagebox.showwarning("Input Salah", "Pilih grup tarif untuk kursi warnet.", parent=self)
+            return
+        self._confirmed = True
+        self.on_confirm(nama, grup)
+        self.destroy()
+
+    def _on_close(self):
+        if not self._confirmed and self.on_close_cb:
+            self.on_close_cb()
+        self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  KARTU TV
 # ═══════════════════════════════════════════════════════════════════════════════
 class KartuTV(ctk.CTkFrame):
@@ -2441,6 +3218,8 @@ class KartuTV(ctk.CTkFrame):
         self.biaya_pesanan = 0        # total biaya pesanan tambahan sesi berjalan
         self.paket_harga_tetap = 0    # harga tetap utk paket berwaktu non-bebas
         self._timer_job    = None
+        self._last_transaction_item = None
+        self._warning_blink_on = False
 
         self._build()
  
@@ -2539,7 +3318,7 @@ class KartuTV(ctk.CTkFrame):
                                          command=self._klik_selesai)
         self.btn_selesai.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
  
-        self.btn_tambah_pesanan = ctk.CTkButton(r2, text="PESANAN", height=34,
+        self.btn_tambah_pesanan = ctk.CTkButton(r2, text="SHOP", height=34,
                                                fg_color=C_BTN, hover_color=C_ACCENT2,
                                                border_width=1, border_color=C_ACCENT,
                                                font=("Russo One", 9, "bold"), text_color=C_ACCENT,
@@ -2629,19 +3408,19 @@ class KartuTV(ctk.CTkFrame):
             return
         dlg = ctk.CTkToplevel(self.winfo_toplevel())
         dlg.title(f"Ganti Grup Tarif — {self.label_tv}")
-        dlg.geometry("340x120")
+        dlg.geometry("420x160")
         dlg.configure(fg_color=C_BG)
         dlg.grab_set()
         dlg.resizable(False, False)
         ctk.CTkLabel(dlg, text=f"🏷  Grup Tarif untuk {self.label_tv}",
-                     font=FONT_SUB, text_color=C_ACCENT).pack(pady=(16, 8))
+                     font=("Russo One", 13, "bold"), text_color=C_ACCENT).pack(pady=(20, 12))
         var_grup = ctk.StringVar(value=self.nama_grup if self.nama_grup in daftar else daftar[0])
         opt = ctk.CTkOptionMenu(dlg, values=daftar, variable=var_grup,
                                  fg_color=C_BTN, button_color=C_ACCENT2,
                                  button_hover_color="#5A0FCC", text_color=C_TEXT,
-                                 font=FONT_BODY, dropdown_font=FONT_BODY,
+                                 font=("Courier New", 12), dropdown_font=("Courier New", 11),
                                  dropdown_fg_color=C_CARD, dropdown_text_color=C_TEXT)
-        opt.pack(padx=20, pady=4, fill="x")
+        opt.pack(padx=25, pady=8, fill="x")
 
         def terapkan():
             grup_baru = var_grup.get()
@@ -2651,9 +3430,10 @@ class KartuTV(ctk.CTkFrame):
                 self.on_ganti_grup(self, grup_baru)
             dlg.destroy()
 
-        ctk.CTkButton(dlg, text="✅  Terapkan", height=32,
-                      fg_color=C_ACCENT2, font=FONT_SUB, text_color="white",
-                      command=terapkan).pack(pady=12, padx=20, fill="x")
+        ctk.CTkButton(dlg, text="✅  TERAPKAN GRUP", height=40,
+                      fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                      font=("Russo One", 12, "bold"), text_color="white",
+                      command=terapkan).pack(pady=16, padx=25, fill="x")
 
     def _terapkan_port_baru(self, port_baru):
         self.port = port_baru
@@ -2764,7 +3544,7 @@ class KartuTV(ctk.CTkFrame):
             app._refresh_dashboard_total_pesanan()
 
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
-        self.paket_aktif    = paket_nm
+        previous_session = not self.sesi_kosong()
         self.pesanan_aktif  = pesanan
         self.biaya_pesanan  = total_pesanan
         self.menit_dipakai_awal = 0
@@ -2774,14 +3554,20 @@ class KartuTV(ctk.CTkFrame):
             self.sisa_waktu  = 0
             self.waktu_mulai = datetime.now()
             self.paket_harga_tetap = 0
+            self.paket_aktif = paket_nm
             self.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
             self.lbl_timer.configure(text_color=C_GREEN)
         else:
             self.is_bebas    = False
-            self.sisa_waktu  = paket_menit * 60
+            self.paket_aktif = paket_nm
+            if previous_session and self.paket_harga_tetap:
+                self.sisa_waktu += paket_menit * 60
+                self.paket_harga_tetap += paket_harga
+            else:
+                self.sisa_waktu  = paket_menit * 60
+                self.paket_harga_tetap = paket_harga
             self.waktu_mulai = datetime.now()
-            self.paket_harga_tetap = paket_harga
-            self.lbl_paket.configure(text=f"{paket_nm} | {fmt_rp(paket_harga + total_pesanan)}",
+            self.lbl_paket.configure(text=f"{paket_nm} | {fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)}",
                                       text_color=C_YELLOW)
             self.lbl_timer.configure(text_color=C_ACCENT)
 
@@ -2790,8 +3576,15 @@ class KartuTV(ctk.CTkFrame):
 
         self.btn_selesai.configure(state="normal")
         self.btn_tambah_pesanan.configure(state="normal")
-        self.btn_tambah_pesanan.configure(text="PESANAN", fg_color=C_BTN, border_width=1,
+        self.btn_tambah_pesanan.configure(text="SHOP", fg_color=C_BTN, border_width=1,
                                           border_color=C_ACCENT2, text_color=C_ACCENT2)
+        self.configure(fg_color="white")
+        self._warning_blink_on = False
+
+        if not self.is_bebas and self.sisa_waktu > 0:
+            h, rem = divmod(self.sisa_waktu, 3600)
+            m, s = divmod(rem, 60)
+            self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
 
         if self.is_bebas:
             self._tick_bebas()
@@ -2800,11 +3593,24 @@ class KartuTV(ctk.CTkFrame):
         else:
             self.lbl_timer.configure(text="∞ BEBAS", text_color=C_GREEN)
 
-        # Catat transaksi awal (harga paket berwaktu + pesanan).
-        # Untuk Main Bebas, biaya waktu belum final—dicatat detail saat Selesai.
         if not self.is_bebas:
-            self._last_transaction_item = self.on_transaksi(
-                self.label_tv, paket_nm, pesanan, paket_harga + total_pesanan)
+            if self._last_transaction_item and previous_session:
+                app = self.winfo_toplevel()
+                item_id = self._last_transaction_item
+                pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
+                total_str = fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)
+                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                    idx = app._tree_item_to_index.get(item_id)
+                    if idx is not None and idx < len(app.riwayat_transaksi):
+                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+                        updated_row = (waktu, app.current_user, self.label_tv, self.paket_aktif, pesanan_str, total_str)
+                        app.riwayat_transaksi[idx] = updated_row
+                        app.tree.item(item_id, values=updated_row)
+                        if hasattr(app, '_refresh_riwayat_summary'):
+                            app._refresh_riwayat_summary()
+            else:
+                self._last_transaction_item = self.on_transaksi(
+                    self.label_tv, paket_nm, pesanan, self.paket_harga_tetap + total_pesanan)
         else:
             self._last_transaction_item = None
 
@@ -2818,13 +3624,25 @@ class KartuTV(ctk.CTkFrame):
             h, rem = divmod(self.sisa_waktu, 3600)
             m, s   = divmod(rem, 60)
             self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
-            self.lbl_timer.configure(text_color=C_RED if self.sisa_waktu <= 300 else C_ACCENT)
+            if self.sisa_waktu <= 120:
+                self._warning_blink_on = not self._warning_blink_on
+                if self._warning_blink_on:
+                    self.configure(fg_color=C_RED)
+                    self.lbl_timer.configure(text_color="white")
+                else:
+                    self.configure(fg_color="white")
+                    self.lbl_timer.configure(text_color=C_ACCENT2)
+            else:
+                self.configure(fg_color="white")
+                self.lbl_timer.configure(text_color=C_ACCENT2)
             self.sisa_waktu -= 1
             self._timer_job = self.after(1000, self._tick_waktu)
         else:
             # WAKTU HABIS — auto power off dan selesai sesi
             self.lbl_timer.configure(text="WAKTU HABIS ⏹", text_color=C_RED)
             total_akhir = self.paket_harga_tetap + self.biaya_pesanan
+            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
+            paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
             if getattr(self, '_last_transaction_item', None):
                 app = self.winfo_toplevel()
                 item_id = self._last_transaction_item
@@ -2848,6 +3666,15 @@ class KartuTV(ctk.CTkFrame):
                             app._refresh_riwayat_summary()
             else:
                 self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
+
+            messagebox.showwarning(
+                "⏰ Waktu TV Habis",
+                f"TV: {self.label_tv}\n"
+                f"Paket: {paket_txt}\n"
+                f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
+                f"TOTAL: {fmt_rp(total_akhir)}",
+                parent=self.winfo_toplevel(),
+            )
 
             # Auto power off TV
             threading.Thread(target=lambda: self._adb_action(
@@ -2942,10 +3769,12 @@ class KartuTV(ctk.CTkFrame):
         self.paket_harga_tetap = 0
         self.lbl_paket.configure(text="—", text_color=C_MUTED)
         self.lbl_timer.configure(text="00:00:00", text_color=C_MUTED)
+        self.configure(fg_color=C_CARD)
+        self._warning_blink_on = False
         self.lbl_estimasi.configure(text="")
         self.btn_selesai.configure(state="disabled")
         self.btn_tambah_pesanan.configure(state="disabled")
-        self.btn_tambah_pesanan.configure(text="PESANAN", fg_color=C_BTN,
+        self.btn_tambah_pesanan.configure(text="SHOP", fg_color=C_BTN,
                                           border_width=1, border_color=C_ACCENT,
                                           text_color=C_ACCENT)
         app = self.winfo_toplevel()
@@ -3032,8 +3861,8 @@ class KartuTV(ctk.CTkFrame):
         else:
             target.lbl_timer.configure(text="∞ BEBAS", text_color=C_GREEN)
         target.btn_selesai.configure(state="normal")
-        target.btn_selesai.configure(state="normal")
-        target.btn_tambah_pesanan.configure(text="PESANAN", fg_color=C_BTN, border_width=1,
+        target.btn_tambah_pesanan.configure(state="normal")
+        target.btn_tambah_pesanan.configure(text="SHOP", fg_color=C_BTN, border_width=1,
                                             border_color=C_ACCENT2, text_color=C_ACCENT2)
 
         # ── Kosongkan TV asal ────────────────────────────────────────────────
@@ -3042,6 +3871,569 @@ class KartuTV(ctk.CTkFrame):
         dlg.destroy()
         messagebox.showinfo("✅ Berhasil Pindah",
                             f"Sesi telah dipindah ke {target.label_tv}.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  KARTU WARNET
+# ═══════════════════════════════════════════════════════════════════════════════
+class KartuWarnet(ctk.CTkFrame):
+    def __init__(self, master, nomor, label_kursi, on_transaksi,
+                 get_paket_data, get_makanan_data, get_minuman_data,
+                get_semua_kartu=None, get_daftar_grup=None, on_ganti_grup=None,
+                on_hapus=None, nama_grup=None, **kwargs):
+        super().__init__(master, fg_color=C_CARD, corner_radius=8,
+                         border_width=1, border_color=C_BORDER, **kwargs)
+        self.nomor             = nomor
+        self.label_kursi       = label_kursi
+        self.on_transaksi      = on_transaksi
+        self.nama_grup         = nama_grup or NAMA_GRUP_DEFAULT
+        self.get_paket_data    = get_paket_data or (lambda: {})
+        self.get_makanan_data  = get_makanan_data
+        self.get_minuman_data  = get_minuman_data
+        self.get_semua_kartu   = get_semua_kartu or (lambda: [])
+        self.get_daftar_grup   = get_daftar_grup or (lambda: [self.nama_grup])
+        self.on_ganti_grup     = on_ganti_grup
+        self.on_hapus          = on_hapus
+
+        self.paket_aktif       = None
+        self.sisa_waktu        = 0
+        self.is_bebas          = False
+        self.menit_dipakai_awal= 0
+        self.waktu_mulai       = None
+        self.pesanan_aktif     = {}
+        self.biaya_pesanan     = 0
+        self.paket_harga_tetap = 0
+        self._timer_job        = None
+        self._last_transaction_item = None
+        self.is_on            = False
+        self._warning_blink_on = False
+
+        self._build()
+
+    def _build(self):
+        hdr = ctk.CTkFrame(self, fg_color=C_ACCENT2, corner_radius=10)
+        hdr.pack(fill="x", padx=3, pady=(2, 1))
+
+        self.lbl_kursi = ctk.CTkLabel(hdr, text=self.label_kursi,
+                                     font=("Russo One", 11, "bold"), text_color="white")
+        self.lbl_kursi.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        self.btn_ganti_nama = ctk.CTkButton(hdr, text="Nama", width=76, height=28,
+                                            fg_color=C_BTN, hover_color=C_BORDER,
+                                            border_width=1, border_color=C_ACCENT2,
+                                            font=("Russo One", 8, "bold"), text_color=C_ACCENT2,
+                                            command=self._buka_ganti_ip)
+        self.btn_ganti_nama.pack(side="right", padx=(0, 4))
+
+        self.btn_hapus = ctk.CTkButton(hdr, text="✖", width=36, height=28,
+                                       fg_color=C_RED, hover_color="#FF5C5C",
+                                       border_width=1, border_color=C_RED,
+                                       font=("Russo One", 8, "bold"), text_color="white",
+                                       command=self._confirm_hapus)
+        self.btn_hapus.pack(side="right", padx=(0, 8))
+
+        st_row = ctk.CTkFrame(self, fg_color="transparent")
+        st_row.pack(fill="x", padx=3, pady=(0, 4))
+        self.lbl_power = ctk.CTkLabel(st_row, text="● SIAP", font=("Courier New", 10, "bold"),
+                                       text_color=C_GREEN)
+        self.lbl_power.pack(side="left", padx=4)
+        self.lbl_grup = ctk.CTkLabel(st_row, text=f"↻ {self.nama_grup}", font=("Courier New", 10, "bold"),
+                                      text_color=C_ACCENT2, cursor="arrow")
+        self.lbl_grup.pack(side="left", padx=4)
+        # Warnet PCs dikunci ke grup warnet - tidak bisa diubah (hapus event binding)
+        self.lbl_paket = ctk.CTkLabel(st_row, text="—", font=("Courier New", 8), text_color=C_MUTED)
+        self.lbl_paket.pack(side="right", padx=4)
+
+        self.lbl_timer = ctk.CTkLabel(self, text="00:00:00",
+                                       font=("Russo One", 20, "bold"), text_color=C_ACCENT2)
+        self.lbl_timer.pack(pady=(2, 2))
+
+        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_GREEN)
+        self.lbl_estimasi.pack()
+
+        r1 = ctk.CTkFrame(self, fg_color="transparent")
+        r1.pack(pady=4, fill="x", padx=3)
+        for i in range(5):
+            r1.columnconfigure(i, weight=1, uniform="btnrow")
+
+        self.btn_power = ctk.CTkButton(r1, text="⚡ PWR", height=34,
+                                       fg_color=C_RED, hover_color="#FF6666",
+                                       border_width=2, border_color=C_RED,
+                                       font=("Courier New", 9, "bold"), text_color="white",
+                                       command=self._toggle_power)
+        self.btn_power.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+
+        for idx, (txt, color, cmd) in enumerate([
+            ("VOL+", C_GREEN, lambda: self._dummy_action("VOL+")),
+            ("VOL−", C_YELLOW, lambda: self._dummy_action("VOL-")),
+            ("HOME", C_ACCENT, lambda: self._dummy_action("HOME")),
+        ], start=1):
+            ctk.CTkButton(r1, text=txt, height=34, fg_color=color,
+                         hover_color="white" if color == C_ACCENT else None,
+                         font=("Courier New", 9, "bold"), text_color="black" if color == C_ACCENT else "white",
+                         border_width=1, border_color=color,
+                         command=cmd).grid(row=0, column=idx, sticky="nsew", padx=2)
+
+        self.btn_status = ctk.CTkButton(r1, text="ON", height=34,
+                                       fg_color=C_BTN, border_width=1, border_color=C_GREEN,
+                                       font=("Russo One", 9, "bold"), text_color=C_GREEN,
+                                       command=self._toggle_power)
+        self.btn_status.grid(row=0, column=4, sticky="nsew", padx=(2, 0))
+
+        r2 = ctk.CTkFrame(self, fg_color="transparent")
+        r2.pack(pady=2, fill="x", padx=3)
+        for i in range(5):
+            r2.columnconfigure(i, weight=1, uniform="btnrow")
+
+        self.btn_selesai = ctk.CTkButton(r2, text="SELESAI", height=34,
+                                         fg_color=C_BTN, hover_color="#3A0000",
+                                         border_width=1, border_color=C_RED,
+                                         font=("Russo One", 9, "bold"), text_color=C_RED,
+                                         state="disabled",
+                                         command=self._klik_selesai)
+        self.btn_selesai.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+
+        self.btn_tambah_pesanan = ctk.CTkButton(r2, text="SHOP", height=34,
+                                               fg_color=C_BTN, hover_color=C_ACCENT2,
+                                               border_width=1, border_color=C_ACCENT,
+                                               font=("Russo One", 9, "bold"), text_color=C_ACCENT,
+                                               state="disabled",
+                                               command=self._buka_tambah_pesanan)
+        self.btn_tambah_pesanan.grid(row=0, column=1, sticky="nsew", padx=2)
+
+        self.btn_tambah_waktu = ctk.CTkButton(r2, text="PAKET", height=34,
+                                              fg_color=C_BTN, hover_color=C_ACCENT2,
+                                              border_width=1, border_color=C_ACCENT2,
+                                              font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                                              command=self._pilih_paket)
+        self.btn_tambah_waktu.grid(row=0, column=2, sticky="nsew", padx=2)
+
+        self.btn_ip = ctk.CTkButton(r2, text="IP", height=34,
+                                    fg_color=C_BTN, hover_color=C_ACCENT2,
+                                    border_width=1, border_color=C_ACCENT2,
+                                    font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                                    command=self._buka_ganti_ip)
+        self.btn_ip.grid(row=0, column=3, sticky="nsew", padx=2)
+
+        self.btn_pindah_kursi = ctk.CTkButton(r2, text="Pindah PC", height=34,
+                                             fg_color=C_BTN, border_width=1, border_color=C_ACCENT2,
+                                             font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                                             command=self._klik_pindah)
+        self.btn_pindah_kursi.grid(row=0, column=4, sticky="nsew", padx=(2, 0))
+
+    def sesi_kosong(self):
+        return self.paket_aktif is None
+
+    def _buka_ganti_ip(self):
+        dlg = ctk.CTkInputDialog(text="Nama kursi baru:", title=f"✏️ Ganti Nama Kursi — {self.label_kursi}")
+        nama_baru = dlg.get_input()
+        if not nama_baru:
+            return
+        self.label_kursi = nama_baru.strip()
+        self.lbl_kursi.configure(text=self.label_kursi)
+
+    def _buka_ganti_grup(self):
+        daftar = self.get_daftar_grup() or []
+        if not daftar:
+            messagebox.showwarning("Grup Tarif", "Tidak ada grup tarif yang tersedia untuk dipilih.", parent=self)
+            return
+
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("🏷 Ganti Grup Tarif Warnet")
+        dlg.geometry("360x180")
+        dlg.configure(fg_color=C_BG)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text=f"Kursi: {self.label_kursi}", font=FONT_SUB,
+                     text_color=C_ACCENT).pack(pady=(16, 6))
+        ctk.CTkLabel(dlg, text="Pilih grup tarif untuk kursi warnet ini:",
+                     font=FONT_BODY, text_color=C_MUTED).pack(padx=16)
+
+        var_grup = tk.StringVar(value=self.nama_grup)
+        ctk.CTkOptionMenu(dlg, values=daftar, variable=var_grup,
+                          fg_color=C_BTN, button_color=C_ACCENT2,
+                          button_hover_color="#5A0FCC",
+                          text_color=C_TEXT, font=FONT_BODY,
+                          dropdown_font=FONT_BODY,
+                          dropdown_fg_color=C_CARD,
+                          dropdown_text_color=C_TEXT,
+                          width=280).pack(pady=14)
+
+        def terapkan():
+            grup_baru = var_grup.get()
+            if not grup_baru or grup_baru == self.nama_grup:
+                dlg.destroy()
+                return
+            self.nama_grup = grup_baru
+            self.lbl_grup.configure(text=f"↻ {grup_baru}")
+            if callable(self.on_ganti_grup):
+                self.on_ganti_grup(self, grup_baru)
+            dlg.destroy()
+
+        ctk.CTkButton(dlg, text="✅ Terapkan", width=120, height=36,
+                      fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                      font=FONT_SMALL, text_color="white",
+                      command=terapkan).pack(pady=(0, 10))
+
+    def _confirm_hapus(self):
+        if messagebox.askyesno("Hapus Kursi", f"Hapus {self.label_kursi} dari dashboard warnet?"):
+            if callable(self.on_hapus):
+                self.on_hapus(self)
+
+    def _toggle_power(self):
+        self.is_on = not self.is_on
+        if self.is_on:
+            self.lbl_power.configure(text="● ON", text_color=C_GREEN)
+            self.btn_power.configure(fg_color="#3A0000")
+            self.btn_status.configure(text="ON", fg_color=C_GREEN, border_color=C_GREEN, text_color=C_GREEN)
+        else:
+            self.lbl_power.configure(text="● OFF", text_color=C_MUTED)
+            self.btn_power.configure(fg_color=C_BTN)
+            self.btn_status.configure(text="OFF", fg_color=C_BTN, border_color=C_BORDER, text_color=C_MUTED)
+
+    def _dummy_action(self, action):
+        messagebox.showinfo("Info", f"{action} tidak tersedia untuk dashboard warnet.", parent=self)
+
+    def _pilih_paket(self):
+        # Mirror KartuTV behavior: call the kartu's get_paket_data() closure so it always
+        # resolves paket data from the current grup setting (and respects for_warnet=True).
+        try:
+            paket_data = self.get_paket_data() if callable(self.get_paket_data) else {}
+        except Exception as e:
+            paket_data = {}
+
+        DialogPaket(self.winfo_toplevel(), self.label_kursi, self._on_paket_confirm,
+                    paket_data, self.get_makanan_data(), self.get_minuman_data(),
+                    nama_grup=self.nama_grup, for_warnet=True)
+
+    def _buka_tambah_pesanan(self):
+        if not self.paket_aktif:
+            messagebox.showwarning("Tidak Ada Sesi", "Mulai sesi terlebih dahulu untuk memesan.", parent=self)
+            return
+        DialogTambahPesanan(self.winfo_toplevel(), self.label_kursi,
+                            self._on_tambah_pesanan_confirm,
+                            self.get_makanan_data(), self.get_minuman_data(),
+                            pesanan_aktif=self.pesanan_aktif.copy())
+
+    def _on_tambah_pesanan_confirm(self, pesanan_baru):
+        all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+        for nama, qty in pesanan_baru.items():
+            self.pesanan_aktif[nama] = qty
+        total_baru = sum(all_menu.get(nama, 0) * qty for nama, qty in self.pesanan_aktif.items())
+        self.biaya_pesanan = total_baru
+
+        if self.is_bebas:
+            self.lbl_paket.configure(text=f"Main Bebas 🕹️ +Pesanan {fmt_rp(total_baru)}")
+        else:
+            self.lbl_paket.configure(text=f"{self.paket_aktif} | {fmt_rp(self.paket_harga_tetap + total_baru)}")
+
+        if not self.is_bebas and getattr(self, '_last_transaction_item', None):
+            app = self.winfo_toplevel()
+            item_id = self._last_transaction_item
+            pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
+            total_str = fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)
+            if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                idx = app._tree_item_to_index.get(item_id)
+                if idx is not None and idx < len(app.riwayat_transaksi):
+                    waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+                    updated_row = (waktu, app.current_user, self.label_kursi, self.paket_aktif, pesanan_str, total_str)
+                    app.riwayat_transaksi[idx] = updated_row
+                    app.tree.item(item_id, values=updated_row)
+                    try:
+                        app.riwayat_meta[idx]['pesanan_total'] = sum(app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                        app.riwayat_meta[idx]['total'] = self.paket_harga_tetap + self.biaya_pesanan
+                    except Exception:
+                        pass
+                    if hasattr(app, '_refresh_riwayat_summary'):
+                        app._refresh_riwayat_summary()
+        app = self.winfo_toplevel()
+        if hasattr(app, '_refresh_warnet_footer'):
+            app._refresh_warnet_footer()
+
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
+        previous_session = not self.sesi_kosong()
+        self.pesanan_aktif = pesanan
+        self.biaya_pesanan = total_pesanan
+        self.menit_dipakai_awal = 0
+
+        if paket_nm == "Main Bebas":
+            self.is_bebas = True
+            self.sisa_waktu = 0
+            self.waktu_mulai = datetime.now()
+            self.paket_harga_tetap = 0
+            self.paket_aktif = paket_nm
+            self.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
+            self.lbl_timer.configure(text_color=C_GREEN)
+        else:
+            self.is_bebas = False
+            self.paket_aktif = paket_nm
+            if previous_session and self.paket_harga_tetap:
+                self.sisa_waktu += paket_menit * 60
+                self.paket_harga_tetap += paket_harga
+            else:
+                self.sisa_waktu = paket_menit * 60
+                self.paket_harga_tetap = paket_harga
+            self.waktu_mulai = datetime.now()
+            self.lbl_paket.configure(text=f"{paket_nm} | {fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)}",
+                                      text_color=C_YELLOW)
+            self.lbl_timer.configure(text_color=C_ACCENT)
+
+        if self._timer_job:
+            self.after_cancel(self._timer_job)
+
+        self.btn_selesai.configure(state="normal")
+        self.btn_tambah_pesanan.configure(state="normal")
+        self.btn_tambah_pesanan.configure(text="SHOP", fg_color=C_BTN, border_width=1,
+                                          border_color=C_ACCENT2, text_color=C_ACCENT2)
+        self.configure(fg_color="white")
+        self._warning_blink_on = False
+
+        if not self.is_bebas and self.sisa_waktu > 0:
+            h, rem = divmod(self.sisa_waktu, 3600)
+            m, s = divmod(rem, 60)
+            self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
+
+        if self.is_bebas:
+            self._tick_bebas()
+        elif self.sisa_waktu > 0:
+            self._tick_waktu()
+        else:
+            self.lbl_timer.configure(text="∞ BEBAS", text_color=C_GREEN)
+
+        if not self.is_bebas:
+            if self._last_transaction_item and previous_session:
+                app = self.winfo_toplevel()
+                item_id = self._last_transaction_item
+                pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
+                total_str = fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)
+                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                    idx = app._tree_item_to_index.get(item_id)
+                    if idx is not None and idx < len(app.riwayat_transaksi):
+                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+                        updated_row = (waktu, app.current_user, self.label_kursi, self.paket_aktif, pesanan_str, total_str)
+                        app.riwayat_transaksi[idx] = updated_row
+                        app.tree.item(item_id, values=updated_row)
+                        if hasattr(app, '_refresh_riwayat_summary'):
+                            app._refresh_riwayat_summary()
+            else:
+                self._last_transaction_item = self.on_transaksi(
+                    self.label_kursi, paket_nm, pesanan, self.paket_harga_tetap + total_pesanan, source='warnet')
+        else:
+            self._last_transaction_item = None
+ 
+        app = self.winfo_toplevel()
+        if hasattr(app, '_run_warnet_socket_command'):
+            threading.Thread(
+                target=lambda: app._run_warnet_socket_command(
+                    app.socket_warnet_config.get('on_start_command', 'START {kursi}'),
+                    self.label_kursi),
+                daemon=True).start()
+        if hasattr(app, '_refresh_warnet_footer'):
+            app._refresh_warnet_footer()
+
+    def _tick_waktu(self):
+        if self.sisa_waktu > 0:
+            h, rem = divmod(self.sisa_waktu, 3600)
+            m, s = divmod(rem, 60)
+            self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
+            if self.sisa_waktu <= 120:
+                self._warning_blink_on = not self._warning_blink_on
+                if self._warning_blink_on:
+                    self.configure(fg_color=C_RED)
+                    self.lbl_timer.configure(text_color="white")
+                else:
+                    self.configure(fg_color="white")
+                    self.lbl_timer.configure(text_color=C_ACCENT2)
+            else:
+                self.configure(fg_color="white")
+                self.lbl_timer.configure(text_color=C_ACCENT2)
+            self.sisa_waktu -= 1
+            self._timer_job = self.after(1000, self._tick_waktu)
+        else:
+            self.lbl_timer.configure(text="WAKTU HABIS ⏹", text_color=C_RED)
+            total_akhir = self.paket_harga_tetap + self.biaya_pesanan
+            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
+            paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
+            messagebox.showwarning(
+                "⏰ Waktu PC Habis",
+                f"PC: {self.label_kursi}\n"
+                f"Paket: {paket_txt}\n"
+                f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
+                f"TOTAL: {fmt_rp(total_akhir)}",
+                parent=self.winfo_toplevel(),
+            )
+            self._reset_sesi()
+
+    def _tick_bebas(self):
+        if not self.is_bebas or self.waktu_mulai is None:
+            return
+        total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds())
+        h, rem = divmod(total_detik, 3600)
+        m, s = divmod(rem, 60)
+        self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}", text_color=C_GREEN)
+        tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
+        menit_berjalan = total_detik / 60
+        estimasi = tarif_menit * menit_berjalan
+        self.lbl_estimasi.configure(text=f"≈ {fmt_rp(estimasi)}  (berjalan)")
+        self._timer_job = self.after(1000, self._tick_bebas)
+
+    def _total_menit_terpakai(self):
+        if self.is_bebas:
+            if self.waktu_mulai is None:
+                return self.menit_dipakai_awal
+            detik_berjalan = (datetime.now() - self.waktu_mulai).total_seconds()
+            return self.menit_dipakai_awal + detik_berjalan / 60
+        return None
+
+    def _klik_selesai(self):
+        if self.sesi_kosong():
+            return
+        if self.is_bebas:
+            menit_total = self._total_menit_terpakai()
+            tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
+            biaya_waktu = tarif_menit * menit_total
+            total_akhir = biaya_waktu + self.biaya_pesanan
+            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
+            if not messagebox.askyesno(
+                    "⏹ Selesai — Main Bebas",
+                    f"Kursi: {self.label_kursi}\n"
+                    f"Lama main: {fmt_durasi(round(menit_total))}\n"
+                    f"Biaya waktu: {fmt_rp(biaya_waktu)}\n"
+                    f"Biaya pesanan: {fmt_rp(self.biaya_pesanan)}\n"
+                    f"TOTAL: {fmt_rp(total_akhir)}\n\n"
+                    f"Rincian pesanan: {pesanan_txt}\n\n"
+                    f"Catat transaksi & akhiri sesi ini?"):
+                return
+            self.on_transaksi(self.label_kursi, "Main Bebas", self.pesanan_aktif, total_akhir, source='warnet')
+        else:
+            total_akhir = self.paket_harga_tetap + self.biaya_pesanan
+            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
+            paket_txt = f"{self.paket_aktif} ({fmt_rp(self.paket_harga_tetap)})"
+            if not messagebox.askyesno(
+                    "⏹ Selesai",
+                    f"Kursi: {self.label_kursi}\n"
+                    f"Paket: {paket_txt}\n"
+                    f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
+                    f"TOTAL: {fmt_rp(total_akhir)}\n\n"
+                    f"Akhiri sesi ini?"):
+                return
+        self.lbl_timer.configure(text="SELESAI ⏹", text_color=C_MUTED)
+        self.lbl_estimasi.configure(text="")
+        app = self.winfo_toplevel()
+        if hasattr(app, '_run_warnet_socket_command'):
+            threading.Thread(
+                target=lambda: app._run_warnet_socket_command(
+                    app.socket_warnet_config.get('on_finish_command', 'STOP {kursi}'),
+                    self.label_kursi),
+                daemon=True).start()
+        self._reset_sesi()
+
+    def _reset_sesi(self):
+        if self._timer_job:
+            self.after_cancel(self._timer_job)
+            self._timer_job = None
+        self.paket_aktif = None
+        self.sisa_waktu = 0
+        self.is_bebas = False
+        self.waktu_mulai = None
+        self.menit_dipakai_awal = 0
+        self.pesanan_aktif = {}
+        self.biaya_pesanan = 0
+        self.paket_harga_tetap = 0
+        self.lbl_paket.configure(text="—", text_color=C_MUTED)
+        self.lbl_timer.configure(text="00:00:00", text_color=C_MUTED)
+        self.configure(fg_color=C_CARD)
+        self._warning_blink_on = False
+        self.lbl_estimasi.configure(text="")
+        self.btn_selesai.configure(state="disabled")
+        self.btn_tambah_pesanan.configure(state="disabled")
+        self.btn_tambah_pesanan.configure(text="SHOP", fg_color=C_BTN,
+                                          border_width=1, border_color=C_ACCENT,
+                                          text_color=C_ACCENT)
+        app = self.winfo_toplevel()
+        if hasattr(app, '_refresh_warnet_footer'):
+            app._refresh_warnet_footer()
+
+    def _klik_pindah(self):
+        if self.sesi_kosong():
+            return
+        semua = self.get_semua_kartu()
+        kandidat = [k for k in semua if k is not self and k.sesi_kosong()]
+        if not kandidat:
+            messagebox.showwarning("⚠ Tidak Ada Kursi Kosong",
+                                    "Semua kursi lain sedang dipakai.\n"
+                                    "Selesaikan dulu salah satu sesi, atau tambah kursi baru.")
+            return
+        self._buka_dialog_pilih_tujuan(kandidat)
+
+    def _buka_dialog_pilih_tujuan(self, kandidat):
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("↔ Pindah Kursi")
+        dlg.geometry("360x420")
+        dlg.configure(fg_color=C_BG)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        ctk.CTkLabel(dlg, text=f"↔  Pindah dari {self.label_kursi}",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(18, 4))
+        ctk.CTkLabel(dlg, text="Pilih kursi tujuan — sisa waktu & sesi akan dipindah",
+                     font=FONT_BODY, text_color=C_MUTED, wraplength=320).pack(pady=(0, 12))
+
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color=C_BG, height=280)
+        scroll.pack(fill="both", expand=True, padx=16)
+
+        for k in kandidat:
+            btn = ctk.CTkButton(
+                scroll, text=f"💻  {k.label_kursi}",
+                height=40, fg_color=C_CARD, hover_color=C_ACCENT2,
+                border_width=1, border_color=C_BORDER,
+                font=FONT_BODY, text_color=C_TEXT, anchor="w",
+                command=lambda target=k: self._konfirmasi_pindah(target, dlg))
+            btn.pack(fill="x", pady=4, padx=4)
+
+        ctk.CTkButton(dlg, text="✖  Batal", height=34, width=120,
+                      fg_color=C_RED, font=FONT_SUB, text_color="white",
+                      command=dlg.destroy).pack(pady=12)
+
+    def _konfirmasi_pindah(self, target, dlg):
+        if not messagebox.askyesno(
+                "↔ Konfirmasi Pindah",
+                f"Pindahkan sesi dari {self.label_kursi} ke {target.label_kursi}?\n\n"
+                f"Sisa waktu / lama main akan dilanjutkan di {target.label_kursi},\n"
+                f"dan {self.label_kursi} akan menjadi kosong."):
+            return
+
+        target.paket_aktif = self.paket_aktif
+        target.is_bebas = self.is_bebas
+        target.pesanan_aktif = dict(self.pesanan_aktif)
+        target.biaya_pesanan = self.biaya_pesanan
+        target.paket_harga_tetap = self.paket_harga_tetap
+        target._last_transaction_item = self._last_transaction_item
+
+        if self.is_bebas:
+            target.menit_dipakai_awal = self._total_menit_terpakai()
+            target.sisa_waktu = 0
+            target.waktu_mulai = datetime.now()
+            target.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
+            target.lbl_timer.configure(text_color=C_GREEN)
+        else:
+            target.sisa_waktu = self.sisa_waktu
+            target.waktu_mulai = datetime.now()
+            target.lbl_paket.configure(text=f"{self.paket_aktif} | {fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)}",
+                                       text_color=C_YELLOW)
+            target.lbl_timer.configure(text_color=C_ACCENT)
+
+        target.btn_selesai.configure(state="normal")
+        target.btn_tambah_pesanan.configure(state="normal")
+        target.btn_tambah_pesanan.configure(text="SHOP", fg_color=C_BTN,
+                                          border_width=1, border_color=C_ACCENT2,
+                                          text_color=C_ACCENT2)
+
+        self._reset_sesi()
+        dlg.destroy()
+        messagebox.showinfo("✅ Berhasil Pindah",
+                            f"Sesi telah dipindah ke {target.label_kursi}.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3067,6 +4459,7 @@ class AutoRentApp(ctk.CTk):
         self.riwayat_meta = []  # parallel metadata: dicts with keys: source('tv'|'warnet'), pesanan_total(int), total(int)
         self._tree_item_to_index = {}
         self._tambah_btn_enabled = True
+        self._tambah_warnet_btn_enabled = True
         self._semua_kartu_tv  = []   # daftar semua KartuTV yang sedang ada di Dashboard
         self._semua_kartu_warnet = []  # daftar kartu warnet
 
@@ -3074,6 +4467,12 @@ class AutoRentApp(ctk.CTk):
         self.grup_tarif   = self._migrasi_grup_tarif(cfg.get("grup_tarif"), cfg.get("paket_main"))
         self.menu_makanan = cfg.get("menu_makanan",  dict(DEFAULT_MENU_MAKANAN))
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
+        self.socket_warnet_config = cfg.get("socket_warnet", {})
+        self.current_tab  = "dashboard"  # Track tab yang aktif
+        
+        # ── Start Warnet Socket Server ──────────────────────────────────────────
+        self.warnet_server = WarnetSocketServer()
+        self.warnet_server.start()
 
         self._show_login()
 
@@ -3150,8 +4549,42 @@ class AutoRentApp(ctk.CTk):
 
         return {nama: {k: dict(v) for k, v in paket.items()} for nama, paket in DEFAULT_GRUP_TARIF.items()}
 
-    def daftar_nama_grup(self):
-        return list(self.grup_tarif.keys()) or [NAMA_GRUP_DEFAULT]
+    def daftar_nama_grup(self, for_warnet=False):
+        """Return list of group names.
+        If for_warnet is False (default), exclude groups marked as warnet-only in config 'warnet_only_groups'.
+        If for_warnet is True, include warnet-only groups and any groups defined specifically for warnet in
+        config key 'grup_tarif_warnet'. "Warnet" group (if exists) is always first.
+        """
+        cfg = ConfigManager.load()
+        warnet_only = set(cfg.get('warnet_only_groups', []))
+        if for_warnet:
+            names = list(self.grup_tarif.keys()) if getattr(self, 'grup_tarif', None) else []
+            # Include any warnet-specific groups defined separately in config
+            warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+            for g in warnet_map.keys():
+                if g not in names:
+                    names.append(g)
+            # Ensure "Warnet" group is first if it exists
+            if 'Warnet' in names:
+                names.remove('Warnet')
+                names.insert(0, 'Warnet')
+            return names or [NAMA_GRUP_DEFAULT]
+        # Default (for PS/TV): exclude warnet-only groups
+        names = [g for g in (self.grup_tarif.keys() if getattr(self, 'grup_tarif', None) else []) if g not in warnet_only]
+        return names or [NAMA_GRUP_DEFAULT]
+
+    def daftar_semua_grup(self):
+        """Return list of ALL group names untuk Kontrol Harga (shared + warnet).
+        User bisa edit harga untuk semua grup.
+        """
+        cfg = ConfigManager.load()
+        names = list(self.grup_tarif.keys()) if getattr(self, 'grup_tarif', None) else []
+        # Include warnet-specific groups
+        warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+        for g in warnet_map.keys():
+            if g not in names:
+                names.append(g)
+        return names or [NAMA_GRUP_DEFAULT]
 
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
@@ -3189,9 +4622,19 @@ class AutoRentApp(ctk.CTk):
     def _cek_lisensi_saat_start(self):
         status = LicenseManager.get_status(current_user=self.current_user or "")
         if status["status"] == "expired":
+            # Disable semua tab kecuali Aktivasi
+            for tab_key, btn in self.nav_btns.items():
+                if tab_key != "aktivasi":
+                    btn.configure(state="disabled", text_color=C_MUTED)
+            
+            # Tampilkan warning
             self.after(600, lambda: messagebox.showwarning(
-                "⚠ Lisensi Habis",
-                f"{status['pesan']}\n\nPergi ke tab Aktivasi untuk melanjutkan berlangganan."))
+                "⚠ LISENSI HABIS — AKSES TERBATAS",
+                f"{status['pesan']}\n\n"
+                f"Semua fitur telah dikunci.\n"
+                f"Silakan aktifkan lisensi untuk melanjutkan menggunakan aplikasi."))
+            
+            # Paksa show tab Aktivasi
             self.after(700, lambda: self._show_tab("aktivasi"))
 
     # ── Layout ─────────────────────────────────────────────────────────────────
@@ -3421,6 +4864,17 @@ class AutoRentApp(ctk.CTk):
             self.after(0, lambda: messagebox.showerror("❌ Error", f"Update error:\n{str(e)}"))
 
     def _show_tab(self, key):
+        # Cek lisensi setiap kali user switch tab
+        status = LicenseManager.get_status(current_user=self.current_user or "")
+        if status["status"] == "expired" and key != "aktivasi":
+            # Jangan biarkan user switch ke tab lain selain aktivasi
+            messagebox.showwarning(
+                "⚠ AKSES TERBATAS",
+                "Lisensi Anda telah habis. Silakan aktifkan lisensi untuk mengakses fitur lain.")
+            self._show_tab("aktivasi")
+            return
+        
+        self.current_tab = key  # Track tab yang aktif
         for k, f in self.frames.items():
             f.pack_forget()
         self.frames[key].pack(fill="both", expand=True)
@@ -3428,12 +4882,57 @@ class AutoRentApp(ctk.CTk):
             btn.configure(fg_color=C_ACCENT2 if k == key else "transparent",
                           text_color="white" if k == key else C_TEXT)
 
-    def get_paket_data(self, nama_grup=None):
-        """Kembalikan dict paket {nama: {harga, menit}} untuk satu grup tarif.
-        Kalau grup tidak ditemukan (mis. grup sudah dihapus), fallback ke Reguler,
-        lalu ke grup pertama yang tersedia."""
-        if nama_grup and nama_grup in self.grup_tarif:
-            return {k: dict(v) for k, v in self.grup_tarif[nama_grup].items()}
+    def get_paket_data(self, nama_grup=None, for_warnet=False):
+        """Return paket dict for a group.
+        If for_warnet=True, prefer warnet-specific groups stored under config key
+        'grup_tarif_warnet'. Falls back to shared grup_tarif or standard paket.
+        """
+        cfg = ConfigManager.load()
+        if for_warnet:
+            warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+            # Jika ada konfigurasi grup tarif khusus warnet, gunakan itu sepenuhnya
+            if warnet_map:
+                # support case-insensitive lookup: coba kecocokan exact, lalu lowercase-match
+                k_found = None
+                if nama_grup:
+                    # exact match first
+                    if nama_grup in warnet_map:
+                        grp = warnet_map[nama_grup]
+                        k_found = nama_grup
+                    else:
+                        # try case-insensitive match
+                        lower_map = {k.lower(): k for k in warnet_map.keys()}
+                        k_found = lower_map.get(nama_grup.lower()) if isinstance(nama_grup, str) else None
+                        grp = warnet_map[k_found] if k_found else None
+                    if grp is not None:
+                        if isinstance(grp, dict):
+                            result = {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in grp.items()}
+                        else:
+                            result = {k: {"harga": int(v), "menit": 60} for k, v in grp.items()}
+                        return result
+                # Jika nama_grup tidak diberikan atau tidak ditemukan, kembalikan grup pertama dari konfigurasi warnet
+                first = next(iter(warnet_map.values()))
+                if isinstance(first, dict):
+                    return {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in first.items()}
+                else:
+                    return {k: {"harga": int(v), "menit": 60} for k, v in first.items()}
+            # Jika tidak ada konfigurasi warnet sama sekali, jangan ambil dari grup PS — kembalikan kosong
+            return {}
+        
+        # Default behavior: use shared grup_tarif, tapi juga cek warnet grup jika ada
+        if nama_grup:
+            # Check shared grup_tarif first
+            if nama_grup in self.grup_tarif:
+                return {k: dict(v) for k, v in self.grup_tarif[nama_grup].items()}
+            # Check warnet-specific groups (untuk Kontrol Harga access)
+            warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+            if nama_grup in warnet_map:
+                grp = warnet_map[nama_grup]
+                if isinstance(grp, dict):
+                    return {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in grp.items()}
+                else:
+                    return {k: {"harga": int(v), "menit": 60} for k, v in grp.items()}
+        
         if NAMA_GRUP_DEFAULT in self.grup_tarif:
             return {k: dict(v) for k, v in self.grup_tarif[NAMA_GRUP_DEFAULT].items()}
         if self.grup_tarif:
@@ -3479,6 +4978,9 @@ class AutoRentApp(ctk.CTk):
         self.lbl_total_warnet = ctk.CTkLabel(hdr, text="Total Kursi: 0",
                                              font=FONT_BODY, text_color=C_MUTED)
         self.lbl_total_warnet.pack(side="left", padx=20)
+        self.lbl_socket_warnet = ctk.CTkLabel(hdr, text="Client: Belum tersambung",
+                                               font=FONT_BODY, text_color=C_MUTED)
+        self.lbl_socket_warnet.pack(side="left", padx=12)
         self.btn_warnet_demo = ctk.CTkButton(hdr, text="🧪 Demo Warnet", width=140, height=34,
                                             fg_color=C_BTN, hover_color=C_ACCENT2,
                                             border_width=1, border_color=C_ACCENT2,
@@ -3491,7 +4993,29 @@ class AutoRentApp(ctk.CTk):
                                              font=("Russo One", 10, "bold"),
                                              command=self._buka_dialog_tambah_warnet)
         self.btn_tambah_warnet.pack(side="right", padx=8, pady=10)
-
+        self.btn_socket_warnet = ctk.CTkButton(hdr, text="⚙ Config Client", width=145, height=34,
+                                               fg_color=C_BTN, hover_color=C_ACCENT2,
+                                               border_width=1, border_color=C_ACCENT2,
+                                               font=("Russo One", 10, "bold"),
+                                               text_color=C_ACCENT2,
+                                               command=self._open_socket_warnet_config)
+        self.btn_socket_warnet.pack(side="right", padx=8, pady=10)
+        self.btn_warnet_admin_code = ctk.CTkButton(
+            hdr,
+            text="🔐 Kode Client",
+            width=130,
+            height=34,
+            fg_color=C_BTN,
+            hover_color=C_ACCENT2,
+            border_width=1,
+            border_color=C_ACCENT2,
+            font=("Russo One", 10, "bold"),
+            text_color=C_ACCENT2,
+            command=self._open_warnet_admin_code_generator,
+        )
+        self.btn_warnet_admin_code.pack(side="right", padx=8, pady=10)
+        self._refresh_warnet_socket_status()
+ 
         self.scroll_warnet = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         self.scroll_warnet.pack(fill="both", expand=True, padx=6, pady=6)
         cf = ctk.CTkFrame(self.scroll_warnet, fg_color="transparent")
@@ -3558,6 +5082,10 @@ class AutoRentApp(ctk.CTk):
         self._tambah_btn_enabled = True
         self.btn_tambah.configure(state="normal", text="➕  Tambah TV")
 
+    def _unlock_tambah_warnet(self):
+        self._tambah_warnet_btn_enabled = True
+        self.btn_tambah_warnet.configure(state="normal", text="➕  Tambah Kursi")
+
     def _buka_dialog_tambah(self):
         if not self._tambah_btn_enabled: return
         self._tambah_btn_enabled = False
@@ -3570,7 +5098,9 @@ class AutoRentApp(ctk.CTk):
     def _tambah_tv_demo(self):
         demo_count = sum(1 for k in self._semua_kartu_tv if k.label_tv.startswith("Demo TV")) + 1
         demo_name = f"Demo TV {demo_count}"
-        self._tambah_tv(ip="192.168.100.100", nama=demo_name, port=5555, nama_grup=self._grup_aktif)
+        # Pastikan ada grup aktif; fallback ke default jika belum dipilih untuk menghindari AttributeError
+        default_group = self._grup_aktif if hasattr(self, '_grup_aktif') else NAMA_GRUP_DEFAULT
+        self._tambah_tv(ip="192.168.100.100", nama=demo_name, port=5555, nama_grup=default_group)
  
     def _on_tv_confirmed(self, ip, nama, port, nama_grup):
         self._unlock_tambah()
@@ -3619,42 +5149,274 @@ class AutoRentApp(ctk.CTk):
     #  TAB 2: Kontrol Harga
     # ══════════════════════════════════════════════════════════════════════════
     def _buka_dialog_tambah_warnet(self):
-        if not self._tambah_btn_enabled: return
-        self._tambah_btn_enabled = False
+        if not self._tambah_warnet_btn_enabled: return
+        ok_client, msg_client = self._check_warnet_client_connection()
+        if not ok_client:
+            messagebox.showwarning(
+                "Client Belum Siap",
+                "Tambah Kursi hanya bisa dilakukan jika Config Client sudah benar\n"
+                "dan PC client berhasil terhubung.\n\n"
+                f"Detail: {msg_client}",
+                parent=self
+            )
+            return
+
+        self._tambah_warnet_btn_enabled = False
         self.btn_tambah_warnet.configure(state="disabled", text="⏳ Menunggu...")
-        # Simple input dialog using CTkInputDialog for name
-        dlg = ctk.CTkInputDialog(text="Nama Kursi / PC:", title=f"Tambah Kursi Warnet")
-        nama = dlg.get_input()
-        if nama:
-            self._tambah_warnet(nama=nama)
-        self._tambah_btn_enabled = True
-        self.btn_tambah_warnet.configure(state="normal", text="➕  Tambah Kursi")
+
+        # Ambil daftar grup khusus warnet. Jika tidak ada, buat grup default 'Warnet' dari salinan grup aktif
+        daftar_warnet = self.daftar_nama_grup(for_warnet=True)
+        if not daftar_warnet:
+            try:
+                cfg = ConfigManager.load()
+                shared = cfg.get('grup_tarif', {}) or {}
+                # Ambil grup fallback dari grup_tarif jika tersedia, atau paket standar sebagai cadangan
+                fallback_group = next(iter(shared.keys())) if shared else NAMA_GRUP_DEFAULT
+                source_map = shared.get(fallback_group, _PAKET_STANDAR)
+                warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+                # Buat grup 'Warnet' sebagai salinan dari grup fallback
+                warnet_map['Warnet'] = {k: dict(v) for k, v in source_map.items()} if isinstance(source_map, dict) else dict(source_map)
+                cfg['grup_tarif_warnet'] = warnet_map
+                ConfigManager.save(cfg)
+                # refresh daftar setelah simpan
+                daftar_warnet = self.daftar_nama_grup(for_warnet=True)
+            except Exception as e:
+                print(f"[WARN] Gagal membuat grup_warnet default: {e}", flush=True)
+                daftar_warnet = [NAMA_GRUP_DEFAULT]
+
+        # Buka dialog tambah warnet dengan grup yang hanya berisi grup warnet (dikunci)
+        DialogTambahWarnet(self,
+                            on_confirm=self._on_warnet_confirmed,
+                            on_close_cb=self._unlock_tambah_warnet,
+                            daftar_grup=daftar_warnet,
+                            lock_group=True)
+
+    def _on_warnet_confirmed(self, nama, nama_grup):
+        self._unlock_tambah_warnet()
+        self._tambah_warnet(nama=nama, nama_grup=nama_grup)
 
     def _tambah_warnet_demo(self):
-        demo_count = sum(1 for k in self._semua_kartu_warnet if k.label_kursi.startswith("Demo PC")) + 1
+        demo_count = sum(1 for k in getattr(self, '_semua_kartu_warnet', []) if k.label_kursi.startswith("Demo PC")) + 1
         demo_name = f"Demo PC {demo_count}"
-        self._tambah_warnet(nama=demo_name)
+        # Ensure warnet tab is visible so user can see the added demo card
+        try:
+            if hasattr(self, '_show_tab'):
+                self._show_tab('warnet')
+        except Exception:
+            pass
 
-    def _tambah_warnet(self, nama):
+        try:
+            # Use first warnet group as demo default if available
+            warnet_daftar = self.daftar_nama_grup(for_warnet=True)
+            demo_group = warnet_daftar[0] if (warnet_daftar and len(warnet_daftar) > 0) else NAMA_GRUP_DEFAULT
+            self._tambah_warnet(nama=demo_name, nama_grup=demo_group)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("❌ Demo Warnet Gagal", f"Gagal menambahkan Demo Warnet:\n{e}", parent=self)
+
+    def _tambah_warnet(self, nama, nama_grup=None):
+        # Ensure counters and containers exist
         self.jumlah_warnet = getattr(self, 'jumlah_warnet', 0) + 1
         kolom = (self.jumlah_warnet - 1) % 3
+        # Default group for warnet: prefer the first warnet-specific group if present,
+        # otherwise fall back to supplied nama_grup or current active grup.
+        warnet_daftar = self.daftar_nama_grup(for_warnet=True)
+        default_group = nama_grup or (warnet_daftar[0] if warnet_daftar else (self._grup_aktif if hasattr(self, '_grup_aktif') else NAMA_GRUP_DEFAULT))
+        # Ensure the warnet cards list exists
+        if not hasattr(self, '_semua_kartu_warnet'):
+            self._semua_kartu_warnet = []
+        # Defensive: ensure column frames exist
+        if not hasattr(self, '_col_frames_warnet') or not self._col_frames_warnet:
+            # Try to create a simple column container in the warnet scroll area if possible
+            try:
+                cf = ctk.CTkFrame(self.scroll_warnet, fg_color="transparent")
+                cf.pack(fill="both", expand=True)
+                cf.columnconfigure(0, weight=1)
+                self._col_frames_warnet = [cf]
+                kolom = 0
+            except Exception:
+                messagebox.showwarning("⚠ Dashboard Warnet Belum Siap",
+                                       "Container untuk kartu Warnet belum dibuat dan tidak dapat dibuat otomatis.",
+                                       parent=self)
+                return
+
         kartu = KartuWarnet(self._col_frames_warnet[kolom], self.jumlah_warnet,
                             label_kursi=nama,
                             on_transaksi=self._catat_transaksi,
-                            get_paket_data=lambda g=None: self.get_paket_data(),
+                            get_paket_data=lambda: self.get_paket_data("Warnet", for_warnet=True),
                             get_makanan_data=self.get_makanan_data,
-                            get_minuman_data=self.get_minuman_data)
+                            get_minuman_data=self.get_minuman_data,
+                            get_semua_kartu=lambda: self._semua_kartu_warnet,
+                            get_daftar_grup=lambda: self.daftar_nama_grup(for_warnet=True),
+                            on_ganti_grup=self._on_warnet_kartu_ganti_grup,
+                            on_hapus=self._hapus_warnet,
+                            nama_grup=default_group)
         kartu.pack(fill="x", pady=2)
         self._semua_kartu_warnet.append(kartu)
-        self.lbl_total_warnet.configure(text=f"Total Kursi: {self.jumlah_warnet}")
-        self._refresh_warnet_footer()
+        try:
+            self.lbl_total_warnet.configure(text=f"Total Kursi: {self.jumlah_warnet}")
+        except Exception:
+            pass
+        if hasattr(self, '_refresh_warnet_footer'):
+            self._refresh_warnet_footer()
+
+    def _on_warnet_kartu_ganti_grup(self, kartu, grup_baru):
+        # Warnet PC dikunci ke grup "Warnet", jadi selalu ambil paket dari "Warnet"
+        kartu.get_paket_data = lambda: self.get_paket_data("Warnet", for_warnet=True)
+        if not kartu.sesi_kosong() and not kartu.is_bebas:
+            # If the kartu already has an active timed session, refresh the displayed total price
+            total_pesanan = kartu.biaya_pesanan
+            kartu.lbl_paket.configure(
+                text=f"{fmt_durasi(int(kartu.sisa_waktu / 60))} | {fmt_rp(kartu.paket_harga_tetap + total_pesanan)}")
+
+    def _hapus_warnet(self, kartu):
+        """Hapus sebuah kartu Warnet dari dashboard.
+        KartuWarnet._confirm_hapus sudah menanyakan konfirmasi, jadi di sini langsung lakukan penghapusan.
+        """
+        try:
+            # Remove from list if present
+            if hasattr(self, '_semua_kartu_warnet') and kartu in self._semua_kartu_warnet:
+                try:
+                    self._semua_kartu_warnet.remove(kartu)
+                except ValueError:
+                    pass
+            # Destroy widget
+            try:
+                kartu.destroy()
+            except Exception:
+                pass
+            # Update counters & footer
+            self.jumlah_warnet = max(0, getattr(self, 'jumlah_warnet', 1) - 1)
+            if hasattr(self, 'lbl_total_warnet'):
+                try:
+                    self.lbl_total_warnet.configure(text=f"Total Kursi: {self.jumlah_warnet}")
+                except Exception:
+                    pass
+            if hasattr(self, '_refresh_warnet_footer'):
+                try:
+                    self._refresh_warnet_footer()
+                except Exception:
+                    pass
+            AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='success', details={'label': getattr(kartu, 'label_kursi', 'unknown')})
+        except Exception as e:
+            AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='failed', details={'error': str(e)})
+            try:
+                messagebox.showerror("Error", f"Gagal menghapus kursi: {e}", parent=self)
+            except Exception:
+                pass
 
     def _refresh_warnet_footer(self):
         # Sum warnet totals from riwayat_meta
         total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
         if hasattr(self, 'lbl_warnet_total_pendapatan'):
             self.lbl_warnet_total_pendapatan.configure(text=f"Total Pendapatan Warnet: {fmt_rp(total_warnet)}")
+ 
+    def _refresh_warnet_socket_status(self):
+        cfg = self.socket_warnet_config or {}
+        enabled = bool(cfg.get('host'))
+        if hasattr(self, 'lbl_socket_warnet'):
+            if not enabled:
+                self.lbl_socket_warnet.configure(
+                    text="Client: Belum dikonfigurasi",
+                    text_color=C_MUTED
+                )
+                return
 
+            ok_client, _ = self._check_warnet_client_connection(cfg=cfg, timeout=2)
+            self.lbl_socket_warnet.configure(
+                text=f"Client: {'Tersambung' if ok_client else 'Belum tersambung'}",
+                text_color=C_GREEN if ok_client else C_YELLOW
+            )
+
+    def _check_warnet_client_connection(self, cfg=None, timeout=3):
+        cfg = cfg or self.socket_warnet_config or {}
+        host = (cfg.get('host') or '').strip()
+        if not host:
+            return False, "Host/IP client belum diisi di Config Client."
+
+        server = getattr(self, 'warnet_server', None)
+        if server is None or not getattr(server, 'running', False):
+            return False, "Socket server billing belum aktif."
+
+        with server.sessions_lock:
+            active_sessions = list(server.sessions.values())
+
+        if not active_sessions:
+            return False, "Belum ada PC client yang AUTH/login ke server."
+
+        return True, f"{len(active_sessions)} client aktif terhubung."
+
+    def _open_socket_warnet_config(self):
+        DialogSocketConfig(self, config=self.socket_warnet_config,
+                           on_save=self._save_socket_warnet_config,
+                           on_test=self._test_socket_warnet_config)
+
+    def _open_warnet_admin_code_generator(self):
+        DialogWarnetAdminCode(self)
+ 
+    def _save_socket_warnet_config(self, cfg):
+        ConfigManager.set('socket_warnet', cfg)
+        self.socket_warnet_config = cfg
+        self._refresh_warnet_socket_status()
+        messagebox.showinfo("✅ Config Client Disimpan", "Konfigurasi koneksi client berhasil disimpan.", parent=self)
+
+    def _test_socket_warnet_config(self, cfg):
+        host = (cfg.get('host') or '').strip()
+        if not host:
+            messagebox.showerror("❌ Test Koneksi Gagal", "Host/IP client belum diisi.", parent=self)
+            return
+
+        try:
+            port = int(cfg.get('port', DEFAULT_PORT) or DEFAULT_PORT)
+        except Exception:
+            messagebox.showerror("❌ Test Koneksi Gagal", "Port client tidak valid.", parent=self)
+            return
+
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                pass
+            ok, msg = True, f"Port {host}:{port} dapat diakses."
+        except socket.timeout:
+            ok, msg = False, f"Timeout ke {host}:{port}"
+        except ConnectionRefusedError:
+            ok, msg = False, f"Koneksi ditolak di {host}:{port}"
+        except OSError as e:
+            ok, msg = False, f"Gagal konek ke {host}:{port} ({e})"
+
+        if ok:
+            messagebox.showinfo("✅ Test Koneksi Berhasil", f"{msg}", parent=self)
+        else:
+            messagebox.showerror("❌ Test Koneksi Gagal", f"{msg}", parent=self)
+
+    def _run_warnet_socket_command(self, cmd_template, kursi_label):
+        cfg = self.socket_warnet_config or ConfigManager.get('socket_warnet', {})
+        if not cfg.get('host'):
+            return False, "Socket Warnet belum dikonfigurasi."
+
+        if not cmd_template:
+            return False, "Perintah Socket belum diatur."
+
+        try:
+            cmd = cmd_template.format(kursi=kursi_label, kursi_label=kursi_label, label=kursi_label)
+        except Exception:
+            cmd = cmd_template
+
+        try:
+            port = int(cfg.get('port', DEFAULT_PORT) or DEFAULT_PORT)
+        except Exception:
+            port = DEFAULT_PORT
+
+        ok, msg = SocketHelper.send(
+            cfg.get('host', ''), port, cmd)
+
+        AuditLogger.log(
+            action='socket_warnet_command',
+            username=self.current_user or 'system',
+            status='success' if ok else 'failed',
+            details={'host': cfg.get('host'), 'kursi': kursi_label, 'command': cmd, 'result': msg})
+        return ok, msg
+ 
     def _setup_harga(self):
         f = self.frames["harga"]
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
@@ -3680,9 +5442,12 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_grup_info(self):
         jumlah_tv = sum(1 for k in self._semua_kartu_tv if k.nama_grup == self._grup_aktif)
+        jumlah_warnet = sum(1 for k in getattr(self, '_semua_kartu_warnet', []) if k.nama_grup == self._grup_aktif)
+        total_pengguna = jumlah_tv + jumlah_warnet
+        label_sumber = "TV" if jumlah_warnet == 0 else "TV dan Warnet" if jumlah_tv and jumlah_warnet else "Warnet"
         self.lbl_grup_info.configure(
             text=f"Sedang mengedit harga untuk grup '{self._grup_aktif}'  ·  "
-                 f"dipakai oleh {jumlah_tv} TV saat ini di Dashboard.")
+                 f"dipakai oleh {total_pengguna} {label_sumber} saat ini di Dashboard.")
 
     def _refresh_info_bebas(self):
         tarif_skrg = hitung_tarif_per_menit(self.grup_tarif[self._grup_aktif])
@@ -3694,6 +5459,14 @@ class AutoRentApp(ctk.CTk):
     def _ganti_grup_aktif(self, grup_baru):
         self._simpan_paket_aktif_ke_memori()
         self._grup_aktif = grup_baru
+        
+        # Jika grup_baru tidak ada di self.grup_tarif (warnet group), muat dari config
+        if self._grup_aktif not in self.grup_tarif:
+            cfg = ConfigManager.load()
+            warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+            if self._grup_aktif in warnet_map:
+                self.grup_tarif[self._grup_aktif] = warnet_map[self._grup_aktif]
+        
         self._refresh_grup_info()
         self._refresh_info_bebas()
         self._rebuild_harga()
@@ -3773,6 +5546,11 @@ class AutoRentApp(ctk.CTk):
             if kartu.nama_grup == grup:
                 kartu.nama_grup = fallback
                 kartu.lbl_grup.configure(text=f"🏷 {fallback}")
+                kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g)
+        for kartu in getattr(self, '_semua_kartu_warnet', []):
+            if kartu.nama_grup == grup:
+                kartu.nama_grup = fallback
+                kartu.lbl_grup.configure(text=f"↻ {fallback}")
                 kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g)
         self._grup_aktif = fallback
         self._simpan_grup_tarif_ke_config()
@@ -3988,7 +5766,7 @@ class AutoRentApp(ctk.CTk):
         grup_row.pack(fill="x", padx=16, pady=(0, 6))
         self.var_grup_aktif = ctk.StringVar(value=self._grup_aktif)
         self.opt_grup_aktif = ctk.CTkOptionMenu(
-            grup_row, values=self.daftar_nama_grup(), variable=self.var_grup_aktif,
+            grup_row, values=self.daftar_semua_grup(), variable=self.var_grup_aktif,
             fg_color=C_BTN, button_color=C_ACCENT2, button_hover_color="#5A0FCC",
             text_color=C_TEXT, font=("Consolas", 11, "bold"), dropdown_font=FONT_BODY,
             dropdown_fg_color=C_CARD, dropdown_text_color=C_TEXT, width=220,
@@ -4071,6 +5849,14 @@ class AutoRentApp(ctk.CTk):
         cfg["grup_tarif"]   = self.grup_tarif
         cfg["menu_makanan"] = self.menu_makanan
         cfg["menu_minuman"] = self.menu_minuman
+        
+        # Sinkronkan grup warnet: jika grup yang diedit juga ada di grup_tarif_warnet, update sana juga
+        if 'grup_tarif_warnet' not in cfg:
+            cfg['grup_tarif_warnet'] = {}
+        warnet_map = cfg['grup_tarif_warnet']
+        if self._grup_aktif in warnet_map and new_paket_grup_aktif:
+            warnet_map[self._grup_aktif] = new_paket_grup_aktif
+        
         ConfigManager.save(cfg)
 
         # Sinkronkan tampilan Dashboard TV: semua KartuTV yang sedang memakai
@@ -4141,18 +5927,18 @@ class AutoRentApp(ctk.CTk):
                                             font=FONT_SUB, text_color=C_YELLOW)
         self.lbl_rekap_footer.pack(side="left", padx=18, pady=8)
 
-    def _catat_transaksi(self, kota, paket, pesanan, total):
+    def _catat_transaksi(self, kota, paket, pesanan, total, source='tv'):
         """Catat transaksi ke riwayat.
         pesanan: dict nama->qty
-        kota: string (use prefix 'Warnet' or 'Warnet:' to mark source warnet)
+        kota: string label kursi atau nama TV
+        source: 'tv' atau 'warnet'
         total: int (total rupiah)
         """
         waktu       = datetime.now().strftime("%Y-%m-%d %H:%M")
         pesanan = pesanan or {}
         pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in pesanan.items()) or "—"
 
-        # Determine source: warnet if kota startswith 'Warnet' (case-insensitive), else tv
-        src = 'warnet' if isinstance(kota, str) and kota.strip().lower().startswith('warnet') else 'tv'
+        src = source if source in ('tv', 'warnet') else 'tv'
 
         # compute pesanan total (money) using menu prices
         all_menu = {**self.menu_makanan, **self.menu_minuman}
@@ -4238,7 +6024,7 @@ class AutoRentApp(ctk.CTk):
         # Dialog kecil untuk meminta username + password admin untuk otorisasi
         dlg = ctk.CTkToplevel(self)
         dlg.title("Otorisasi Admin")
-        dlg.geometry("420x260")
+        dlg.geometry("520x320")
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
@@ -4367,71 +6153,46 @@ class AutoRentApp(ctk.CTk):
         ws[f"A{last_row}"].font      = Font(name="Consolas", bold=True, color="FFD700", size=11)
         ws[f"A{last_row}"].fill      = PatternFill("solid", fgColor="1A1A3A")
         ws[f"A{last_row}"].alignment = Alignment(horizontal="right")
-        total_all = sum(
-            int(r[5].replace("Rp ", "").replace(".", ""))
-            for r in self.riwayat_transaksi if r[5] and "Rp" in r[5]
-        )
+        total_tv = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
+        total_all = total_tv + total_warnet
         ws[f"F{last_row}"] = fmt_rp(total_all)
         ws[f"F{last_row}"].font      = Font(name="Consolas", bold=True, color="FFD700", size=11)
         ws[f"F{last_row}"].fill      = PatternFill("solid", fgColor="1A1A3A")
         ws[f"F{last_row}"].alignment = center
 
-        tgl = datetime.now().strftime("%Y%m%d_%H%M%S")
+        summary_row = last_row + 1
+        for label, amount in [
+            ("TOTAL TV", total_tv),
+            ("TOTAL WARnet", total_warnet),
+            ("TOTAL PESANAN", total_pesanan),
+            ("TOTAL KESELURUHAN", total_all),
+        ]:
+            ws.merge_cells(f"A{summary_row}:E{summary_row}")
+            ws[f"A{summary_row}"] = label
+            ws[f"A{summary_row}"].font      = Font(name="Consolas", bold=True, color="00FFCC" if label != "TOTAL KESELURUHAN" else "FFD700", size=10)
+            ws[f"A{summary_row}"].fill      = PatternFill("solid", fgColor="12122A")
+            ws[f"A{summary_row}"].alignment = Alignment(horizontal="right")
+            ws[f"F{summary_row}"] = fmt_rp(amount)
+            ws[f"F{summary_row}"].font      = Font(name="Consolas", bold=True, color="00FFCC" if label != "TOTAL KESELURUHAN" else "FFD700", size=10)
+            ws[f"F{summary_row}"].fill      = PatternFill("solid", fgColor="12122A")
+            ws[f"F{summary_row}"].alignment = center
+            summary_row += 1
+
+        tgl = datetime.now().strftime("%d-%m-%Y_%H-%M")
         default_name = f"laporan_rr_billing_{tgl}.xlsx"
+        docs_dir = os.path.join(os.path.expanduser("~"), "Documents")
+        initial_dir = docs_dir if os.path.isdir(docs_dir) else os.path.expanduser("~")
 
-        def _ask_save_path():
-            dlg = ctk.CTkToplevel(self)
-            dlg.title("Simpan Laporan Excel")
-            dlg.geometry("560x180")
-            dlg.configure(fg_color=C_BG)
-            dlg.resizable(False, False)
-            dlg.transient(self)
-            dlg.grab_set()
-
-            ctk.CTkLabel(dlg, text="Simpan file laporan Excel:", font=FONT_SUB, text_color=C_ACCENT).pack(pady=(16, 8), padx=16, anchor="w")
-            path_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), default_name))
-
-            entry_frame = ctk.CTkFrame(dlg, fg_color="transparent")
-            entry_frame.pack(fill="x", padx=16, pady=(0, 12))
-            entry = ctk.CTkEntry(entry_frame, textvariable=path_var, width=400, fg_color=C_BTN,
-                                 text_color=C_TEXT, border_color=C_ACCENT)
-            entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            ctk.CTkButton(entry_frame, text="Browse", width=90, height=32,
-                          fg_color=C_ACCENT2, hover_color="#5A0FCC",
-                          command=lambda: browse_folder()).pack(side="right")
-
-            def browse_folder():
-                folder = filedialog.askdirectory(parent=dlg, title="Pilih folder simpan", initialdir=os.path.expanduser("~"))
-                if folder:
-                    path_var.set(os.path.join(folder, default_name))
-
-            result = {"path": None}
-
-            def on_save():
-                p = path_var.get().strip()
-                if not p:
-                    messagebox.showwarning("Pilih Lokasi", "Silakan pilih lokasi file yang akan disimpan.", parent=dlg)
-                    return
-                if not p.lower().endswith(".xlsx"):
-                    p += ".xlsx"
-                if os.path.exists(p) and not messagebox.askyesno("Konfirmasi", "File sudah ada. Timpa file?", parent=dlg):
-                    return
-                result["path"] = p
-                dlg.destroy()
-
-            btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
-            btn_frame.pack(fill="x", padx=16, pady=(0, 12))
-            ctk.CTkButton(btn_frame, text="Simpan", width=120, height=34,
-                          fg_color=C_GREEN, hover_color="#2F7A2F",
-                          command=on_save).pack(side="right", padx=(0, 8))
-            ctk.CTkButton(btn_frame, text="Batal", width=120, height=34,
-                          fg_color=C_RED, hover_color="#7A1A1A",
-                          command=dlg.destroy).pack(side="right")
-
-            dlg.wait_window()
-            return result["path"]
-
-        save_path = _ask_save_path()
+        save_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Simpan Laporan Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx")],
+            initialfile=default_name,
+            initialdir=initial_dir
+        )
 
         if not save_path:
             return
@@ -4875,6 +6636,11 @@ class AutoRentApp(ctk.CTk):
         if getattr(self, "lbl_sidebar_license_status", None) is not None:
             self.lbl_sidebar_license_status.configure(text=status["pesan"], text_color=lic_color)
 
+        # Re-enable semua tab jika lisensi aktif/trial
+        if status["status"] in ["active", "trial"]:
+            for tab_key, btn in self.nav_btns.items():
+                btn.configure(state="normal", text_color=C_TEXT if tab_key != self.current_tab else "white")
+        
         if self.frames.get("aktivasi"):
             for child in self.frames["aktivasi"].winfo_children():
                 child.destroy()
