@@ -116,7 +116,7 @@ class TokenManager:
 class WarnetSocketServer:
     """Socket server untuk warnet client app connections."""
     
-    def __init__(self, config_manager=None, listen_port=5000):
+    def __init__(self, config_manager=None, listen_port=5000, app=None):
         self.config_manager = config_manager or ConfigManager
         self.listen_port = listen_port
         self.listen_address = "0.0.0.0"
@@ -125,6 +125,7 @@ class WarnetSocketServer:
         self.sessions = {}  # {session_token: {client_id, last_heartbeat, address}}
         self.sessions_lock = threading.Lock()
         self.token_manager = TokenManager()
+        self.app = app  # Reference to main app untuk query kursi/PC data
     
     def start(self):
         """Start socket server di background thread."""
@@ -384,7 +385,7 @@ class WarnetSocketServer:
         }
     
     def _handle_get_status(self, message: dict) -> dict:
-        """Handle GET_STATUS: return billing status for a PC.
+        """Handle GET_STATUS: return real billing status for a PC.
         Request: {"type": "GET_STATUS", "session_token": "...", "pc_id": "PC_1"}
         Response: {"type": "STATUS_RESPONSE", "status": "OK", "billing": {...}}
         """
@@ -402,16 +403,32 @@ class WarnetSocketServer:
                 "message": f"Token error: {str(e)}"
             }
         
-        # Return status with dummy billing data for demo
-        # In production, this would query actual billing state from DB/app
+        # Query real billing data from app state
         billing_status = {
             "pc_id": pc_id,
-            "time_left": 0,  # seconds
+            "time_left": 0,
             "paket_aktif": "-",
             "total_biaya": 0,
             "is_playing": False,
             "timestamp": int(time.time())
         }
+        
+        # If app reference exists, query actual kursi data
+        if self.app and hasattr(self.app, '_semua_kartu_tv'):
+            # Search for kursi that matches pc_id (client_id in config)
+            for kursi in self.app._semua_kartu_tv:
+                # Try to match by label_tv or other identifier
+                if hasattr(kursi, 'label_tv'):
+                    # Update with real data from kursi
+                    if kursi.paket_aktif:
+                        billing_status["paket_aktif"] = kursi.paket_aktif
+                    if kursi.sisa_waktu > 0:
+                        billing_status["time_left"] = kursi.sisa_waktu
+                    if kursi.paket_harga_tetap > 0 or kursi.biaya_pesanan > 0:
+                        billing_status["total_biaya"] = kursi.paket_harga_tetap + kursi.biaya_pesanan
+                    if kursi.paket_aktif and kursi.sisa_waktu > 0:
+                        billing_status["is_playing"] = True
+                    break
         
         return {
             "type": "STATUS_RESPONSE",
@@ -4471,7 +4488,7 @@ class AutoRentApp(ctk.CTk):
         self.current_tab  = "dashboard"  # Track tab yang aktif
         
         # ── Start Warnet Socket Server ──────────────────────────────────────────
-        self.warnet_server = WarnetSocketServer()
+        self.warnet_server = WarnetSocketServer(app=self)
         self.warnet_server.start()
 
         self._show_login()
