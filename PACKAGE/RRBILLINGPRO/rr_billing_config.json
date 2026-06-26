@@ -1,0 +1,1378 @@
+{
+  "paket_main": {
+    "1 Jam": {
+      "harga": 5000,
+      "menit": 60
+    },
+    "2 Jam": {
+      "harga": 18000,
+      "menit": 120
+    },
+    "3 Jam": {
+      "harga": 25000,
+      "menit": 180
+    },
+    "5 Jam": {
+      "harga": 35000,
+      "menit": 300
+    },
+    "Overnight": {
+      "harga": 50000,
+      "menit": 540
+    },
+    "Main Bebas": {
+      "harga": 0,
+      "menit": 0
+    },
+    "Reguler": {
+      "harga": 12000,
+      "menit": 60
+    }
+  },
+  "email_settings": {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "smtp_username": "dedekemoking@gmail.com",
+    "smtp_password": "sdaq umwh mmqp jxtz",
+    "from_address": "dedekemoking@gmail.com",
+    "use_tls": true
+  },
+  "menu_makanan": {
+    "Indomie Goreng": 8000,
+    "Indomie Kuah": 8000,
+    "Kentang Goreng": 12000,
+    "Burger": 20000,
+    "Roti Bakar": 10000,
+    "Nasi Goreng": 15000,
+    "Sosis Bakar": 7000
+  },
+  "menu_minuman": {
+    "Air Mineral": 3000,
+    "Es Teh Manis": 5000,
+    "Es Jeruk": 6000,
+    "Kopi Hitam": 6000,
+    "Susu Coklat": 8000,
+    "Jus Mangga": 10000,
+    "Soda Gembira": 10000,
+    "Pocari Sweat": 8000
+  },
+  "grup_tarif": {
+    "Reguler": {
+      "1 Jam": {
+        "harga": 50000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "PS3": {
+      "1 Jam": {
+        "harga": 5000000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "PS4": {
+      "1 Jam": {
+        "harga": 10000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 18000,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    },
+    "Warnet": {
+      "1 Jam": {
+        "harga": 5000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 122178,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    }
+  },
+  "warnet_only_groups": [
+    "Warnet"
+  ],
+  "grup_tarif_warnet": {
+    "Warnet": {
+      "1 Jam": {
+        "harga": 5000,
+        "menit": 60
+      },
+      "2 Jam": {
+        "harga": 122178,
+        "menit": 120
+      },
+      "3 Jam": {
+        "harga": 25000,
+        "menit": 180
+      },
+      "5 Jam": {
+        "harga": 35000,
+        "menit": 300
+      },
+      "Overnight": {
+        "harga": 50000,
+        "menit": 540
+      },
+      "Main Bebas": {
+        "harga": 0,
+        "menit": 0
+      },
+      "Reguler": {
+        "harga": 12000,
+        "menit": 60
+      }
+    }
+  },
+  "users": {
+    "kasir": {
+      "password": "f02b7c1e519e4fa436147f7e1399974f9510aa9c8e0cb8be29151eb540f9d214",
+      "role": "kasir"
+    },
+    "rrcctv": {
+      "password": "5db80d232bc072d86dd3adfa2a677d0cda2b92338eecd75e1b0e6bb1894ea70f",
+      "role": "admin"
+    },
+    "rrgaming": {
+      "password": "bcrypt$$2b$12$p9VGzJ4fvYfki/nrAaY.2OM5cUp2pFp9wd0sz0APcfoK3EjsVL2hm",
+      "role": "admin"
+    },
+    "rrgaming1": {
+      "password": "bcrypt$$2b$12$7LSL4Y/rWgsjscb.vzvX7.HI.eKzA1nW61o0mZ.QnIGIW7kFJfLaW",
+      "role": "admin"
+    },
+    "rrgaming2": {
+      "password": "bcrypt$$2b$12$l5r0anm560qGds.52m.fTel6M.FAidbJTCXKVL9UWI6LKMTj.9jdW",
+      "role": "admin"
+    },
+    "kasir1": {
+      "password": "bcrypt$$2b$12$G00WEwgql/CoUf2G6hegcuTE4B3kYADAFLxAJYUZ26LUDAbmYaW82",
+      "role": "kasir"
+    }
+  },
+  "profil_rental": {
+    "rrcctv": {
+      "nama_pemilik": "rahmadani",
+      "nama_rental": "RR GAMING",
+      "email": "dedekemoking@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "napar",
+      "tanggal_daftar": "2026-06-21 03:43:04"
+    },
+    "rrgaming": {
+      "nama_pemilik": "dedek",
+      "nama_rental": "RR GAMING",
+      "email": "dedekemoking@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "napar",
+      "tanggal_daftar": "2026-06-21 23:30:29"
+    },
+    "rrgaming1": {
+      "nama_pemilik": "dedek",
+      "nama_rental": "dedek",
+      "email": "dedekemoking1@gmail.com",
+      "no_hp": "081270647744",
+      "alamat": "payakumbuh",
+      "tanggal_daftar": "2026-06-22 03:21:32"
+    },
+    "rrgaming2": {
+      "nama_pemilik": "yoko",
+      "nama_rental": "yoko",
+      "email": "dedekemoking2@gmail.com",
+      "no_hp": "082387018539",
+      "alamat": "solok",
+      "tanggal_daftar": "2026-06-22 03:42:32"
+    }
+  },
+  "trial_users": {
+    "testuser_pc_swap": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "testuser_new": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "rrgaming2": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "rrgaming1": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "kasir1": {
+      "trial_start": "2026-06-22",
+      "trial_days": 3
+    },
+    "kasir": {
+      "trial_start": "2026-06-23",
+      "trial_days": 3
+    },
+    "rrgaming": {
+      "trial_start": "2026-06-23",
+      "trial_days": 3
+    },
+    "test": {
+      "trial_start": "2026-06-25",
+      "trial_days": 3
+    }
+  },
+  "pending_email_verifications": {
+    "rrgaming1": {
+      "code": "638863",
+      "expires_at": "2026-06-22T03:51:32.343364",
+      "email": "dedekemoking1@gmail.com",
+      "data": {
+        "password": "bcrypt$$2b$12$7h/6J2fujJ9YIHfcnQfbmepZtf2LqWopLB6XTxvCUWa/3mA3muI9G",
+        "role": "admin",
+        "profil": {
+          "nama_pemilik": "dedek",
+          "nama_rental": "dedek",
+          "email": "dedekemoking1@gmail.com",
+          "no_hp": "081270647744",
+          "alamat": "payakumbuh",
+          "tanggal_daftar": "2026-06-22 03:21:32"
+        }
+      }
+    },
+    "rrgaming2": {
+      "code": "081053",
+      "expires_at": "2026-06-22T04:12:32.017806",
+      "email": "dedekemoking2@gmail.com",
+      "data": {
+        "password": "bcrypt$$2b$12$l5r0anm560qGds.52m.fTel6M.FAidbJTCXKVL9UWI6LKMTj.9jdW",
+        "role": "admin",
+        "profil": {
+          "nama_pemilik": "yoko",
+          "nama_rental": "yoko",
+          "email": "dedekemoking2@gmail.com",
+          "no_hp": "082387018539",
+          "alamat": "solok",
+          "tanggal_daftar": "2026-06-22 03:42:32"
+        }
+      }
+    },
+    "dsdsfsfs": {
+      "code": "005284",
+      "expires_at": "2026-06-24T00:33:34.604738",
+      "email": "dsajdhas@gmail.com",
+      "data": {
+        "password": "bcrypt$$2b$12$3f.5IxNL9earUCA0dCDElu8yaKw./iRhkaur3NwuyulKYPfT8bhPG",
+        "role": "admin",
+        "profil": {
+          "nama_pemilik": "skdaj",
+          "nama_rental": "sda",
+          "email": "dsajdhas@gmail.com",
+          "no_hp": "076543456765",
+          "alamat": "jabha",
+          "tanggal_daftar": "2026-06-24 00:03:34"
+        }
+      }
+    }
+  },
+  "update_manifest_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.2.1/manifest.json",
+  "update_pubkey_path": "update_pubkey.pem",
+  "pending_forgot_password_verifications": {},
+  "warnet_clients": [
+    {
+      "client_id": "WARNET_01",
+      "password_hash": "bcrypt$$2b$12$0SLz8Q/.oSg1F/s6yjmNaO5We70z6dG1WcYuaImc5YTwo70hWOWh6",
+      "location": "Warnet Lokasi 1",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.101",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.102",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.103",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:09.874445",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_02",
+      "password_hash": "bcrypt$$2b$12$3NrN7YL7yCpj6EEN9C7EV.HUOIv31dscLnksbbquGu4fK.4LW9HSC",
+      "location": "Warnet Lokasi 2",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.111",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.112",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.113",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:10.179706",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_03",
+      "password_hash": "bcrypt$$2b$12$mvGrEkIv1yUZ792gUwNMoeFMn0rBDfi0u5N3rb2FZbzi8XJ7ankj2",
+      "location": "Warnet Lokasi 3",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.121",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.122",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:10.430880",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_04",
+      "password_hash": "bcrypt$$2b$12$CYz6MuHFrjpV3CUAqi7sJ.waG0fS9N8uzLes76xzuXqyz1pwXOE1e",
+      "location": "Warnet Lokasi 4",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.131",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.132",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.133",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:10.683456",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_05",
+      "password_hash": "bcrypt$$2b$12$.8UoIURBS5HT0HoW83.MV.hlXZKErFABYK7rFk8F7KbWc8oPLLVFu",
+      "location": "Warnet Lokasi 5",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.141",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.142",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.143",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:10.936118",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_06",
+      "password_hash": "bcrypt$$2b$12$at1pJaiuo57Y.iF5CXH73OMdM9LqNTkiTAQUSh3XiW3frcB.yAPDa",
+      "location": "Warnet Lokasi 6",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.151",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.152",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:11.186286",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_07",
+      "password_hash": "bcrypt$$2b$12$IOld6T30xMVj4zmO69k86Om04QvtmWDNDb3hMjagplX4P0hs12HQu",
+      "location": "Warnet Lokasi 7",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.161",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.162",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.163",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:11.437598",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_08",
+      "password_hash": "bcrypt$$2b$12$1Xsg77d2J4toiptNGqVo.ervzvhV6BgMKh7z7b7nMos.wdwuPRHuy",
+      "location": "Warnet Lokasi 8",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.171",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.172",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.173",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:11.687170",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_09",
+      "password_hash": "bcrypt$$2b$12$4NgtfybR6nndk79muXiptOcAhxAfpss7QJd.x68S0TvvNyHlSeR.6",
+      "location": "Warnet Lokasi 9",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.181",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.182",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:11.940426",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_10",
+      "password_hash": "bcrypt$$2b$12$9Xx3A7TYej8nCNIBclSwQ.8/RRdG6FsDUYpKMpdrhivuHODptU/LG",
+      "location": "Warnet Lokasi 10",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.191",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.192",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.193",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:12.191803",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_11",
+      "password_hash": "bcrypt$$2b$12$2/rAr9N9W3PrjzBSbOsHk.KWBFRGNWGIWCndDN/05yi28ohWS5Kt.",
+      "location": "Warnet Lokasi 11",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.201",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.202",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.203",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:12.440741",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_12",
+      "password_hash": "bcrypt$$2b$12$TdnI8I4r5SV3rp9wrZfTauX5OIJ6Xcug/4np2tHUE.QJqtSm90kf2",
+      "location": "Warnet Lokasi 12",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.211",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.212",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:12.690616",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_13",
+      "password_hash": "bcrypt$$2b$12$gjHn8.qtrQyUIbI2UIjLN.tLhjs9/mXHmZl2lVzH3lK6I06xISpfq",
+      "location": "Warnet Lokasi 13",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.221",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.222",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.223",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:12.940643",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_14",
+      "password_hash": "bcrypt$$2b$12$MJkKJzmdmYtjQTZfEF7.g.J9B7Gsqnd26zMJ3FlTmW8ZPxJyZuMyW",
+      "location": "Warnet Lokasi 14",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.231",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.232",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.233",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:13.193652",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_15",
+      "password_hash": "bcrypt$$2b$12$QuBZh.are.SwP/wDz98kdunPkqKaBWDomQntFITM5VHIUYC0/VQPm",
+      "location": "Warnet Lokasi 15",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.241",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.242",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:13.444704",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_16",
+      "password_hash": "bcrypt$$2b$12$j0rh2ah27DiwRp4haoB2e.HDpqKbeSbBepxEKm0IKpu/G2Pxf8IkS",
+      "location": "Warnet Lokasi 16",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.251",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.252",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.253",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:13.693572",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_17",
+      "password_hash": "bcrypt$$2b$12$dgA/B9F8BWAyvpQs1./ePeEqMnacrfnqPYNwF469iuuBTAIXBfY.i",
+      "location": "Warnet Lokasi 17",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.261",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.262",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.263",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:13.948348",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_18",
+      "password_hash": "bcrypt$$2b$12$.cAtW5xDQ09mZ1AYy2.gqOpKorG3MWGEqp4VU.OOrFDT2d94XYEOS",
+      "location": "Warnet Lokasi 18",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.271",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.272",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:14.196791",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_19",
+      "password_hash": "bcrypt$$2b$12$9TcmlGgqA1YF6q0PAuQx6.cF6.oBIz7.u6UBv.A8C4ymJDBVGELPq",
+      "location": "Warnet Lokasi 19",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.281",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.282",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.283",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:14.448467",
+      "tokens": []
+    },
+    {
+      "client_id": "WARNET_20",
+      "password_hash": "bcrypt$$2b$12$CsSrxg92ERWIA8JUYcUv8.kdntV1r5z0L5KwPoZuk/nTDTKb4BdE6",
+      "location": "Warnet Lokasi 20",
+      "pcs": [
+        {
+          "pc_id": "PC_1",
+          "ip": "192.168.1.291",
+          "adb_port": 5555,
+          "name": "Kursi 1"
+        },
+        {
+          "pc_id": "PC_2",
+          "ip": "192.168.1.292",
+          "adb_port": 5555,
+          "name": "Kursi 2"
+        },
+        {
+          "pc_id": "PC_3",
+          "ip": "192.168.1.293",
+          "adb_port": 5555,
+          "name": "Kursi 3"
+        }
+      ],
+      "allowed_actions": [
+        "ON",
+        "OFF",
+        "VOL+",
+        "VOL-"
+      ],
+      "created_at": "2026-06-27T01:03:14.697959",
+      "tokens": []
+    }
+  ],
+  "warnet_activity_log": [
+    {
+      "timestamp": "2026-06-27T01:14:31.383017",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:37.014624",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:38.021894",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:39.030193",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:40.679913",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:41.762310",
+      "client_id": "WARNET_02",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:42.892699",
+      "client_id": "WARNET_03",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:44.031387",
+      "client_id": "WARNET_04",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:45.176980",
+      "client_id": "WARNET_05",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:45.690758",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:46.002323",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:46.313487",
+      "client_id": "WARNET_01",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:46.625065",
+      "client_id": "WARNET_02",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:46.937486",
+      "client_id": "WARNET_02",
+      "pc_id": "PC_1",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:47.248998",
+      "client_id": "WARNET_02",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:47.558783",
+      "client_id": "WARNET_03",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:47.870650",
+      "client_id": "WARNET_03",
+      "pc_id": "PC_1",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:48.182328",
+      "client_id": "WARNET_03",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:48.492829",
+      "client_id": "WARNET_04",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:48.805034",
+      "client_id": "WARNET_04",
+      "pc_id": "PC_1",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:49.117616",
+      "client_id": "WARNET_04",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:49.427947",
+      "client_id": "WARNET_05",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:49.738809",
+      "client_id": "WARNET_05",
+      "pc_id": "PC_1",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:50.045337",
+      "client_id": "WARNET_05",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.539390",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.557192",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.573649",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.590276",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.607116",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.624762",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.644981",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.659595",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.676687",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.694413",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.708738",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.723141",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.737501",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.750941",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.766061",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.780468",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.795329",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.808478",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.823449",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.837355",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.853772",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.871515",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.888892",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL-",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.904968",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.922546",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_2",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.939345",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.956569",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_3",
+      "action": "OFF",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:51.972855",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "VOL+",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:52.001776",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "ON",
+      "success": true
+    },
+    {
+      "timestamp": "2026-06-27T01:14:52.025624",
+      "client_id": "WARNET_10",
+      "pc_id": "PC_1",
+      "action": "OFF",
+      "success": true
+    }
+  ],
+  "socket_warnet": {
+    "host": "192.168.1.11",
+    "port": 5555,
+    "on_start_command": "START {kursi}",
+    "on_finish_command": "STOP {kursi}"
+  }
+}

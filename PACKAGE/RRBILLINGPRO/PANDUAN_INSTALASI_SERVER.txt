@@ -1,0 +1,530 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                    🖥️  PANDUAN INSTALASI RRBILLINGPRO                        ║
+║                                                                              ║
+║                    Server Aplikasi Warnet Billing Management                ║
+║                     Versi 2.3.2 | Build 27 Juni 2026                        ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+═══════════════════════════════════════════════════════════════════════════════
+QUICK START
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Extract RRBILLINGPRO.rar
+2. Double-click RRBILLINGPRO.exe
+3. Input admin username & password (first time setup)
+4. Mulai menggunakan dashboard
+
+
+═══════════════════════════════════════════════════════════════════════════════
+📋 DAFTAR ISI
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Persyaratan Sistem
+2. Instalasi Server
+3. First Time Setup
+4. Fitur Utama
+5. Konfigurasi Lanjutan
+6. Troubleshooting
+7. Backup & Recovery
+
+
+═══════════════════════════════════════════════════════════════════════════════
+1️⃣  PERSYARATAN SISTEM
+═══════════════════════════════════════════════════════════════════════════════
+
+HARDWARE:
+  • CPU: Intel Core i5 atau lebih (64-bit)
+  • RAM: 4 GB minimum (8 GB recommended)
+  • HDD: 2 GB space tersedia
+  • Network: Ethernet/WiFi untuk server
+
+OS:
+  ✓ Windows 10 (64-bit)
+  ✓ Windows 11 (64-bit)
+  ✓ Windows Server 2016 ke atas
+
+JARINGAN:
+  • Server harus selalu online (gunakan UPS)
+  • Koneksi stabil (LAN atau dedicated line)
+  • Port 5000 harus accessible dari semua client PC
+
+
+═══════════════════════════════════════════════════════════════════════════════
+2️⃣  INSTALASI SERVER
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: EXTRACT FILE
+──────────────────────
+1. Download RRBILLINGPRO.rar
+2. Extract ke lokasi tetap:
+   Disarankan: C:\Program Files\RRBILLINGPRO\
+   Atau: C:\BillingPSkuDesktop\
+
+3. Pastikan 3 file ada:
+   ✓ RRBILLINGPRO.exe (23.7 MB)
+   ✓ rr_billing_config.json (config)
+   ✓ logo.ico (icon)
+
+STEP 2: FIREWALL CONFIGURATION
+────────────────────────────────
+Port 5000 harus dibuka untuk client connections:
+
+UNTUK WINDOWS FIREWALL:
+1. Buka Windows Defender Firewall
+2. Klik "Allow an app through firewall"
+3. Klik "Change settings"
+4. Klik "Allow another app"
+5. Browse ke RRBILLINGPRO.exe
+6. Klik "Add"
+7. Centang "Private" dan "Public"
+8. Klik OK
+
+ATAU via Command Prompt (as Admin):
+  netsh advfirewall firewall add rule name="RRBILLINGPRO" `
+  dir=in action=allow program="C:\Program Files\RRBILLINGPRO\RRBILLINGPRO.exe" `
+  enable=yes
+
+STEP 3: VERIFIKASI NETWORK
+────────────────────────────
+1. Buka Command Prompt
+2. Ketik: ipconfig
+3. Catat IP Address lokal (contoh: 192.168.1.100)
+4. IP ini akan dimasukkan di setiap client
+
+
+═══════════════════════════════════════════════════════════════════════════════
+3️⃣  FIRST TIME SETUP
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: JALANKAN APLIKASI
+──────────────────────────
+1. Double-click RRBILLINGPRO.exe
+2. Tunggu splash screen hilang (3-5 detik)
+3. Muncul jendela login
+
+STEP 2: SETUP ADMIN ACCOUNT
+─────────────────────────────
+Pertama kali menjalankan, akan ada dialog Setup Admin:
+
+  [Setup Admin Account]
+  Username: [admin____________]
+  Password: [**************]
+  Confirm:  [**************]
+
+Panduan:
+  • Username: Bisa berupa nama custom (contoh: "admin", "rr_admin", dll)
+  • Password: Gunakan password kuat (min 8 karakter, angka, simbol)
+  • Confirm: Ketik ulang password yang sama
+
+Contoh:
+  Username: admin
+  Password: RRBilling2026!@#
+
+Klik "CREATE ADMIN" untuk lanjut.
+
+STEP 3: LOGIN
+──────────────
+Setelah setup, login dengan:
+  Username: [sesuai yang Anda buat]
+  Password: [sesuai yang Anda buat]
+
+Klik "LOGIN" untuk masuk ke dashboard.
+
+STEP 4: FIRST LOGIN - LISENSI
+───────────────────────────────
+Pertama login mungkin ada aktivasi lisensi:
+
+Option 1 - Kode Aktivasi:
+  Jika sudah punya kode: Masukkan di field "Kode Aktivasi"
+
+Option 2 - Trial:
+  Jika belum: Sistem akan run dalam mode TRIAL (7 hari)
+
+Lanjut ke dashboard → Start configuration
+
+STEP 5: KONFIGURASI AWAL
+──────────────────────────
+Di tab PENGATURAN:
+
+1. Tambah TV (Kursi)
+   - Klik "+ Tambah TV"
+   - Isi: Nama TV, IP ADB, Port ADB
+   - Klik SIMPAN
+
+2. Tambah PC Client (Warnet)
+   - Klik "+ Tambah PC Client"
+   - Isi: Nama PC, IP Address
+   - Sistem auto-generate kode admin
+   - Klik SIMPAN
+
+3. Atur Paket Billing
+   - Tab "Kontrol Harga"
+   - Tambah paket (1 Jam, 2 Jam, Overnight, dll)
+   - Atur harga per paket
+   - Klik SIMPAN
+
+4. Atur Menu Makanan/Minuman (opsional)
+   - Tab "Menu Makanan"
+   - Tambah item dengan harga
+   - Klik SIMPAN
+
+Sekarang siap untuk operasional!
+
+
+═══════════════════════════════════════════════════════════════════════════════
+4️⃣  FITUR UTAMA
+═══════════════════════════════════════════════════════════════════════════════
+
+📺 DASHBOARD TAB
+────────────────
+Tampilan real-time:
+  • Semua TV (Kursi) dan statusnya
+  • Paket aktif per TV
+  • Sisa waktu per TV
+  • Total revenue
+  • Notifikasi pelanggan ingin tambah paket
+
+BUTTON UTAMA:
+  [+Tambah TV] → Menambah kursi baru
+  [Refresh] → Refresh status
+  [Report] → Lihat laporan
+
+CARD PER TV:
+  Menampilkan:
+  - Nama TV
+  - IP & Port ADB
+  - Status (Online/Offline)
+  - Paket aktif
+  - Sisa waktu
+  - Total biaya
+
+KONTROL QUICK:
+  • Tambah Waktu (tambah paket untuk TV aktif)
+  • Pindah Kursi (move session ke TV lain)
+  • Reset / Selesai Sesi
+
+📊 TAB WARNET (Monitoring PC Client)
+──────────────────────────────────────
+Tampilan semua PC client:
+  • IP address setiap PC
+  • Status koneksi (Connected/Disconnected)
+  • Last seen time
+  • Version aplikasi client
+
+FITUR:
+  • Auto-detect PC yang baru connect
+  • Push kode admin terbaru
+  • Monitoring client health
+
+
+⚙️  TAB PENGATURAN
+──────────────────
+Konfigurasi sistem:
+
+1. TV Management
+   - Tambah/Hapus/Edit TV
+   - Test ADB connection
+   - Change IP/Port
+
+2. PC Client Management
+   - Daftar PC client
+   - Regenerate admin code
+   - View connection history
+
+3. Paket Billing
+   - Atur paket dan harga
+   - Set duration per paket
+   - Free play packages
+
+4. Menu Makanan/Minuman
+   - Tambah/Hapus items
+   - Set harga
+
+5. Grup Tarif
+   - Atur grup (PS3, PS4, PC Gaming)
+   - Set harga per grup
+
+💰 TAB RIWAYAT (History & Reports)
+──────────────────────────────────
+Laporan & history:
+
+TRANSAKSI:
+  • Semua paket yang dijual
+  • Tanggal & waktu transaksi
+  • Petugas yang mencatat
+  • Total per hari/bulan
+
+SUMMARY:
+  • Total revenue (hari/bulan)
+  • Jumlah transaksi
+  • Average value per transaction
+
+EXPORT:
+  • Export to Excel
+  • Export to PDF
+  • Custom date range
+
+
+═══════════════════════════════════════════════════════════════════════════════
+5️⃣  KONFIGURASI LANJUTAN
+═══════════════════════════════════════════════════════════════════════════════
+
+MENGUBAH USERNAME/PASSWORD:
+────────────────────────────
+1. Tab PENGATURAN
+2. Klik "Change Admin Password"
+3. Masukkan password lama
+4. Masukkan password baru 2x
+5. Klik SIMPAN
+
+KONFIGURASI PORT SOCKET SERVER:
+──────────────────────────────────
+Default port: 5000
+
+Jika perlu ubah (misal terjadi conflict):
+1. Edit file rr_billing_config.json
+2. Cari: "socket_warnet": { "port": 5000 }
+3. Ubah 5000 ke port lain (contoh: 5555)
+4. Save file
+5. Restart aplikasi
+
+BACKUP KONFIGURASI:
+─────────────────────
+Untuk backup data:
+1. Tab PENGATURAN
+2. Klik "Backup Configuration"
+3. Pilih lokasi save
+4. File: rr_billing_config_backup_[DATE].json
+
+RESTORE CONFIGURATION:
+───────────────────────
+1. Tab PENGATURAN
+2. Klik "Restore Configuration"
+3. Pilih file backup
+4. Klik RESTORE
+5. Aplikasi restart otomatis
+
+AUTO-START PADA BOOT:
+───────────────────────
+Untuk run otomatis saat Windows startup:
+
+OPSI 1 - Shortcut di Startup Folder:
+1. Buat shortcut RRBILLINGPRO.exe
+2. Copy ke: C:\Users\[USERNAME]\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\
+
+OPSI 2 - Windows Task Scheduler:
+1. Buka Task Scheduler
+2. Create Basic Task
+3. Name: "Start RRBILLINGPRO"
+4. Trigger: At log on
+5. Action: Start a program
+6. Program: C:\Program Files\RRBILLINGPRO\RRBILLINGPRO.exe
+7. OK
+
+OPSI 3 - Windows Service (Advanced):
+1. Buka Command Prompt as Admin
+2. Ketik: sc create RRBILLINGPRO binPath= "C:\Program Files\RRBILLINGPRO\RRBILLINGPRO.exe"
+3. Buka Services.msc
+4. Cari RRBILLINGPRO
+5. Set Startup Type: Automatic
+6. Start service
+
+
+═══════════════════════════════════════════════════════════════════════════════
+6️⃣  TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+APLIKASI TIDAK BISA DIBUKA:
+─────────────────────────────
+SOLUSI:
+1. Pastikan Windows 10/11 64-bit
+2. Coba run as Administrator:
+   - Klik kanan RRBILLINGPRO.exe
+   - "Run as Administrator"
+3. Extract ulang dari RAR
+4. Check Windows Event Viewer untuk error detail
+
+ADB CONNECTION FAILED (TV tidak connect):
+──────────────────────────────────────────
+SOLUSI:
+1. Pastikan TV/Device sudah setup ADB:
+   - Enable Developer Mode
+   - Enable USB Debugging
+   - Authorize connection
+
+2. Periksa IP & Port:
+   - IP: bisa ping dari server? (ping [IP])
+   - Port: benar-benar port ADB? (default 5555)
+
+3. Klik "Test Connection" di Settings
+4. Coba restart TV
+
+FIREWALL BLOCKING:
+───────────────────
+Jika client tidak bisa connect:
+
+CIRI-CIRI:
+  • Status di client: "Connection Refused"
+  • Log error: "Permission denied"
+
+SOLUSI:
+1. Open port 5000 di firewall (lihat STEP 2 instalasi)
+2. Atau disable firewall temporarily (testing only)
+3. Cek antivirus: pastikan tidak block aplikasi
+
+CLIENT TIDAK BISA CONNECT:
+──────────────────────────
+CIRI:
+  • Client menampilkan "Disconnected"
+  • Atau: "Connection Timeout"
+
+SOLUSI:
+1. Verifikasi server sedang running
+2. Periksa IP address (benar-benar)
+3. Di client Settings → Test Connection
+4. Di server, check: Warnet tab → client list
+5. Jika masih tidak connect:
+   - Coba connect client lagi
+   - Restart server
+   - Restart client
+
+DATABASE/CONFIG ERROR:
+──────────────────────
+CIRI:
+  • Error loading config
+  • Database locked
+  • Cannot save data
+
+SOLUSI:
+1. Tutup aplikasi
+2. Backup file: rr_billing_config.json
+3. Delete file config
+4. Restart aplikasi (akan regenerate)
+5. Re-setup konfigurasi
+
+APPLICATION CRASH:
+────────────────────
+CIRI:
+  • Aplikasi tiba-tiba close
+  • Error window muncul
+
+SOLUSI:
+1. Check Windows Event Viewer
+2. Restart aplikasi
+3. Jika crash lagi: restart komputer
+4. Update Windows ke latest
+5. Reinstall .NET Framework
+6. Extract & reinstall aplikasi
+
+
+═══════════════════════════════════════════════════════════════════════════════
+7️⃣  BACKUP & RECOVERY
+═══════════════════════════════════════════════════════════════════════════════
+
+BACKUP REGULER (RECOMMENDED):
+──────────────────────────────
+Backup file penting setiap hari:
+
+FILES TO BACKUP:
+  ✓ rr_billing_config.json (PENTING!)
+  ✓ Database files (jika ada, di folder aplikasi)
+  ✓ Transaction history
+
+BACKUP METHOD:
+  Opsi 1 - Manual copy:
+    1. Copy rr_billing_config.json
+    2. Paste ke USB drive / cloud storage
+    3. Rename dengan tanggal: rr_billing_config_27062026.json
+
+  Opsi 2 - Using built-in backup:
+    1. Menu PENGATURAN
+    2. Klik "Backup Configuration"
+    3. Simpan ke lokasi aman
+
+DISASTER RECOVERY:
+────────────────────
+Jika terjadi error atau data hilang:
+
+1. Pastikan punya backup file
+2. Tutup aplikasi
+3. Replace file rr_billing_config.json dengan backup
+4. Restart aplikasi
+5. Verify data sudah kembali
+
+EXPORT TRANSACTION HISTORY:
+────────────────────────────
+Untuk keamanan data jangka panjang:
+
+1. Tab RIWAYAT
+2. Pilih date range
+3. Klik "Export to Excel"
+4. Simpan file ke lokasi aman
+5. Excel file bisa di-archive
+
+RESET APLIKASI (LAST RESORT):
+──────────────────────────────
+Jika sudah tidak bisa diperbaiki:
+
+1. Backup config file (jika masih bisa)
+2. Uninstall/Delete RRBILLINGPRO folder
+3. Extract ulang dari RAR
+4. Jika punya backup: restore config
+5. Jika tidak: setup ulang dari awal
+
+
+═══════════════════════════════════════════════════════════════════════════════
+⚠️  MAINTENANCE CHECKLIST
+═══════════════════════════════════════════════════════════════════════════════
+
+HARIAN:
+  ☐ Aplikasi server running tanpa error
+  ☐ Semua client terkoneksi
+  ☐ Backup config file (end of day)
+  ☐ Check error logs
+
+MINGGUAN:
+  ☐ Export transaction history
+  ☐ Review revenue report
+  ☐ Restart server (optional but recommended)
+  ☐ Check Windows updates
+
+BULANAN:
+  ☐ Full backup (external drive)
+  ☐ Verify backup integrity
+  ☐ Database cleanup (optional)
+  ☐ Security audit (password change)
+
+SEBELUM LIBURAN PANJANG:
+  ☐ Full backup
+  ☐ Copy backup ke 2 lokasi
+  ☐ Verify sistem berjalan dengan baik
+  ☐ Komunikasi dengan tech support
+
+
+═══════════════════════════════════════════════════════════════════════════════
+📞 SUPPORT
+═══════════════════════════════════════════════════════════════════════════════
+
+Jika ada masalah atau pertanyaan:
+
+EMAIL: dedekemoking@gmail.com
+VERSI: 2.3.2 Build 27062026
+
+Saat contact support, sertakan:
+  • Deskripsi masalah detail
+  • Screenshot error (jika ada)
+  • Versi Windows
+  • Versi aplikasi
+  • Langkah yang sudah dicoba
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                   Terima kasih telah menggunakan RRBILLINGPRO               ║
+║                                                                              ║
+║                      Semoga bisnis warnet Anda sukses! 🚀                    ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝

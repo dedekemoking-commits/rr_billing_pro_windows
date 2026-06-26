@@ -1,0 +1,446 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                   🖥️  PANDUAN LENGKAP RRBILLINGCLIENT                        ║
+║                                                                              ║
+║                    Aplikasi Client Warnet Billing Real-Time                 ║
+║                     Versi 2.3.2 | Build 27 Juni 2026                        ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+═══════════════════════════════════════════════════════════════════════════════
+📋 DAFTAR ISI
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Persyaratan Sistem
+2. Instalasi
+3. Konfigurasi Awal
+4. Menghubungkan ke Server
+5. Menggunakan Aplikasi
+6. Troubleshooting
+7. Fitur Utama
+8. FAQ
+
+
+═══════════════════════════════════════════════════════════════════════════════
+1️⃣  PERSYARATAN SISTEM
+═══════════════════════════════════════════════════════════════════════════════
+
+HARDWARE MINIMUM:
+  • CPU: Intel Core 2 Duo atau setara (64-bit)
+  • RAM: 2 GB (recommended 4 GB)
+  • HDD: 500 MB space tersedia
+  • Network: Kartu jaringan (WiFi atau Ethernet)
+
+OS YANG DIDUKUNG:
+  ✓ Windows 7 SP1 (64-bit)
+  ✓ Windows 8 / 8.1 (64-bit)
+  ✓ Windows 10 (64-bit)
+  ✓ Windows 11 (64-bit)
+  ✓ Windows Server 2008 R2 ke atas
+
+NETWORK:
+  • Koneksi ke Server: Minimal 1 Mbps
+  • Koneksi yang stabil direkomendasikan
+  • Jika menggunakan WiFi, pastikan signal kuat
+
+REQUIREMENTS LAINNYA:
+  ✓ Sudah terinstall .NET Framework 4.5+ (included di Windows modern)
+  ✓ Visual C++ Redistributable (untuk PyInstaller runtime)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+2️⃣  INSTALASI
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: DOWNLOAD & EXTRACT
+─────────────────────────────
+1. Unduh file: RRBILLINGCLIENT.rar
+2. Extract menggunakan WinRAR atau 7-Zip:
+   - Klik kanan → Extract Here
+   - Atau: Buka WinRAR → drag & drop folder ke lokasi tujuan
+
+3. Folder hasil extract:
+   RRBILLINGCLIENT\
+   ├── RRBILLINGCLIENT.exe
+   ├── logo.ico
+   └── PANDUAN_LENGKAP_CLIENT.txt
+
+STEP 2: PERSIAPAN FOLDER
+─────────────────────────
+Disarankan folder berada di lokasi yang mudah diakses:
+
+  Opsi 1 - Desktop (mudah akses):
+  └─ C:\Users\[USERNAME]\Desktop\RRBILLINGCLIENT\
+
+  Opsi 2 - Program Files (professional):
+  └─ C:\Program Files\RRBILLINGCLIENT\
+
+  Opsi 3 - Custom (sesuai kebutuhan):
+  └─ [DRIVE]:\[FOLDER]\RRBILLINGCLIENT\
+
+STEP 3: VERIFIKASI FILE
+────────────────────────
+Pastikan 3 file ada di folder:
+  ✓ RRBILLINGCLIENT.exe (19.4 MB)
+  ✓ logo.ico (49 KB)
+  ✓ PANDUAN_LENGKAP_CLIENT.txt (ini file)
+
+Jika kurang file → Extract ulang dari RAR
+
+
+═══════════════════════════════════════════════════════════════════════════════
+3️⃣  KONFIGURASI AWAL
+═══════════════════════════════════════════════════════════════════════════════
+
+FIRST TIME SETUP:
+
+1. Double-click file RRBILLINGCLIENT.exe
+   Aplikasi akan memulai (tunggu 3-5 detik)
+
+2. Akan tampil jendela RRBILLINGCLIENT dengan:
+   • IP Address Komputer (auto-detected)
+   • Tombol Connect
+   • Tombol Pengaturan
+
+KONFIGURASI ADMIN:
+──────────────────
+Untuk akses fitur Pengaturan, diperlukan kode admin.
+
+Kode admin di-generate berdasarkan:
+  • IP Address komputer
+  • Tanggal hari ini (berubah setiap hari)
+
+Contoh kode admin: ABCD-EFGH-IJKL
+
+Hubungi admin server untuk mendapatkan kode hari ini:
+  Format: KODE-XXXX-XXXX-XXXX
+
+
+═══════════════════════════════════════════════════════════════════════════════
+4️⃣  MENGHUBUNGKAN KE SERVER
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: PASTIKAN SERVER BERJALAN
+─────────────────────────────────
+• Server RRBILLINGPRO.exe harus aktif di PC utama
+• Catat IP ADDRESS dari server (misal: 192.168.1.100)
+
+STEP 2: ISI INFORMASI SERVER
+──────────────────────────────
+Di aplikasi client:
+
+  1. Di bagian atas, ada field:
+     Server IP: [____________________]
+     Server Port: [____] (default: 5000)
+
+  2. Masukkan IP Server
+     Contoh: 192.168.1.100
+
+  3. Port biasanya sudah 5000, jangan diubah (kecuali dikonfigurasi khusus)
+
+STEP 3: KLIK CONNECT
+──────────────────────
+1. Klik tombol besar: "🔗 CONNECT"
+2. Tunggu 2-3 detik
+3. Jika berhasil, akan muncul status:
+   ✅ Connected to Server
+   Warna indikator berubah hijau
+
+TROUBLESHOOTING KONEKSI:
+────────────────────────
+Jika gagal connect, cek:
+
+❌ "Connection Refused"
+   → Pastikan server RRBILLINGPRO.exe sedang berjalan
+   → Periksa IP address server (benar-benar)
+   → Pastikan port 5000 tidak diblok firewall
+
+❌ "Connection Timeout"
+   → Periksa koneksi network (ping ke server)
+   → Coba di Pengaturan → Test Connection
+
+❌ "Invalid IP Format"
+   → Format IP harus: XXX.XXX.XXX.XXX
+   → Contoh SALAH: 192.168.1 ❌
+   → Contoh BENAR: 192.168.1.100 ✅
+
+
+═══════════════════════════════════════════════════════════════════════════════
+5️⃣  MENGGUNAKAN APLIKASI
+═══════════════════════════════════════════════════════════════════════════════
+
+INTERFACE UTAMA:
+────────────────
+┌─────────────────────────────────────────┐
+│  🖥️  RRBILLINGCLIENT - Warnet PC Monitor │
+├─────────────────────────────────────────┤
+│  IP Address: 192.168.1.50                │
+│  Status: ✅ Connected                    │
+├─────────────────────────────────────────┤
+│  Paket: Main 2Jam  Sisa: 01:45  Total: Rp18.000 │
+├─────────────────────────────────────────┤
+│  [🔗 Connect]    [⚙️ Settings]           │
+└─────────────────────────────────────────┘
+
+KOMPONEN UTAMA:
+
+1. IP ADDRESS BADGE
+   • Menampilkan IP address komputer ini
+   • Auto-update setiap 10 detik
+   • Berguna untuk network troubleshooting
+
+2. STATUS KONEKSI
+   • ✅ Connected: Terhubung ke server
+   • ❌ Disconnected: Terputus dari server
+   • ⏳ Connecting: Sedang mencoba koneksi
+
+3. BILLING INFO ROW (Real-Time)
+   • Paket: Nama paket yang sedang aktif
+   • Sisa: Sisa waktu dalam format MM:SS
+   • Total: Total biaya dalam format Rupiah
+
+   Update otomatis setiap 2 detik!
+
+4. TOMBOL CONNECT
+   • Klik untuk terhubung/putus koneksi
+   • Menampilkan status koneksi real-time
+
+5. TOMBOL SETTINGS (⚙️)
+   • Akses fitur pengaturan lanjutan
+   • Perlu kode admin untuk membuka
+
+
+FITUR PENGATURAN:
+─────────────────
+Klik tombol ⚙️ Settings (perlu kode admin):
+
+[Pengaturan]
+├─ Server Configuration
+│  ├─ Ganti IP Server
+│  ├─ Ganti Port
+│  └─ Test Connection
+├─ Display Options
+│  ├─ Show Notifications
+│  └─ Dark/Light Mode (jika tersedia)
+└─ Advanced
+   ├─ Clear Cache
+   └─ Reset Configuration
+
+MONITORING REAL-TIME:
+──────────────────────
+Aplikasi ini menampilkan:
+
+✓ Paket Aktif
+  Nama paket yang sedang berjalan
+  (contoh: Main 2 Jam, Reguler, Overnight)
+
+✓ Sisa Waktu (MM:SS)
+  Sisa waktu dalam menit:detik
+  Auto-update setiap 2 detik dari server
+  Format: 01:45 (1 menit 45 detik)
+
+✓ Total Biaya (Rp)
+  Total biaya paket + pesanan makanan/minuman
+  Format: Rp45.000 atau Rp250.000
+
+
+═══════════════════════════════════════════════════════════════════════════════
+6️⃣  TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+MASALAH: Aplikasi tidak bisa dibuka
+────────────────────────────────────
+SOLUSI:
+  1. Pastikan Windows 10/11 64-bit
+  2. Cek apakah ada error message
+  3. Coba extract ulang dari RAR
+  4. Jalankan sebagai Administrator:
+     - Klik kanan RRBILLINGCLIENT.exe
+     - Pilih "Run as Administrator"
+
+MASALAH: IP Address tidak auto-detected
+────────────────────────────────────────
+SOLUSI:
+  1. Pastikan kartu jaringan aktif (Ethernet/WiFi)
+  2. Coba disconnect/reconnect network
+  3. Restart aplikasi
+  4. Manual input IP address di Settings
+
+MASALAH: Koneksi lambat / sering timeout
+──────────────────────────────────────────
+SOLUSI:
+  1. Cek ping ke server:
+     - Buka Command Prompt
+     - Ketik: ping [SERVER_IP]
+     - Contoh: ping 192.168.1.100
+     - Lihat response time
+
+  2. Jika response time > 100ms:
+     - Ada masalah network
+     - Hubungi admin network
+
+  3. Coba ubah port di Settings (jika server support)
+
+MASALAH: Billing info tidak update
+────────────────────────────────────
+SOLUSI:
+  1. Pastikan sudah terhubung ke server
+  2. Klik Connect ulang
+  3. Pastikan server sedang aktif di dashboard
+  4. Coba restart aplikasi
+
+MASALAH: Error "Token Invalid" / "Authorization Failed"
+─────────────────────────────────────────────────────────
+SOLUSI:
+  1. Ini error keamanan
+  2. Hubungi admin server
+  3. Mungkin perlu register ulang di sistem
+  4. Admin akan generate token baru
+
+MASALAH: Aplikasi crash / tidak responsif
+───────────────────────────────────────────
+SOLUSI:
+  1. Tutup aplikasi (force close jika perlu)
+  2. Tunggu 5 detik
+  3. Buka lagi
+  4. Jika masih crash, restart komputer
+  5. Extract ulang dari RAR jika perlu
+
+
+═══════════════════════════════════════════════════════════════════════════════
+7️⃣  FITUR UTAMA
+═══════════════════════════════════════════════════════════════════════════════
+
+🔄 AUTO RECONNECT
+Jika koneksi terputus, aplikasi otomatis mencoba terhubung ulang:
+  • Interval: 5 detik
+  • Berjalan di background (silent)
+  • Tidak perlu manual restart
+
+❤️  HEARTBEAT MONITORING
+Aplikasi mengirim ping ke server setiap 10 detik:
+  • Memastikan koneksi tetap hidup
+  • Deteksi server down dengan cepat
+  • Sangat ringan (minimal bandwidth)
+
+📊 REAL-TIME BILLING STATUS
+Update status setiap 2 detik dari server:
+  • Paket aktif
+  • Sisa waktu (akurat per detik)
+  • Total biaya real-time
+  • Status playing/idle
+
+🔐 TOKEN-BASED AUTHENTICATION
+Keamanan berbasis token JWT:
+  • Otomatis generate saat pertama kali connect
+  • Valid 6 bulan
+  • Refresh otomatis
+  • Tidak perlu login ulang
+
+🎨 RESPONSIVE UI
+Interface yang user-friendly:
+  • Dark theme (easy on eyes)
+  • Large readable text
+  • Color indicators (green/red/yellow)
+  • Status badge yang jelas
+
+
+═══════════════════════════════════════════════════════════════════════════════
+8️⃣  FAQ - PERTANYAAN UMUM
+═══════════════════════════════════════════════════════════════════════════════
+
+Q: Apakah harus install?
+A: Tidak! Hanya extract RAR dan langsung bisa run RRBILLINGCLIENT.exe
+
+Q: Bagaimana jika lupa kode admin?
+A: Hubungi admin server untuk kode hari ini (kode berubah setiap hari)
+
+Q: Bisakah dijalankan di 2 PC sekaligus?
+A: Ya! Setiap PC memiliki IP address unik dan dapat connect sendiri-sendiri
+
+Q: Apakah butuh internet?
+A: Tidak perlu internet, cukup LAN (Local Area Network) ke server
+
+Q: Berapa bandwidth yang digunakan?
+A: Sangat kecil (~1 KB per polling, setiap 2 detik = ~0.5 KB/detik)
+
+Q: Bagaimana kalau server tidak online?
+A: Aplikasi akan terus mencoba reconnect sampai server online
+   Status akan menampilkan "Disconnected"
+
+Q: Bisa dijalankan otomatis saat startup?
+A: Ya, bisa dibuat shortcut di Startup folder:
+   C:\Users\[USERNAME]\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\
+
+Q: Apakah aman? Ada keamanan?
+A: Ya! Menggunakan JWT token authentication + SSL ready infrastructure
+
+Q: Bagaimana cara shutdown yang benar?
+A: Klik X atau Close button, aplikasi akan disconnect otomatis
+
+Q: File mana yang boleh dihapus?
+A: Jangan hapus apapun! Semua file diperlukan untuk menjalankan aplikasi
+
+
+═══════════════════════════════════════════════════════════════════════════════
+🎯 QUICK START GUIDE (Ringkas)
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Extract RRBILLINGCLIENT.rar
+2. Double-click RRBILLINGCLIENT.exe
+3. Masukkan Server IP (contoh: 192.168.1.100)
+4. Klik Connect
+5. Tunggu status menjadi ✅ Connected
+6. Monitor billing info secara real-time!
+
+
+═══════════════════════════════════════════════════════════════════════════════
+⚙️  SUPPORT & CONTACT
+═══════════════════════════════════════════════════════════════════════════════
+
+Jika ada masalah:
+  • Baca FAQ di atas terlebih dahulu
+  • Coba Troubleshooting steps
+  • Hubungi admin warnet dengan:
+    - Screenshot error (jika ada)
+    - IP address komputer Anda
+    - Deskripsi masalah
+    - Step-by-step apa yang sudah dicoba
+
+Email Support: dedekemoking@gmail.com
+Versi: 2.3.2 Build 27062026
+
+
+═══════════════════════════════════════════════════════════════════════════════
+📝 CATATAN TEKNIS
+═══════════════════════════════════════════════════════════════════════════════
+
+Architecture:
+  • Single-file executable (no dependencies needed)
+  • Built with Python + PyInstaller
+  • CustomTkinter for modern UI
+  • Socket programming untuk network communication
+
+Port Default: 5000 (configurable)
+Protocol: Custom binary (JSON over TCP)
+Authentication: JWT Token (HS256)
+Token Validity: 180 hari
+
+Log Files:
+  Client logs disimpan di:
+  %TEMP%\RRBILLINGCLIENT\logs\
+  (Untuk debugging jika diperlukan)
+
+Session File:
+  warnet_client_session.json (disimpan di folder aplikasi)
+  Berisi token dan last connection info
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                   Terima kasih telah menggunakan RRBILLINGCLIENT            ║
+║                                                                              ║
+║                          Happy Billing! 🎮💰                                 ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
