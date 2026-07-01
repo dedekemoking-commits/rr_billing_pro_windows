@@ -3653,7 +3653,8 @@ class KartuTV(ctk.CTkFrame):
                         app.tree.item(item_id, values=updated_row)
                         # update meta if present
                         try:
-                            pesanan_total = sum(app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            all_menu = {**app.menu_makanan, **app.menu_minuman}
+                            pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
                             paket_harga = total_akhir - pesanan_total
                             if paket_harga < 0:
                                 paket_harga = 0
@@ -4140,7 +4141,8 @@ class KartuWarnet(ctk.CTkFrame):
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     try:
-                        pesanan_total = sum(app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                        all_menu = {**app.menu_makanan, **app.menu_minuman}
+                        pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
                         paket_harga = total_int - pesanan_total
                         if paket_harga < 0:
                             paket_harga = 0
