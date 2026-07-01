@@ -5034,13 +5034,13 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_riwayat_summary(self):
         # Compute totals split by source
-        total_tv = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'tv')
-        total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_tv_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'warnet')
         total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
-        total_all = total_tv + total_warnet
+        total_all = total_tv_paket + total_warnet_paket + total_pesanan
         summary_text = (
-            f"Total TV: {fmt_rp(total_tv)}  |  Total Warnet: {fmt_rp(total_warnet)}  |  "
-            f"Total Pesanan Makanan/Minuman: {fmt_rp(total_pesanan)}  |  TOTAL: {fmt_rp(total_all)}"
+            f"Total TV: {fmt_rp(total_tv_paket)}  |  Total Warnet: {fmt_rp(total_warnet_paket)}  |  "
+            f"Total Makanan & Minuman: {fmt_rp(total_pesanan)}  |  TOTAL: {fmt_rp(total_all)}"
         )
         # Keep a short summary in the left label as before
         short_text = f"Total Transaksi: {len(self.riwayat_transaksi)}  |  Total Pendapatan: {fmt_rp(total_all)}"
@@ -5390,8 +5390,8 @@ class AutoRentApp(ctk.CTk):
                 pass
 
     def _refresh_warnet_footer(self):
-        # Sum warnet totals from riwayat_meta
-        total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
+        # Sum warnet paket totals from riwayat_meta (package sales only)
+        total_warnet = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'warnet')
         if hasattr(self, 'lbl_warnet_total_pendapatan'):
             self.lbl_warnet_total_pendapatan.configure(text=f"Total Pendapatan Warnet: {fmt_rp(total_warnet)}")
  
@@ -5992,9 +5992,9 @@ class AutoRentApp(ctk.CTk):
                         font=("Russo One", 9, "bold"), relief="flat")
         style.map("Game.Treeview", background=[("selected", C_ACCENT2)])
 
-        cols = ("Waktu", "Kasir", "Kota", "Paket", "Pesanan", "Total")
+        cols = ("Waktu", "Kasir", "TV/PC", "Paket", "Pesanan", "Total")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", style="Game.Treeview")
-        widths = [140, 80, 100, 100, 280, 110]
+        widths = [140, 80, 100, 140, 200, 110]
         for col, w in zip(cols, widths):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor="center" if w < 150 else "w")
@@ -6013,7 +6013,7 @@ class AutoRentApp(ctk.CTk):
     def _catat_transaksi(self, kota, paket, pesanan, total, source='tv'):
         """Catat transaksi ke riwayat.
         pesanan: dict nama->qty
-        kota: string label kursi atau nama TV
+        kota: string label kursi atau nama TV/PC
         source: 'tv' atau 'warnet'
         total: int (total rupiah)
         """
@@ -6031,16 +6031,26 @@ class AutoRentApp(ctk.CTk):
         try:
             total_int = int(total)
         except Exception:
-            # try to extract from formatted string
             try:
                 total_int = int(str(total).replace('Rp ', '').replace('.', '').strip())
             except Exception:
                 total_int = pesanan_total
 
-        row = (waktu, self.current_user, kota, paket, pesanan_str, fmt_rp(total_int))
+        paket_harga = total_int - pesanan_total
+        if paket_harga < 0:
+            paket_harga = 0
+
+        # Format columns with prices
+        paket_tampil = f"{paket} ({fmt_rp(paket_harga)})" if paket_harga > 0 else paket
+        if pesanan_str != "—":
+            pesanan_tampil = f"{pesanan_str} ({fmt_rp(pesanan_total)})"
+        else:
+            pesanan_tampil = "—"
+
+        row = (waktu, self.current_user, kota, paket_tampil, pesanan_tampil, fmt_rp(total_int))
         self.riwayat_transaksi.append(row)
         # maintain parallel meta
-        self.riwayat_meta.append({'source': src, 'pesanan_total': pesanan_total, 'total': total_int})
+        self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int})
 
         item_id = self.tree.insert("", 0, values=row)
         self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
@@ -6208,7 +6218,7 @@ class AutoRentApp(ctk.CTk):
         ws["A2"].alignment = Alignment(horizontal="center")
         ws.row_dimensions[2].height = 18
 
-        headers = ["Waktu", "Kasir", "Kota/TV", "Paket", "Pesanan Tambahan", "Total"]
+        headers = ["Waktu", "Kasir", "TV/PC", "Paket", "Pesanan Tambahan", "Total"]
         for col, h in enumerate(headers, 1):
             cell = ws.cell(row=3, column=col, value=h)
             cell.font      = header_font
@@ -6236,10 +6246,10 @@ class AutoRentApp(ctk.CTk):
         ws[f"A{last_row}"].font      = Font(name="Consolas", bold=True, color="FFD700", size=11)
         ws[f"A{last_row}"].fill      = PatternFill("solid", fgColor="1A1A3A")
         ws[f"A{last_row}"].alignment = Alignment(horizontal="right")
-        total_tv = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'tv')
-        total_warnet = sum(m['total'] for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_tv_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'warnet')
         total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
-        total_all = total_tv + total_warnet
+        total_all = total_tv_paket + total_warnet_paket + total_pesanan
         ws[f"F{last_row}"] = fmt_rp(total_all)
         ws[f"F{last_row}"].font      = Font(name="Consolas", bold=True, color="FFD700", size=11)
         ws[f"F{last_row}"].fill      = PatternFill("solid", fgColor="1A1A3A")
@@ -6247,9 +6257,9 @@ class AutoRentApp(ctk.CTk):
 
         summary_row = last_row + 1
         for label, amount in [
-            ("TOTAL TV", total_tv),
-            ("TOTAL WARnet", total_warnet),
-            ("TOTAL PESANAN", total_pesanan),
+            ("TOTAL TV (Penjualan Paket)", total_tv_paket),
+            ("TOTAL WARNET (Penjualan Paket)", total_warnet_paket),
+            ("TOTAL MAKANAN & MINUMAN", total_pesanan),
             ("TOTAL KESELURUHAN", total_all),
         ]:
             ws.merge_cells(f"A{summary_row}:E{summary_row}")
