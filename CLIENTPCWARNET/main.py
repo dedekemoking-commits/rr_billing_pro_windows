@@ -1290,11 +1290,11 @@ class LoginPage(ctk.CTkFrame):
         outer.pack(anchor="n", pady=(18, 10), padx=4, ipadx=30, ipady=12)
 
         # Logo
-        logo_ico = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=16,
-                                  width=72, height=72)
+        logo_ico = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=12,
+                                  width=152, height=62)
         logo_ico.pack(pady=(28, 8))
         logo_ico.pack_propagate(False)
-        ctk_img = load_ctk_image(size=(62, 62))
+        ctk_img = load_ctk_image(size=(143, 55))
         if ctk_img:
             ctk.CTkLabel(logo_ico, text="", image=ctk_img).place(
                 relx=0.5, rely=0.5, anchor="center")
@@ -4671,12 +4671,12 @@ class AutoRentApp(ctk.CTk):
         logo_f.pack(pady=(22, 6))
 
         # ── LOGO SIDEBAR: coba logo.png, fallback emoji ───────────────────────
-        ico_bg = ctk.CTkFrame(logo_f, fg_color=C_PANEL, corner_radius=14,
-                               width=54, height=54)
+        ico_bg = ctk.CTkFrame(logo_f, fg_color=C_PANEL, corner_radius=10,
+                               width=128, height=54)
         ico_bg.pack()
         ico_bg.pack_propagate(False)
 
-        ctk_img_sidebar = load_ctk_image(size=(46, 46))
+        ctk_img_sidebar = load_ctk_image(size=(120, 46))
         if ctk_img_sidebar:
             lbl_sb_logo = ctk.CTkLabel(ico_bg, text="", image=ctk_img_sidebar)
         else:
@@ -6659,10 +6659,10 @@ class AutoRentApp(ctk.CTk):
         card.pack(fill="x", pady=(0, 16))
 
         # ── Logo profil: coba logo.png, fallback teks ─────────────────────────
-        ctk_img_profil = load_ctk_image(size=(72, 72))
+        ctk_img_profil = load_ctk_image(size=(180, 68))
         if ctk_img_profil:
-            logo_container = ctk.CTkFrame(card, fg_color=C_CARD, corner_radius=20,
-                                           width=88, height=88)
+            logo_container = ctk.CTkFrame(card, fg_color=C_CARD, corner_radius=12,
+                                           width=190, height=76)
             logo_container.pack(pady=(24, 8))
             logo_container.pack_propagate(False)
             ctk.CTkLabel(logo_container, text="", image=ctk_img_profil).place(
