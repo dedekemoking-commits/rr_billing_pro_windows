@@ -523,18 +523,18 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ─── PALET WARNA GAMING ──────────────────────────────────────────────────────
-C_BG        = "#001A2E"  # Neon Sky Blue background
-C_PANEL     = "#003d5c"
-C_CARD      = "#00527a"
-C_ACCENT    = "#00E5FF"  # Neon Cyan
-C_ACCENT2   = "#00BFFF"  # Deep Sky Blue
-C_RED       = "#FF3366"
-C_GREEN     = "#39FF14"
-C_YELLOW    = "#FFD700"
-C_TEXT      = "#E0FFFF"
-C_MUTED     = "#7EB3D6"
-C_BTN       = "#0A2A42"
-C_BORDER    = "#1A5F7A"
+C_BG        = "#0A0A18"  # Very dark glass background
+C_PANEL     = "#151530"  # Frosted glass panel
+C_CARD      = "#1E1E3E"  # Glass card
+C_ACCENT    = "#00FFCC"  # Neon cyan glass highlight
+C_ACCENT2   = "#6C63FF"  # Soft purple accent
+C_RED       = "#FF5252"
+C_GREEN     = "#00E676"
+C_YELLOW    = "#FFD740"
+C_TEXT      = "#E8E8FF"
+C_MUTED     = "#8888BB"
+C_BTN       = "#181838"
+C_BORDER    = "#3A3A6A"
 C_ORANGE    = "#FF8C00"
 
 FONT_TITLE  = ("Russo One",  18, "bold")
