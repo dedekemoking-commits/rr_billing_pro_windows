@@ -1352,7 +1352,7 @@ class LoginPage(ctk.CTkFrame):
         outer.pack(anchor="n", pady=(10, 10), padx=4, fill="x")
 
         # Logo
-        logo_ico = ctk.CTkFrame(outer, fg_color="white", corner_radius=16,
+        logo_ico = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=16,
                                   width=72, height=72)
         logo_ico.pack(pady=(28, 8))
         logo_ico.pack_propagate(False)
@@ -4758,7 +4758,7 @@ class AutoRentApp(ctk.CTk):
         logo_f.pack(pady=(22, 6))
 
         # ── LOGO SIDEBAR: coba logo.png, fallback emoji ───────────────────────
-        ico_bg = ctk.CTkFrame(logo_f, fg_color="white", corner_radius=14,
+        ico_bg = ctk.CTkFrame(logo_f, fg_color=C_PANEL, corner_radius=14,
                                width=54, height=54)
         ico_bg.pack()
         ico_bg.pack_propagate(False)
@@ -6748,7 +6748,7 @@ class AutoRentApp(ctk.CTk):
         # ── Logo profil: coba logo.png, fallback teks ─────────────────────────
         ctk_img_profil = load_ctk_image(size=(72, 72))
         if ctk_img_profil:
-            logo_container = ctk.CTkFrame(card, fg_color="white", corner_radius=20,
+            logo_container = ctk.CTkFrame(card, fg_color=C_CARD, corner_radius=20,
                                            width=88, height=88)
             logo_container.pack(pady=(24, 8))
             logo_container.pack_propagate(False)
