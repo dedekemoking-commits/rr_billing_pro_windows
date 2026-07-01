@@ -4884,21 +4884,18 @@ class AutoRentApp(ctk.CTk):
         try:
             from scripts.git_updater import GitUpdater
             
-            # Inisialisasi Git updater
             repo_path = os.path.dirname(os.path.abspath(__file__))
             updater = GitUpdater(repo_path, remote="origin", branch="master")
             
-            # Check for updates
             has_update, msg, info = updater.check_for_updates()
             
             if not has_update:
                 self.after(0, lambda: messagebox.showinfo("📡 Update Git", msg))
                 return
             
-            # Ada update tersedia, tanya user
             commits_info = ""
             if info and info.get("commits_info"):
-                commits_info = f"\n\nCommit yang akan di-pull:\n{info['commits_info'][:500]}"
+                commits_info = f"\n\nCommit:\n{info['commits_info'][:500]}"
             
             confirm_msg = (
                 f"{msg}\n"
@@ -4907,32 +4904,29 @@ class AutoRentApp(ctk.CTk):
                 "Lanjutkan update dan restart aplikasi?"
             )
             
-            result = messagebox.askyesno("📡 Update via Git", confirm_msg)
-            if not result:
+            # Tanya user via main thread
+            import threading as _th
+            ev = _th.Event()
+            res = [False]
+            def _ask():
+                res[0] = messagebox.askyesno("📡 Update via Git", confirm_msg)
+                ev.set()
+            self.after(0, _ask)
+            ev.wait()
+            
+            if not res[0]:
                 self.after(0, lambda: messagebox.showinfo("Dibatalkan", "Update dibatalkan."))
                 return
             
-            # Show progress
-            dlg = messagebox.showinfo(
-                "Sedang Update",
-                "Sedang pull updates dari Git...\nSilakan tunggu...",
-                parent=self
-            )
-            
             # Pull updates
+            self.after(0, lambda: messagebox.showinfo(
+                "Sedang Update", "Sedang pull updates dari Git...\nSilakan tunggu..."))
             success, pull_msg = updater.pull_updates()
             
             if not success:
                 self.after(0, lambda: messagebox.showerror("❌ Update Error", f"Update gagal:\n{pull_msg}"))
                 return
             
-            # Success! Now restart — jangan tunggu user close dialog
-            self.after(0, lambda: messagebox.showinfo(
-                "✅ Update Berhasil",
-                f"Update berhasil!\n\n{pull_msg}\n\nAplikasi akan restart sekarang..."
-            ))
-            
-            # Save audit log sebelum restart
             AuditLogger.log(
                 action="system_update",
                 username=self.current_user or "system",
@@ -4940,7 +4934,9 @@ class AutoRentApp(ctk.CTk):
                 details={"type": "git", "message": pull_msg}
             )
             
-            # Restart aplikasi langsung (tanpa delay menunggu dialog ditutup)
+            self.after(0, lambda: messagebox.showinfo(
+                "✅ Update Berhasil",
+                f"Update berhasil!\n\n{pull_msg}\n\nAplikasi akan restart sekarang..."))
             self.after(2000, lambda: self._do_restart())
             
         except ImportError as e:
