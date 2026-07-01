@@ -3600,13 +3600,11 @@ class KartuTV(ctk.CTkFrame):
         if not self.is_bebas and getattr(self, '_last_transaction_item', None):
             app = self.winfo_toplevel()
             item_id = self._last_transaction_item
-            pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
-            total_str = fmt_rp(total_semua)
             if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
                 idx = app._tree_item_to_index.get(item_id)
                 if idx is not None and idx < len(app.riwayat_transaksi):
                     waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = (waktu, app.current_user, self.label_tv, self.paket_aktif, pesanan_str, total_str)
+                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     if hasattr(app, '_refresh_riwayat_summary'):
@@ -3671,13 +3669,12 @@ class KartuTV(ctk.CTkFrame):
             if self._last_transaction_item and previous_session:
                 app = self.winfo_toplevel()
                 item_id = self._last_transaction_item
-                pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
-                total_str = fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)
+                total_int = self.paket_harga_tetap + self.biaya_pesanan
                 if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
                     idx = app._tree_item_to_index.get(item_id)
                     if idx is not None and idx < len(app.riwayat_transaksi):
                         waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = (waktu, app.current_user, self.label_tv, self.paket_aktif, pesanan_str, total_str)
+                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
                         if hasattr(app, '_refresh_riwayat_summary'):
@@ -3720,19 +3717,21 @@ class KartuTV(ctk.CTkFrame):
             if getattr(self, '_last_transaction_item', None):
                 app = self.winfo_toplevel()
                 item_id = self._last_transaction_item
-                pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
-                total_str = fmt_rp(total_akhir)
                 if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
                     idx = app._tree_item_to_index.get(item_id)
                     if idx is not None and idx < len(app.riwayat_transaksi):
                         waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = (waktu, app.current_user, self.label_tv, self.paket_aktif, pesanan_str, total_str)
+                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
                         # update meta if present
                         try:
-                            app.riwayat_meta[idx]['pesanan_total'] = sum(
-                                app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            pesanan_total = sum(app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            paket_harga = total_akhir - pesanan_total
+                            if paket_harga < 0:
+                                paket_harga = 0
+                            app.riwayat_meta[idx]['paket_harga'] = paket_harga
+                            app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
                             app.riwayat_meta[idx]['total'] = total_akhir
                         except Exception:
                             pass
@@ -4210,18 +4209,22 @@ class KartuWarnet(ctk.CTkFrame):
         if not self.is_bebas and getattr(self, '_last_transaction_item', None):
             app = self.winfo_toplevel()
             item_id = self._last_transaction_item
-            pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
-            total_str = fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)
+            total_int = self.paket_harga_tetap + self.biaya_pesanan
             if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
                 idx = app._tree_item_to_index.get(item_id)
                 if idx is not None and idx < len(app.riwayat_transaksi):
                     waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = (waktu, app.current_user, self.label_kursi, self.paket_aktif, pesanan_str, total_str)
+                    updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     try:
-                        app.riwayat_meta[idx]['pesanan_total'] = sum(app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
-                        app.riwayat_meta[idx]['total'] = self.paket_harga_tetap + self.biaya_pesanan
+                        pesanan_total = sum(app.menu_makanan.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                        paket_harga = total_int - pesanan_total
+                        if paket_harga < 0:
+                            paket_harga = 0
+                        app.riwayat_meta[idx]['paket_harga'] = paket_harga
+                        app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
+                        app.riwayat_meta[idx]['total'] = total_int
                     except Exception:
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
@@ -4285,13 +4288,12 @@ class KartuWarnet(ctk.CTkFrame):
             if self._last_transaction_item and previous_session:
                 app = self.winfo_toplevel()
                 item_id = self._last_transaction_item
-                pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "—"
-                total_str = fmt_rp(self.paket_harga_tetap + self.biaya_pesanan)
+                total_int = self.paket_harga_tetap + self.biaya_pesanan
                 if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
                     idx = app._tree_item_to_index.get(item_id)
                     if idx is not None and idx < len(app.riwayat_transaksi):
                         waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = (waktu, app.current_user, self.label_kursi, self.paket_aktif, pesanan_str, total_str)
+                        updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
                         if hasattr(app, '_refresh_riwayat_summary'):
@@ -6010,6 +6012,22 @@ class AutoRentApp(ctk.CTk):
                                             font=FONT_SUB, text_color=C_YELLOW)
         self.lbl_rekap_footer.pack(side="left", padx=18, pady=8)
 
+    def _format_riwayat_row(self, waktu, kota, paket_nama, pesanan_dict, total_int, pesanan_total=None):
+        """Build a properly formatted riwayat row tuple with price annotations."""
+        if pesanan_total is None:
+            all_menu = {**self.menu_makanan, **self.menu_minuman}
+            pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in (pesanan_dict.items() if isinstance(pesanan_dict, dict) else []))
+        paket_harga = total_int - pesanan_total
+        if paket_harga < 0:
+            paket_harga = 0
+        paket_tampil = f"{paket_nama} ({fmt_rp(paket_harga)})" if paket_harga > 0 else paket_nama
+        pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in (pesanan_dict.items() if isinstance(pesanan_dict, dict) else [])) or "—"
+        if pesanan_str != "—":
+            pesanan_tampil = f"{pesanan_str} ({fmt_rp(pesanan_total)})"
+        else:
+            pesanan_tampil = "—"
+        return (waktu, self.current_user, kota, paket_tampil, pesanan_tampil, fmt_rp(total_int))
+
     def _catat_transaksi(self, kota, paket, pesanan, total, source='tv'):
         """Catat transaksi ke riwayat.
         pesanan: dict nama->qty
@@ -6019,8 +6037,6 @@ class AutoRentApp(ctk.CTk):
         """
         waktu       = datetime.now().strftime("%Y-%m-%d %H:%M")
         pesanan = pesanan or {}
-        pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in pesanan.items()) or "—"
-
         src = source if source in ('tv', 'warnet') else 'tv'
 
         # compute pesanan total (money) using menu prices
@@ -6040,14 +6056,7 @@ class AutoRentApp(ctk.CTk):
         if paket_harga < 0:
             paket_harga = 0
 
-        # Format columns with prices
-        paket_tampil = f"{paket} ({fmt_rp(paket_harga)})" if paket_harga > 0 else paket
-        if pesanan_str != "—":
-            pesanan_tampil = f"{pesanan_str} ({fmt_rp(pesanan_total)})"
-        else:
-            pesanan_tampil = "—"
-
-        row = (waktu, self.current_user, kota, paket_tampil, pesanan_tampil, fmt_rp(total_int))
+        row = self._format_riwayat_row(waktu, kota, paket, pesanan, total_int, pesanan_total)
         self.riwayat_transaksi.append(row)
         # maintain parallel meta
         self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int})
