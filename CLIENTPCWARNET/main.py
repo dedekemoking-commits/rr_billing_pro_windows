@@ -4949,8 +4949,10 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_riwayat_summary(self):
         # Compute totals split by source
-        total_tv_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'tv')
-        total_warnet_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'warnet')
+        def paket_only(m):
+            return m.get('paket_harga', m['total'] - m.get('pesanan_total', 0))
+        total_tv_paket = sum(paket_only(m) for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet_paket = sum(paket_only(m) for m in self.riwayat_meta if m.get('source') == 'warnet')
         total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
         total_all = total_tv_paket + total_warnet_paket + total_pesanan
         summary_text = (
@@ -5306,7 +5308,7 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_warnet_footer(self):
         # Sum warnet paket totals from riwayat_meta (package sales only)
-        total_warnet = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_warnet = sum(m.get('paket_harga', m['total'] - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'warnet')
         if hasattr(self, 'lbl_warnet_total_pendapatan'):
             self.lbl_warnet_total_pendapatan.configure(text=f"Total Pendapatan Warnet: {fmt_rp(total_warnet)}")
  
@@ -6168,8 +6170,8 @@ class AutoRentApp(ctk.CTk):
         ws[f"A{last_row}"].font      = Font(name="Consolas", bold=True, color="FFD700", size=11)
         ws[f"A{last_row}"].fill      = PatternFill("solid", fgColor="1A1A3A")
         ws[f"A{last_row}"].alignment = Alignment(horizontal="right")
-        total_tv_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'tv')
-        total_warnet_paket = sum(m.get('paket_harga', m['total']) for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_tv_paket = sum(m.get('paket_harga', m['total'] - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet_paket = sum(m.get('paket_harga', m['total'] - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'warnet')
         total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
         total_all = total_tv_paket + total_warnet_paket + total_pesanan
         ws[f"F{last_row}"] = fmt_rp(total_all)
