@@ -6890,7 +6890,7 @@ class AutoRentApp(ctk.CTk):
         # Main log viewer
         self.log_textbox = ctk.CTkTextbox(f, fg_color=C_BTN, text_color=C_TEXT,
                                           border_color=C_BORDER, border_width=1,
-                                          font=("Courier New", 9))
+                                          font=("Courier New", 13))
         self.log_textbox.pack(fill="both", expand=True, padx=6, pady=6)
         self.log_textbox.configure(state="disabled")
         
