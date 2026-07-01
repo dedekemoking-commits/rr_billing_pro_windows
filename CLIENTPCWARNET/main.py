@@ -579,7 +579,7 @@ def fmt_durasi(menit):
     return f"{sisa} menit"
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.3.1"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
