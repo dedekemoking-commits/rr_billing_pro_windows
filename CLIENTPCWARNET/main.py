@@ -6625,7 +6625,7 @@ class AutoRentApp(ctk.CTk):
         finally:
             # Keluar dari aplikasi lama
             time.sleep(0.5)
-            self.master.quit()
+            self.quit()
 
     def _rebuild_sidebar_lic(self):
         self._refresh_license_ui()
