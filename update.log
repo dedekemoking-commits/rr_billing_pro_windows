@@ -1,0 +1,97 @@
+[2026-06-23 00:10:15] Checking for updates...
+[2026-06-23 00:10:16] Aplikasi sudah up-to-date
+[2026-06-23 00:46:24] Checking for updates...
+[2026-06-23 00:46:25] Update tersedia: 0 commit(s) di remote (3f02b90 → c0da7aa)
+[2026-06-23 01:39:54] Pull successful
+[2026-06-23 01:41:02] Checking for updates...
+[2026-06-23 01:41:03] Update tersedia: 0 commit(s) di remote (29270bb → 50592d8)
+[2026-06-23 01:45:56] Checking for updates...
+[2026-06-23 01:45:57] Aplikasi sudah up-to-date
+[2026-06-23 01:46:03] Checking for updates...
+[2026-06-23 01:46:04] Aplikasi sudah up-to-date
+[2026-06-23 09:36:56] Checking for updates...
+[2026-06-23 09:36:57] Aplikasi sudah up-to-date
+[2026-06-23 10:04:56] Pull successful
+[2026-06-23 10:05:19] Checking for updates...
+[2026-06-23 10:05:20] Update tersedia: 0 commit(s) di remote (e8c7b2b → dc7525e)
+[2026-06-23 11:23:06] Checking for updates...
+[2026-06-23 11:23:07] Update tersedia: 0 commit(s) di remote (e8c7b2b → dc7525e)
+[2026-06-23 11:27:54] Pulling updates dari origin/master...
+[2026-06-23 23:53:03] Checking for updates...
+[2026-06-23 23:53:04] Update tersedia: 0 commit(s) di remote (c40b7c3 → dc7525e)
+[2026-06-23 23:53:23] Pulling updates dari origin/master...
+[2026-07-02 03:14:24] Stash pop warning: warning: Cannot merge binary files: PACKAGE/RRBILLINGPRO/RRBILLINGPRO.exe (Updated upstream:PACKAGE/RRBILLINGPRO/RRBILLINGPRO.exe vs. Stashed changes:dist/RR_BILLING_PRO.exe)
+Auto-merging PACKAGE/RRBILLINGPRO/RRBILLINGPRO.exe
+CONFLICT (content): Merge conflict in PACKAGE/RRBILLINGPRO/RRBILLINGPRO.exe
+CONFLICT (rename/delete): build/main/generated-a606373ee2dd86a0fb4c0f93eaf98501d6e968e976f97e3a6cb94a59cac517ab.ico renamed to PACKAGE/RRBILLINGPRO/logo.ico in Updated upstream, but deleted in Stashed changes.
+CONFLICT (modify/delete): RR_BILLING_PRO.spec deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of RR_BILLING_PRO.spec left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/Analysis-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/Analysis-00.toc left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/EXE-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/EXE-00.toc left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/PKG-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/PKG-00.toc left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/PYZ-00.pyz deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/PYZ-00.pyz left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/PYZ-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/PYZ-00.toc left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/base_library.zip deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/base_library.zip left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/warn-RR_BILLING_PRO.txt deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/warn-RR_BILLING_PRO.txt left in tree.
+CONFLICT (modify/delete): build/RR_BILLING_PRO/xref-RR_BILLING_PRO.html deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/RR_BILLING_PRO/xref-RR_BILLING_PRO.html left in tree.
+CONFLICT (modify/delete): build/main/Analysis-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/Analysis-00.toc left in tree.
+CONFLICT (modify/delete): build/main/EXE-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/EXE-00.toc left in tree.
+CONFLICT (modify/delete): build/main/PKG-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/PKG-00.toc left in tree.
+CONFLICT (modify/delete): build/main/PYZ-00.toc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/PYZ-00.toc left in tree.
+CONFLICT (modify/delete): build/main/base_library.zip deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/base_library.zip left in tree.
+CONFLICT (modify/delete): build/main/warn-main.txt deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/warn-main.txt left in tree.
+CONFLICT (modify/delete): build/main/xref-main.html deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of build/main/xref-main.html left in tree.
+warning: Cannot merge binary files: installer/portable_build/main.exe (Updated upstream:installer/portable_build/main.exe vs. Stashed changes:build/main/main.pkg)
+Auto-merging installer/portable_build/main.exe
+CONFLICT (content): Merge conflict in installer/portable_build/main.exe
+Auto-merging main.py
+CONFLICT (modify/delete): main.spec deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of main.spec left in tree.
+warning: Cannot merge binary files: portable_build/main.exe (Updated upstream:portable_build/main.exe vs. Stashed changes:build/RR_BILLING_PRO/RR_BILLING_PRO.pkg)
+Auto-merging portable_build/main.exe
+CONFLICT (content): Merge conflict in portable_build/main.exe
+CONFLICT (modify/delete): rr_billing_audit.jsonl deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of rr_billing_audit.jsonl left in tree.
+CONFLICT (modify/delete): update.log deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of update.log left in tree.
+On branch master
+Your branch is ahead of 'origin/master' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   main.py
+
+Unmerged paths:
+  (use "git restore --staged <file>..." to unstage)
+  (use "git add/rm <file>..." as appropriate to mark resolution)
+	both modified:   PACKAGE/RRBILLINGPRO/RRBILLINGPRO.exe
+	deleted by them: PACKAGE/RRBILLINGPRO/logo.ico
+	deleted by us:   RR_BILLING_PRO.spec
+	deleted by us:   build/RR_BILLING_PRO/Analysis-00.toc
+	deleted by us:   build/RR_BILLING_PRO/EXE-00.toc
+	deleted by us:   build/RR_BILLING_PRO/PKG-00.toc
+	deleted by us:   build/RR_BILLING_PRO/PYZ-00.pyz
+	deleted by us:   build/RR_BILLING_PRO/PYZ-00.toc
+	deleted by us:   build/RR_BILLING_PRO/base_library.zip
+	deleted by us:   build/RR_BILLING_PRO/warn-RR_BILLING_PRO.txt
+	deleted by us:   build/RR_BILLING_PRO/xref-RR_BILLING_PRO.html
+	deleted by us:   build/main/Analysis-00.toc
+	deleted by us:   build/main/EXE-00.toc
+	deleted by us:   build/main/PKG-00.toc
+	deleted by us:   build/main/PYZ-00.toc
+	deleted by us:   build/main/base_library.zip
+	deleted by us:   build/main/warn-main.txt
+	deleted by us:   build/main/xref-main.html
+	both modified:   installer/portable_build/main.exe
+	deleted by us:   main.spec
+	both modified:   portable_build/main.exe
+	deleted by us:   rr_billing_audit.jsonl
+	deleted by us:   update.log
+
+The stash entry is kept in case you need it again.
+[2026-07-02 03:14:24] Pull successful
+[2026-07-02 03:17:02] Checking for updates...
+[2026-07-02 03:17:03] Update tersedia: 0 commit(s) di remote (b0c2d22 → f425e8d)
+[2026-07-02 03:17:04] Pulling updates dari origin/master...
+[2026-07-02 03:17:04] Stash warning: error: could not write index
+[2026-07-02 03:17:04] Pull failed: error: Pulling is not possible because you have unmerged files.
+hint: Fix them up in the work tree, and then use 'git add/rm <file>'
+hint: as appropriate to mark resolution and make a commit.
+fatal: Exiting because of an unresolved conflict.

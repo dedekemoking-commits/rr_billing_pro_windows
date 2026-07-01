@@ -1,0 +1,65 @@
+{"timestamp": "2026-06-22T01:46:42.497196", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T02:43:34.687764", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T03:21:36.919274", "action": "registration_pending", "username": "rrgaming1", "status": "pending", "details": {"email": "dedekemoking1@gmail.com"}}
+{"timestamp": "2026-06-22T03:22:14.781201", "action": "registration", "username": "rrgaming1", "status": "verified", "details": {"email": "dedekemoking1@gmail.com"}}
+{"timestamp": "2026-06-22T03:22:24.995684", "action": "login_success", "username": "rrgaming1", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T03:24:13.636717", "action": "activation_attempt", "username": "rrgaming1", "status": "success", "details": {"binding_mode": "username", "message": "Lisensi BULANAN aktif hingga 22 July 2026 (sisa 30 hari). 🎉"}}
+{"timestamp": "2026-06-22T03:41:08.205908", "action": "login_success", "username": "rrgaming1", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T03:41:15.512267", "action": "logout", "username": "rrgaming1", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T03:42:35.452723", "action": "registration_pending", "username": "rrgaming2", "status": "pending", "details": {"email": "dedekemoking2@gmail.com"}}
+{"timestamp": "2026-06-22T03:43:44.875575", "action": "registration", "username": "rrgaming2", "status": "verified", "details": {"email": "dedekemoking2@gmail.com"}}
+{"timestamp": "2026-06-22T03:43:55.114294", "action": "login_success", "username": "rrgaming2", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T03:50:48.873507", "action": "login_success", "username": "rrgaming2", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T03:53:38.408264", "action": "activation_attempt", "username": "rrgaming2", "status": "success", "details": {"binding_mode": "username", "message": "Lisensi BULANAN aktif hingga 22 July 2026 (sisa 30 hari). 🎉"}}
+{"timestamp": "2026-06-22T15:44:58.958545", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T15:55:14.117354", "action": "logout", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:03:41.392431", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:33:31.168028", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:39:36.418033", "action": "logout", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:46:47.312233", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:47:24.187721", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:50:49.763679", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:51:22.416862", "action": "logout", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:57:17.662872", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T16:59:23.951539", "action": "user_created", "username": "kasir1", "status": "success", "details": {"created_by": "admin"}}
+{"timestamp": "2026-06-22T16:59:54.208995", "action": "logout", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T17:00:04.076873", "action": "login_failed", "username": "user1", "status": "failed", "details": {"attempts": 1}}
+{"timestamp": "2026-06-22T17:00:08.539200", "action": "login_failed", "username": "user1", "status": "failed", "details": {"attempts": 2}}
+{"timestamp": "2026-06-22T17:00:12.717225", "action": "login_failed", "username": "user1", "status": "failed", "details": {"attempts": 3}}
+{"timestamp": "2026-06-22T17:00:14.175370", "action": "login_failed", "username": "user1", "status": "failed", "details": {"attempts": 4}}
+{"timestamp": "2026-06-22T17:00:20.999269", "action": "login_success", "username": "kasir1", "status": "success", "details": {"role": "kasir"}}
+{"timestamp": "2026-06-22T17:12:39.894900", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T17:16:37.288854", "action": "password_reset", "username": "rrgaming1", "status": "success", "details": {"method": "forgot_password"}}
+{"timestamp": "2026-06-22T17:16:41.168175", "action": "login_success", "username": "rrgaming1", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T20:31:31.757520", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T20:36:50.242342", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T20:57:20.264549", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T22:55:01.628521", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-22T23:59:58.749600", "action": "login_success", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T00:00:21.762045", "action": "logout", "username": "admin", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T01:48:05.539029", "action": "login_success", "username": "kasir", "status": "success", "details": {"role": "kasir"}}
+{"timestamp": "2026-06-23T09:36:34.842258", "action": "login_failed", "username": "admin", "status": "failed", "details": {"attempts": 1}}
+{"timestamp": "2026-06-23T09:36:44.453812", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T10:06:36.743258", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T10:15:51.400345", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T10:18:45.062362", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T10:28:35.181943", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T10:39:27.484206", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T10:45:17.483980", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T11:02:19.195406", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T11:17:30.900733", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:13:52.968831", "action": "login_failed", "username": "rrgaming", "status": "failed", "details": {"attempts": 1}}
+{"timestamp": "2026-06-23T12:13:56.958125", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:19:08.819442", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:27:49.396853", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:30:14.882683", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:34:09.675464", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:47:37.162358", "action": "login_failed", "username": "rrgaming", "status": "failed", "details": {"attempts": 1}}
+{"timestamp": "2026-06-23T12:47:42.801549", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:51:15.284648", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T12:54:07.154564", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-06-23T23:52:57.316800", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-02T03:14:24.477158", "action": "system_update", "username": "rrgaming", "status": "success", "details": {"type": "git", "message": "Already up to date."}}
+{"timestamp": "2026-07-02T03:14:37.643557", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-02T03:15:15.201057", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "START Demo PC 1", "result": "Socket connection timeout."}}
+{"timestamp": "2026-07-02T03:15:21.028770", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "STOP Demo PC 1", "result": "Socket connection timeout."}}

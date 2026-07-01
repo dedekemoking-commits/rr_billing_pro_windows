@@ -1493,23 +1493,24 @@ class LoginPage(ctk.CTkFrame):
                                         font=FONT_BODY)
         self.d_alamat.pack(fill="x", padx=14, pady=(0, 10))
 
-        # Status & tombol
+        # Tombol dalam scroll
+        btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(12, 0))
+        
+        ctk.CTkButton(btn_frame, text="✅  DAFTAR SEKARANG", width=180, height=40,
+                      fg_color=C_ACCENT2, hover_color="#5A0FCC",
+                      font=("Russo One", 11, "bold"), text_color="white",
+                      command=self._submit_daftar).pack(side="left", padx=6)
+        ctk.CTkButton(btn_frame, text="❌  BATAL", width=140, height=40,
+                      fg_color=C_RED, hover_color="#8B0000",
+                      font=("Russo One", 11, "bold"), text_color="white",
+                      command=self._show_login_view).pack(side="left", padx=6)
+
+        # Status message
         self.lbl_daftar_status = ctk.CTkLabel(outer, text="",
                                                font=FONT_LABEL, text_color=C_RED,
                                                wraplength=420, justify="center")
         self.lbl_daftar_status.pack(pady=(6, 2))
-
-        btn_row = ctk.CTkFrame(outer, fg_color="transparent")
-        btn_row.pack(pady=(2, 20))
-        ctk.CTkButton(btn_row, text="✅  DAFTAR SEKARANG", width=200, height=40,
-                      fg_color=C_ACCENT2, hover_color="#5A0FCC",
-                      font=("Russo One", 11, "bold"), text_color="white",
-                      command=self._submit_daftar).pack(side="left", padx=8)
-        ctk.CTkButton(btn_row, text="← KEMBALI LOGIN", width=160, height=40,
-                      fg_color="transparent", hover_color=C_BTN,
-                      border_width=1, border_color=C_MUTED,
-                      font=("Russo One", 10, "bold"), text_color=C_MUTED,
-                      command=self._show_login_view).pack(side="left", padx=8)
 
     def _input_field(self, parent, label, placeholder, show=None):
         ctk.CTkLabel(parent, text=label, font=FONT_LABEL,
@@ -3607,12 +3608,20 @@ class KartuTV(ctk.CTkFrame):
                     updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
+                    try:
+                        all_menu_app = {**app.menu_makanan, **app.menu_minuman}
+                        pesanan_total_baru = sum(all_menu_app.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                        paket_harga_baru = total_semua - pesanan_total_baru
+                        if paket_harga_baru < 0:
+                            paket_harga_baru = 0
+                        if idx < len(app.riwayat_meta):
+                            app.riwayat_meta[idx]['paket_harga'] = paket_harga_baru
+                            app.riwayat_meta[idx]['pesanan_total'] = pesanan_total_baru
+                            app.riwayat_meta[idx]['total'] = total_semua
+                    except Exception:
+                        pass
                     if hasattr(app, '_refresh_riwayat_summary'):
                         app._refresh_riwayat_summary()
-
-        app = self.winfo_toplevel()
-        if hasattr(app, '_refresh_dashboard_total_pesanan'):
-            app._refresh_dashboard_total_pesanan()
 
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
         previous_session = not self.sesi_kosong()
@@ -5141,14 +5150,6 @@ class AutoRentApp(ctk.CTk):
             col.grid(row=0, column=i, sticky="nsew", padx=2)
             self._col_frames_warnet.append(col)
 
-        footer = ctk.CTkFrame(f, fg_color=C_PANEL, height=40, corner_radius=0)
-        footer.pack(fill="x", padx=6, pady=(0, 6))
-        footer.pack_propagate(False)
-        self.lbl_warnet_total_pendapatan = ctk.CTkLabel(footer,
-                                                       text="Total Pendapatan Warnet: Rp 0",
-                                                       font=FONT_BODY, text_color=C_YELLOW)
-        self.lbl_warnet_total_pendapatan.pack(side="right", padx=18, pady=8)
-
     def _setup_dashboard(self):
         f = self.frames["dashboard"]
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
@@ -5182,14 +5183,6 @@ class AutoRentApp(ctk.CTk):
             col = ctk.CTkFrame(cf, fg_color="transparent")
             col.grid(row=0, column=i, sticky="nsew", padx=2)
             self._col_frames.append(col)
-
-        footer = ctk.CTkFrame(f, fg_color=C_PANEL, height=40, corner_radius=0)
-        footer.pack(fill="x", padx=6, pady=(0, 6))
-        footer.pack_propagate(False)
-        self.lbl_dashboard_total_pesanan = ctk.CTkLabel(footer,
-                                                       text="Total Pesanan: Rp 0",
-                                                       font=FONT_BODY, text_color=C_YELLOW)
-        self.lbl_dashboard_total_pesanan.pack(side="right", padx=18, pady=8)
 
     def _unlock_tambah(self):
         self._tambah_btn_enabled = True
