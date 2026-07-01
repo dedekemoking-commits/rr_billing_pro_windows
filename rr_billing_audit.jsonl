@@ -63,3 +63,6 @@
 {"timestamp": "2026-07-02T03:14:37.643557", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-07-02T03:15:15.201057", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "START Demo PC 1", "result": "Socket connection timeout."}}
 {"timestamp": "2026-07-02T03:15:21.028770", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "STOP Demo PC 1", "result": "Socket connection timeout."}}
+{"timestamp": "2026-07-02T03:20:30.166001", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-02T03:21:05.076786", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "START Demo PC 1", "result": "Socket connection timeout."}}
+{"timestamp": "2026-07-02T03:21:12.055800", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "STOP Demo PC 1", "result": "Socket connection timeout."}}
