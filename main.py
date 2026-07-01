@@ -3677,6 +3677,18 @@ class KartuTV(ctk.CTkFrame):
                         updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
+                        try:
+                            all_menu = {**app.menu_makanan, **app.menu_minuman}
+                            pesanan_total_baru = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            paket_harga_baru = total_int - pesanan_total_baru
+                            if paket_harga_baru < 0:
+                                paket_harga_baru = 0
+                            if idx < len(app.riwayat_meta):
+                                app.riwayat_meta[idx]['paket_harga'] = paket_harga_baru
+                                app.riwayat_meta[idx]['pesanan_total'] = pesanan_total_baru
+                                app.riwayat_meta[idx]['total'] = total_int
+                        except Exception:
+                            pass
                         if hasattr(app, '_refresh_riwayat_summary'):
                             app._refresh_riwayat_summary()
             else:
@@ -4298,6 +4310,18 @@ class KartuWarnet(ctk.CTkFrame):
                         updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
+                        try:
+                            all_menu = {**app.menu_makanan, **app.menu_minuman}
+                            pesanan_total_baru = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            paket_harga_baru = total_int - pesanan_total_baru
+                            if paket_harga_baru < 0:
+                                paket_harga_baru = 0
+                            if idx < len(app.riwayat_meta):
+                                app.riwayat_meta[idx]['paket_harga'] = paket_harga_baru
+                                app.riwayat_meta[idx]['pesanan_total'] = pesanan_total_baru
+                                app.riwayat_meta[idx]['total'] = total_int
+                        except Exception:
+                            pass
                         if hasattr(app, '_refresh_riwayat_summary'):
                             app._refresh_riwayat_summary()
             else:
