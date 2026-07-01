@@ -6765,7 +6765,7 @@ class AutoRentApp(ctk.CTk):
         sep = ctk.CTkFrame(card, height=1, fg_color=C_BORDER)
         sep.pack(fill="x", padx=30, pady=16)
         for label, val in [
-            ("Versi",      "2.1.0"),
+            ("Versi",      APP_VERSION),
             ("Developer",  "RR CCTV"),
             ("Kontak",     "0812-7064-7744"),
             ("User Aktif", f"{self.current_user} [{self.current_role}]"),
