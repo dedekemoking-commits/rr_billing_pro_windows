@@ -17,18 +17,18 @@ SolidCompression=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "..\dist\main.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\RRBILLINGPRO\RRBILLINGPRO.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\rr_billing_config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\rr_billing_license.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\logo.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\update_pubkey.pem"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\RR Billing Pro"; Filename: "{app}\main.exe"
-Name: "{commondesktop}\RR Billing Pro"; Filename: "{app}\main.exe"; Tasks: desktopicon
+Name: "{group}\RR Billing Pro"; Filename: "{app}\RRBILLINGPRO.exe"
+Name: "{commondesktop}\RR Billing Pro"; Filename: "{app}\RRBILLINGPRO.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Run]
-Filename: "{app}\main.exe"; Description: "Launch RR Billing Pro"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RRBILLINGPRO.exe"; Description: "Launch RR Billing Pro"; Flags: nowait postinstall skipifsilent

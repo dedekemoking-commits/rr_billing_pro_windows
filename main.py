@@ -7,6 +7,7 @@ import time
 import socket
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import openpyxl.utils
 from datetime import datetime, timedelta
 import os
 import shutil
@@ -14,6 +15,7 @@ import json
 import hashlib
 import bcrypt  # ← Password hashing with salt
 import jwt  # ← JWT tokens
+import sys
 import re
 import webbrowser
 import smtplib
@@ -36,13 +38,17 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, password_hash: str) -> bool:
     """Verify password against bcrypt hash (backward-compatible dengan SHA256)."""
     try:
+        if not isinstance(password_hash, str) or not password_hash:
+            return False
         # New bcrypt format
         if password_hash.startswith("bcrypt$"):
             hash_value = password_hash[7:].encode('utf-8')
             return bcrypt.checkpw(password.encode(), hash_value)
-        # Legacy SHA256 format (for backward compatibility)
-        else:
+        # Legacy SHA256 format
+        if re.fullmatch(r"[0-9a-f]{64}", password_hash):
             return hashlib.sha256(password.encode()).hexdigest() == password_hash
+        # Legacy plaintext format (auto-upgrade after successful login)
+        return password == password_hash
     except Exception as e:
         print(f"Password verification error: {e}")
         return False
@@ -496,6 +502,22 @@ def generate_verification_code(length: int = EMAIL_VERIFICATION_CODE_LENGTH) -> 
 def sanitize_text(value: str) -> str:
     return value.strip()
 
+
+def subprocess_no_window_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    kwargs = {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    startup_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startup_cls is not None:
+        startupinfo = startup_cls()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
 # ─── TEMA ───────────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -515,15 +537,28 @@ C_BTN       = "#0A2A42"
 C_BORDER    = "#1A5F7A"
 C_ORANGE    = "#FF8C00"
 
-FONT_TITLE  = ("Russo One",  16, "bold")
-FONT_SUB    = ("Russo One",  10, "bold")
-FONT_BODY   = ("Courier New", 10)
-FONT_SMALL  = ("Courier New", 8)
-FONT_LABEL  = ("Consolas",  9)
+FONT_TITLE  = ("Russo One",  18, "bold")
+FONT_SUB    = ("Russo One",  12, "bold")
+FONT_BODY   = ("Courier New", 12)
+FONT_SMALL  = ("Courier New", 10)
+FONT_LABEL  = ("Consolas",  11)
 
 # ─── FILE KONFIGURASI ─────────────────────────────────────────────────────────
-CONFIG_FILE  = "rr_billing_config.json"
-LICENSE_FILE = "rr_billing_license.json"
+def get_app_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_BASE_DIR = get_app_base_dir()
+
+
+def app_path(filename: str) -> str:
+    return os.path.join(APP_BASE_DIR, filename)
+
+
+CONFIG_FILE  = app_path("rr_billing_config.json")
+LICENSE_FILE = app_path("rr_billing_license.json")
 
 # ─── DATA HARGA (default) ─────────────────────────────────────────────────────
 # Harga dikelompokkan per "Grup Tarif" (mis. PS3, PS4, Room VIP),
@@ -602,9 +637,16 @@ APP_VERSION = "2.2.1"
 #  HELPER LOGO
 # ═══════════════════════════════════════════════════════════════════════════════
 def _get_logo_path():
-    """Cari logo.png di folder yang sama dengan main.py (atau script yang berjalan)."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, "logo.png")
+    """Cari logo.png di folder aplikasi; fallback ke folder bundle PyInstaller."""
+    app_logo = app_path("logo.png")
+    if os.path.exists(app_logo):
+        return app_logo
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        bundled_logo = os.path.join(meipass, "logo.png")
+        if os.path.exists(bundled_logo):
+            return bundled_logo
+    return app_logo
 
 
 def load_ctk_image(size=(54, 54)):
@@ -791,7 +833,7 @@ def _send_verification_email(to_email: str, username: str, code: str) -> tuple:
 
 
 # ─── AUDIT LOGGER ───────────────────────────────────────────────────────────
-AUDIT_FILE = "rr_billing_audit.jsonl"
+AUDIT_FILE = app_path("rr_billing_audit.jsonl")
 
 class AuditLogger:
     @staticmethod
@@ -865,7 +907,8 @@ class ADBHelper:
         try:
             result = subprocess.run(
                 [cls.ADB_PATH] + args,
-                capture_output=True, text=True, timeout=timeout
+                capture_output=True, text=True, timeout=timeout,
+                **subprocess_no_window_kwargs()
             )
             ok = result.returncode == 0
             return ok, result.stdout.strip(), result.stderr.strip()
@@ -883,7 +926,8 @@ class ADBHelper:
             result = subprocess.run(
                 [cls.ADB_PATH, "pair", target],
                 input=f"{kode_pairing}\n",
-                capture_output=True, text=True, timeout=timeout
+                capture_output=True, text=True, timeout=timeout,
+                **subprocess_no_window_kwargs()
             )
             out  = result.stdout.strip()
             err  = result.stderr.strip()
@@ -1287,9 +1331,8 @@ class LoginPage(ctk.CTkFrame):
 
         # Satu container — isinya diganti saat pindah view
         # Dengan width minimum agar tidak shrink terlalu kecil
-        self._view_container = ctk.CTkFrame(self, fg_color="transparent", width=500, height=680)
-        self._view_container.pack(expand=True, fill="both", padx=20, pady=(20, 8), anchor="n")
-        self._view_container.pack_propagate(False)  # Maintain minimum size
+        self._view_container = ctk.CTkFrame(self, fg_color="transparent")
+        self._view_container.pack(expand=True, fill="both", padx=20, pady=(14, 10), anchor="n")
 
         self._show_login_view()
 
@@ -1300,10 +1343,13 @@ class LoginPage(ctk.CTkFrame):
         for w in self._view_container.winfo_children():
             w.destroy()
 
-        outer = ctk.CTkFrame(self._view_container, fg_color=C_PANEL,
+        scroll = ctk.CTkScrollableFrame(self._view_container, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+
+        outer = ctk.CTkFrame(scroll, fg_color=C_PANEL,
                               corner_radius=20, border_width=2,
                               border_color=C_ACCENT2)
-        outer.pack(anchor="n", pady=(18, 10), padx=4, ipadx=30, ipady=12)
+        outer.pack(anchor="n", pady=(10, 10), padx=4, fill="x")
 
         # Logo
         logo_ico = ctk.CTkFrame(outer, fg_color="white", corner_radius=16,
@@ -1319,64 +1365,64 @@ class LoginPage(ctk.CTkFrame):
                 relx=0.5, rely=0.5, anchor="center")
 
         ctk.CTkLabel(outer, text="RR BILLING PRO",
-                     font=("Russo One", 20, "bold"),
+                     font=("Russo One", 22, "bold"),
                      text_color=C_ACCENT).pack(pady=(4, 0))
         ctk.CTkLabel(outer, text="Sistem Billing Rental TV & PS",
-                     font=FONT_BODY, text_color=C_MUTED).pack(pady=(0, 16))
+                     font=("Courier New", 11), text_color=C_MUTED).pack(pady=(0, 16))
 
         self.lbl_lic = ctk.CTkLabel(outer, text="Silakan login untuk melanjutkan.",
-                                     font=FONT_SMALL, text_color=C_MUTED)
+                                     font=("Courier New", 10), text_color=C_MUTED)
         self.lbl_lic.pack(pady=(0, 10))
 
         ctk.CTkFrame(outer, height=1, fg_color=C_BORDER).pack(
             fill="x", padx=30, pady=(0, 18))
 
         # Input username
-        ctk.CTkLabel(outer, text="Username", font=FONT_LABEL,
-                     text_color=C_MUTED, anchor="w").pack(anchor="w", padx=40)
+        ctk.CTkLabel(outer, text="Username", font=("Consolas", 11),
+                     text_color=C_MUTED).pack(padx=40)
         self.entry_user = ctk.CTkEntry(
             outer, placeholder_text="Masukkan username",
             fg_color=C_BTN, text_color=C_ACCENT,
-            border_color=C_BORDER, font=("Consolas", 13),
-            height=40, width=320)
+            border_color=C_BORDER, font=("Consolas", 14),
+            height=40, width=320, justify="center")
         self.entry_user.pack(pady=(2, 10), padx=40)
 
         # Input password
-        ctk.CTkLabel(outer, text="Password", font=FONT_LABEL,
-                     text_color=C_MUTED, anchor="w").pack(anchor="w", padx=40)
+        ctk.CTkLabel(outer, text="Password", font=("Consolas", 11),
+                     text_color=C_MUTED).pack(padx=40)
         self.entry_pass = ctk.CTkEntry(
             outer, placeholder_text="Masukkan password",
             fg_color=C_BTN, text_color=C_ACCENT,
-            border_color=C_BORDER, font=("Consolas", 13),
-            height=40, width=320, show="●")
+            border_color=C_BORDER, font=("Consolas", 14),
+            height=40, width=320, show="●", justify="center")
         self.entry_pass.pack(pady=(2, 6), padx=40)
         self.entry_pass.bind("<Return>", lambda e: self._login())
 
         # Status error
         self.lbl_status = ctk.CTkLabel(outer, text="",
-                                        font=FONT_LABEL, text_color=C_RED)
+                                        font=("Consolas", 11), text_color=C_RED)
         self.lbl_status.pack(pady=(0, 8))
 
         # Tombol Masuk
         self.btn_login = ctk.CTkButton(
             outer, text="🔓  MASUK", width=280, height=44,
             fg_color=C_ACCENT2, hover_color=C_ACCENT,
-            font=("Russo One", 12, "bold"), text_color="white",
+            font=("Russo One", 13, "bold"), text_color="white",
             command=self._login)
         self.btn_login.pack(pady=(0, 4), padx=30)
 
         ctk.CTkLabel(outer,
                      text="Hubungi administrator untuk akses.",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 4))
+                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 4))
 
         # Tombol Daftar
         ctk.CTkLabel(outer, text="Rental baru? Belum punya akun?",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(8, 4))
+                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(8, 4))
         ctk.CTkButton(
             outer, text="📝  DAFTAR RENTAL BARU", width=280, height=36,
             fg_color="transparent", hover_color=C_BTN,
             border_width=1, border_color=C_ACCENT,
-            font=("Russo One", 10, "bold"), text_color=C_ACCENT,
+            font=("Russo One", 11, "bold"), text_color=C_ACCENT,
             command=self._show_daftar_view).pack(pady=(0, 6), padx=30)
 
         # Tombol Lupa Password
@@ -1384,13 +1430,12 @@ class LoginPage(ctk.CTkFrame):
             outer, text="🔓  Lupa Password?", width=280, height=34,
             fg_color="transparent", hover_color=C_BTN,
             border_width=1, border_color=C_RED,
-            font=("Russo One", 9, "bold"), text_color=C_RED,
+            font=("Russo One", 10, "bold"), text_color=C_RED,
             command=self._show_lupa_password_view).pack(pady=(0, 10), padx=30)
 
         # Version di login page
         ctk.CTkLabel(outer, text=f"v{APP_VERSION}",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
-
+                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 6))
 
     # ══════════════════════════════════════════════════════════════════════════
     #  VIEW 2 — DAFTAR RENTAL BARU
@@ -2187,12 +2232,23 @@ class LoginPage(ctk.CTkFrame):
                 text_color=C_YELLOW)
             return
 
-        users     = ConfigManager.get("users", self.DEFAULT_USERS)
-        user_data = users.get(username)
+        users = ConfigManager.get("users", self.DEFAULT_USERS)
+        if not isinstance(users, dict):
+            users = {}
+        user_data = users.get(username) if isinstance(users, dict) else None
+        password_hash = user_data.get("password") if isinstance(user_data, dict) else ""
 
         # Gunakan verify_password() yang support bcrypt dan legacy SHA256
-        if user_data and verify_password(password, user_data["password"]):
+        if user_data and verify_password(password, password_hash):
             self._attempt = 0
+            if not password_hash.startswith("bcrypt$"):
+                users[username]["password"] = hash_password(password)
+                cfg = ConfigManager.load()
+                cfg_users = cfg.get("users", {})
+                if isinstance(cfg_users, dict) and username in cfg_users:
+                    cfg_users[username]["password"] = users[username]["password"]
+                    cfg["users"] = cfg_users
+                    ConfigManager.save(cfg)
             AuditLogger.log(
                 action="login_success",
                 username=username,
@@ -3288,7 +3344,7 @@ class KartuTV(ctk.CTkFrame):
         self.lbl_timer.pack(pady=(2, 2))
  
         # Estimasi biaya berjalan (khusus Main Bebas)
-        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_GREEN)
+        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_YELLOW)
         self.lbl_estimasi.pack()
  
         # Button row
@@ -3573,7 +3629,8 @@ class KartuTV(ctk.CTkFrame):
             self.paket_harga_tetap = 0
             self.paket_aktif = paket_nm
             self.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
-            self.lbl_timer.configure(text_color=C_GREEN)
+            self.lbl_timer.configure(text_color=C_YELLOW)
+            self.lbl_estimasi.configure(text=f"Total berjalan: {fmt_rp(self.biaya_pesanan)}", text_color=C_YELLOW)
         else:
             self.is_bebas    = False
             self.paket_aktif = paket_nm
@@ -3707,12 +3764,16 @@ class KartuTV(ctk.CTkFrame):
         total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds())
         h, rem = divmod(total_detik, 3600)
         m, s   = divmod(rem, 60)
-        self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}", text_color=C_GREEN)
+        self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}", text_color=C_YELLOW)
 
         tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
         menit_berjalan = total_detik / 60
-        estimasi = tarif_menit * menit_berjalan
-        self.lbl_estimasi.configure(text=f"≈ {fmt_rp(estimasi)}  (berjalan)")
+        biaya_waktu_berjalan = tarif_menit * menit_berjalan
+        total_berjalan = biaya_waktu_berjalan + self.biaya_pesanan
+        self.lbl_estimasi.configure(
+            text=f"Total berjalan: {fmt_rp(total_berjalan)}",
+            text_color=C_YELLOW
+        )
 
         self._timer_job = self.after(1000, self._tick_bebas)
 
@@ -3860,7 +3921,8 @@ class KartuTV(ctk.CTkFrame):
             target.sisa_waktu  = 0
             target.waktu_mulai = datetime.now()
             target.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
-            target.lbl_timer.configure(text_color=C_GREEN)
+            target.lbl_timer.configure(text_color=C_YELLOW)
+            target.lbl_estimasi.configure(text=f"Total berjalan: {fmt_rp(target.biaya_pesanan)}", text_color=C_YELLOW)
         else:
             target.sisa_waktu  = self.sisa_waktu
             target.waktu_mulai = datetime.now()
@@ -3965,7 +4027,7 @@ class KartuWarnet(ctk.CTkFrame):
                                        font=("Russo One", 20, "bold"), text_color=C_ACCENT2)
         self.lbl_timer.pack(pady=(2, 2))
 
-        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_GREEN)
+        self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_YELLOW)
         self.lbl_estimasi.pack()
 
         r1 = ctk.CTkFrame(self, fg_color="transparent")
@@ -4181,7 +4243,8 @@ class KartuWarnet(ctk.CTkFrame):
             self.paket_harga_tetap = 0
             self.paket_aktif = paket_nm
             self.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
-            self.lbl_timer.configure(text_color=C_GREEN)
+            self.lbl_timer.configure(text_color=C_YELLOW)
+            self.lbl_estimasi.configure(text=f"Total berjalan: {fmt_rp(self.biaya_pesanan)}", text_color=C_YELLOW)
         else:
             self.is_bebas = False
             self.paket_aktif = paket_nm
@@ -4288,11 +4351,15 @@ class KartuWarnet(ctk.CTkFrame):
         total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds())
         h, rem = divmod(total_detik, 3600)
         m, s = divmod(rem, 60)
-        self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}", text_color=C_GREEN)
+        self.lbl_timer.configure(text=f"{h:02d}:{m:02d}:{s:02d}", text_color=C_YELLOW)
         tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
         menit_berjalan = total_detik / 60
-        estimasi = tarif_menit * menit_berjalan
-        self.lbl_estimasi.configure(text=f"≈ {fmt_rp(estimasi)}  (berjalan)")
+        biaya_waktu_berjalan = tarif_menit * menit_berjalan
+        total_berjalan = biaya_waktu_berjalan + self.biaya_pesanan
+        self.lbl_estimasi.configure(
+            text=f"Total berjalan: {fmt_rp(total_berjalan)}",
+            text_color=C_YELLOW
+        )
         self._timer_job = self.after(1000, self._tick_bebas)
 
     def _total_menit_terpakai(self):
@@ -4433,7 +4500,8 @@ class KartuWarnet(ctk.CTkFrame):
             target.sisa_waktu = 0
             target.waktu_mulai = datetime.now()
             target.lbl_paket.configure(text="Main Bebas 🕹️ (berjalan)", text_color=C_GREEN)
-            target.lbl_timer.configure(text_color=C_GREEN)
+            target.lbl_timer.configure(text_color=C_YELLOW)
+            target.lbl_estimasi.configure(text=f"Total berjalan: {fmt_rp(target.biaya_pesanan)}", text_color=C_YELLOW)
         else:
             target.sisa_waktu = self.sisa_waktu
             target.waktu_mulai = datetime.now()
@@ -4462,7 +4530,7 @@ class AutoRentApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("RR BILLING PRO — Billing TV System")
-        self.geometry("520x620")
+        self.geometry("560x760")
         self.resizable(False, False)
         self.configure(fg_color=C_BG)
 
@@ -4485,7 +4553,7 @@ class AutoRentApp(ctk.CTk):
         self.menu_makanan = cfg.get("menu_makanan",  dict(DEFAULT_MENU_MAKANAN))
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
         self.socket_warnet_config = cfg.get("socket_warnet", {})
-        self.current_tab  = "dashboard"  # Track tab yang aktif
+        self.current_tab  = None
         
         # ── Start Warnet Socket Server ──────────────────────────────────────────
         self.warnet_server = WarnetSocketServer(app=self)
@@ -4605,7 +4673,7 @@ class AutoRentApp(ctk.CTk):
 
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
-        self.geometry("520x620")
+        self.geometry("560x760")
         self.resizable(False, False)
         for w in self.winfo_children():
             w.destroy()
@@ -4683,6 +4751,9 @@ class AutoRentApp(ctk.CTk):
         self._show_tab("dashboard")
 
     def _build_sidebar(self):
+        self._sidebar_text_widgets = []
+
+        # Toggle button
         logo_f = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         logo_f.pack(pady=(22, 6))
 
@@ -4700,21 +4771,21 @@ class AutoRentApp(ctk.CTk):
         lbl_sb_logo.place(relx=0.5, rely=0.5, anchor="center")
 
         ctk.CTkLabel(logo_f, text="RR BILLING",
-                     font=("Russo One", 11, "bold"),
+                     font=("Russo One", 13, "bold"),
                      text_color=C_ACCENT, justify="center").pack(pady=(6, 0))
         ctk.CTkLabel(logo_f, text="PRO",
-                     font=("Russo One", 9, "bold"),
+                     font=("Russo One", 11, "bold"),
                      text_color=C_ACCENT2).pack()
 
         status = LicenseManager.get_status(current_user=self.current_user or "")
         lic_color = C_GREEN if status["status"] == "active" else C_YELLOW if status["status"] == "trial" else C_RED
         self.lbl_sidebar_license_status = ctk.CTkLabel(self.sidebar, text=status["pesan"],
-                                                       font=FONT_SMALL, text_color=lic_color,
+                                                       font=("Courier New", 10), text_color=lic_color,
                                                        wraplength=165)
         self.lbl_sidebar_license_status.pack(pady=(2, 10))
 
         ctk.CTkLabel(self.sidebar, text=f"👤 {self.current_user} [{self.current_role}]",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 10))
+                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 10))
 
         sep = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
         sep.pack(fill="x", padx=10, pady=4)
@@ -4722,52 +4793,53 @@ class AutoRentApp(ctk.CTk):
         nav_items = [
             ("📺", "Dashboard TV",    "dashboard"),
             ("🖥️", "Dashboard Warnet", "warnet"),
-            ("⚙️", "Kontrol Harga",   "harga"),
-            ("📊", "Riwayat",         "riwayat"),
-            ("📡", "Koneksi WiFi",    "wifi"),
-            ("🔑", "Aktivasi",        "aktivasi"),
+            ("💰", "Kontrol Harga",   "harga"),
+            ("📜", "Riwayat",         "riwayat"),
+            ("📶", "Koneksi WiFi",    "wifi"),
+            ("🔓", "Aktivasi",        "aktivasi"),
             ("👤", "Profil",          "profil"),
             ("📋", "Log Aplikasi",    "log_aplikasi"),
         ]
         self.nav_btns = {}
         for ico, label, key in nav_items:
+            row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=2)
+            ctk.CTkLabel(row, text=ico, font=("Segoe UI Emoji", 14),
+                         width=28, anchor="center").pack(side="left", padx=(2, 0))
             btn = ctk.CTkButton(
-                self.sidebar, text=f"  {ico}  {label}", anchor="w", height=44,
-                font=("Russo One", 10, "bold"),
+                row, text=f"  {label}", anchor="w", height=40,
+                font=("Russo One", 12, "bold"),
                 fg_color="transparent", hover_color="#1E1E4A",
                 text_color=C_TEXT, corner_radius=8,
                 command=lambda k=key: self._show_tab(k))
-            btn.pack(fill="x", padx=10, pady=3)
+            btn.pack(side="left", fill="x", expand=True, padx=(0, 2))
             self.nav_btns[key] = btn
-
-        # Tambahkan tab Users hanya untuk admin - DISABLED
-        # if self.current_role == "admin":
-        #     btn = ctk.CTkButton(
-        #         self.sidebar, text=f"  👥  Users", anchor="w", height=44,
-        #         font=("Russo One", 10, "bold"),
-        #         fg_color="transparent", hover_color="#1E1E4A",
-        #         text_color=C_TEXT, corner_radius=8,
-        #         command=lambda k="users": self._show_tab(k))
-        #     btn.pack(fill="x", padx=10, pady=3)
-        #     self.nav_btns["users"] = btn
 
         sep2 = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
         sep2.pack(fill="x", padx=10, pady=(10, 4))
-        ctk.CTkButton(self.sidebar, text="  🚪  Keluar", anchor="w", height=36,
-                      font=("Russo One", 9, "bold"),
+
+        row_keluar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        row_keluar.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(row_keluar, text="🚪", font=("Segoe UI Emoji", 14),
+                     width=28, anchor="center").pack(side="left", padx=(2, 0))
+        ctk.CTkButton(row_keluar, text="  Keluar", anchor="w", height=36,
+                      font=("Russo One", 11, "bold"),
                       fg_color="transparent", hover_color="#3A0000",
                       text_color=C_RED, corner_radius=8,
-                      command=self._logout).pack(fill="x", padx=10, pady=3)
+                      command=self._logout).pack(side="left", fill="x", expand=True, padx=(0, 2))
 
-        # Tombol update via Git
-        ctk.CTkButton(self.sidebar, text="  📡  Update via Git", anchor="w", height=36,
-                      font=("Russo One", 9, "bold"),
+        row_update = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        row_update.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(row_update, text="🔄", font=("Segoe UI Emoji", 14),
+                     width=28, anchor="center").pack(side="left", padx=(2, 0))
+        ctk.CTkButton(row_update, text="  Update via Git", anchor="w", height=36,
+                      font=("Russo One", 11, "bold"),
                       fg_color="transparent", hover_color="#1A4A1A",
                       text_color="#00DD88", corner_radius=8,
-                      command=self._on_git_update).pack(fill="x", padx=10, pady=3)
+                      command=self._on_git_update).pack(side="left", fill="x", expand=True, padx=(0, 2))
 
         ctk.CTkLabel(self.sidebar, text=f"v{APP_VERSION} — 2026",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(side="bottom", pady=12)
+                     font=("Courier New", 10), text_color=C_MUTED).pack(side="bottom", pady=12)
 
     def _logout(self):
         if messagebox.askyesno("Keluar", "Yakin ingin keluar / ganti akun?"):
@@ -4881,17 +4953,15 @@ class AutoRentApp(ctk.CTk):
             self.after(0, lambda: messagebox.showerror("❌ Error", f"Update error:\n{str(e)}"))
 
     def _show_tab(self, key):
-        # Cek lisensi setiap kali user switch tab
         status = LicenseManager.get_status(current_user=self.current_user or "")
         if status["status"] == "expired" and key != "aktivasi":
-            # Jangan biarkan user switch ke tab lain selain aktivasi
             messagebox.showwarning(
                 "⚠ AKSES TERBATAS",
                 "Lisensi Anda telah habis. Silakan aktifkan lisensi untuk mengakses fitur lain.")
             self._show_tab("aktivasi")
             return
         
-        self.current_tab = key  # Track tab yang aktif
+        self.current_tab = key
         for k, f in self.frames.items():
             f.pack_forget()
         self.frames[key].pack(fill="both", expand=True)
@@ -4990,7 +5060,7 @@ class AutoRentApp(ctk.CTk):
         f = self.frames["warnet"]
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="💻  DASHBOARD WARnet",
+        ctk.CTkLabel(hdr, text="💻  DASHBOARD WARNET",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
         self.lbl_total_warnet = ctk.CTkLabel(hdr, text="Total Kursi: 0",
                                              font=FONT_BODY, text_color=C_MUTED)
@@ -6162,7 +6232,7 @@ class AutoRentApp(ctk.CTk):
 
         col_widths = [20, 12, 14, 14, 40, 16]
         for i, w in enumerate(col_widths, 1):
-            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
 
         last_row = len(self.riwayat_transaksi) + 4
         ws.merge_cells(f"A{last_row}:E{last_row}")
@@ -6500,7 +6570,7 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkLabel(bayar_card, text="💰  PAKET BERLANGGANAN",
                      font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=20, pady=(16, 4))
         ctk.CTkLabel(bayar_card, text="Klik 'Bayar Sekarang' untuk langsung diarahkan ke WhatsApp Admin",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(0, 8))
+                     font=("Courier New", 12), text_color=C_MUTED).pack(anchor="w", padx=20, pady=(0, 8))
 
         paket_langganan = [
             ("Bulanan",   "Rp 99.000 / bulan",  "Semua fitur, 1 lokasi", C_ACCENT,  "💎"),
@@ -6516,11 +6586,11 @@ class AutoRentApp(ctk.CTk):
                                    border_width=1, border_color=color)
             card_p.pack(side="left", fill="both", expand=True, padx=8)
             ctk.CTkLabel(card_p, text=ico, font=("Arial", 28)).pack(pady=(16, 4))
-            ctk.CTkLabel(card_p, text=nama, font=("Russo One", 12, "bold"),
+            ctk.CTkLabel(card_p, text=nama, font=("Russo One", 13, "bold"),
                          text_color=color).pack()
-            ctk.CTkLabel(card_p, text=harga, font=("Consolas", 11, "bold"),
+            ctk.CTkLabel(card_p, text=harga, font=("Consolas", 12, "bold"),
                          text_color=C_TEXT).pack(pady=4)
-            ctk.CTkLabel(card_p, text=deskripsi, font=FONT_SMALL,
+            ctk.CTkLabel(card_p, text=deskripsi, font=("Courier New", 12),
                          text_color=C_MUTED, wraplength=150).pack(pady=(0, 8))
             ctk.CTkButton(card_p, text="💳 Bayar Sekarang", width=130, height=32,
                           fg_color=color, hover_color=C_ACCENT2,
@@ -6534,17 +6604,17 @@ class AutoRentApp(ctk.CTk):
                      font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=20, pady=(16, 8))
 
         metode = [
-            ("🏦 Transfer Bank BCA",     "1234567890  a/n Rahmadani"),
-            ("🏦 Transfer Bank Mandiri",  "0987654321  a/n Rahmadani"),
-            ("💚 GoPay / OVO / Dana",     "0812-7064-7744  (scan QR di bawah)"),
+            ("🏦 Transfer Bank BCA",      "6145375553  a/n Rahmadani"),
+            ("🏦 Transfer Bank BRI",      "0256 0109 2349 500  a/n Rahmadani"),
+            ("💚 GoPay / OVO / Dana",     "0812-7064-7744 a/n Rahmadani (scan QR di bawah)"),
             ("🟦 QRIS",                   "Tersedia di kantor / hubungi admin"),
         ]
         for metode_nm, detail in metode:
             row_m = ctk.CTkFrame(pay_card, fg_color=C_CARD, corner_radius=8)
             row_m.pack(fill="x", padx=20, pady=4)
-            ctk.CTkLabel(row_m, text=metode_nm, font=("Consolas", 10, "bold"),
+            ctk.CTkLabel(row_m, text=metode_nm, font=("Consolas", 12, "bold"),
                          text_color=C_TEXT, width=220, anchor="w").pack(side="left", padx=14, pady=10)
-            ctk.CTkLabel(row_m, text=detail, font=FONT_SMALL,
+            ctk.CTkLabel(row_m, text=detail, font=("Courier New", 12),
                          text_color=C_MUTED).pack(side="left", padx=8)
 
         ctk.CTkLabel(pay_card,
@@ -6579,36 +6649,38 @@ class AutoRentApp(ctk.CTk):
         webbrowser.open(url)
 
     def _start_update_checker(self, interval_hours: int = 6):
-        """Background loop: check manifest URL every interval_hours and notify user.
-        Uses scripts.check_update.check_for_update which will launch updater helper if manifest valid.
-        """
+        """Background loop: cek update via manifest URL atau Git setiap interval_hours."""
         manifest = ConfigManager.get('update_manifest_url')
-        if not manifest:
-            return
         pubkey = ConfigManager.get('update_pubkey_path') or os.path.join(os.path.dirname(__file__), 'update_pubkey.pem')
         app_exe = os.path.abspath(__file__)
-        try:
-            from scripts import check_update
-        except Exception:
-            return
-        # Run loop
+        # Delay awal agar UI tidak kena spam saat startup
+        time.sleep(5)
         while True:
             try:
-                # Run in thread to avoid blocking UI; check_for_update itself may spawn updater
-                try:
-                    msg = check_update.check_for_update(manifest, pubkey, APP_VERSION, app_exe)
-                    if msg and "Versi terbaru terpasang" not in msg:
-                        # Notify on main thread
-                        try:
+                if manifest and manifest.strip():
+                    # Cek via manifest URL
+                    try:
+                        from scripts import check_update
+                        msg = check_update.check_for_update(manifest, pubkey, APP_VERSION, app_exe)
+                        if msg and "Versi terbaru terpasang" not in msg:
                             self.after(0, lambda m=msg: messagebox.showinfo("Pembaruan Tersedia", m))
-                        except Exception:
-                            pass
-                except Exception:
-                    # Non-fatal; ignore for now
-                    pass
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: cek via Git
+                    try:
+                        from scripts.git_updater import GitUpdater
+                        repo_path = os.path.dirname(os.path.abspath(__file__))
+                        updater = GitUpdater(repo_path, remote="origin", branch="master")
+                        has_update, msg, info = updater.check_for_updates()
+                        if has_update:
+                            self.after(0, lambda m=msg: messagebox.showinfo(
+                                "📡 Update Tersedia",
+                                f"{m}\n\nKlik 'Update via Git' di sidebar untuk mengupdate."))
+                    except Exception:
+                        pass
             except Exception:
                 pass
-            # Sleep for interval
             try:
                 time.sleep(interval_hours * 3600)
             except Exception:
@@ -6618,14 +6690,11 @@ class AutoRentApp(ctk.CTk):
         """Restart aplikasi dengan benar."""
         try:
             if sys.platform == "win32":
-                # Windows: gunakan python.exe atau python3.exe + script path
-                python_exe = sys.executable  # Path ke python.exe
-                script_path = os.path.abspath(__file__)
-                subprocess.Popen(
-                    f'cmd /c start "" "{python_exe}" "{script_path}"',
-                    shell=True,
-                    close_fds=True
-                )
+                if getattr(sys, "frozen", False):
+                    restart_cmd = [sys.executable]
+                else:
+                    restart_cmd = [sys.executable, os.path.abspath(__file__)]
+                subprocess.Popen(restart_cmd, close_fds=True, **subprocess_no_window_kwargs())
             else:
                 # Unix/Linux/Mac
                 python_exe = sys.executable
@@ -6819,14 +6888,10 @@ class AutoRentApp(ctk.CTk):
                               command=self._refresh_log_view).pack(side="left", padx=8)
         
         # Main log viewer
-        content = ctk.CTkScrollableFrame(f, fg_color=C_BG)
-        content.pack(fill="both", expand=True, padx=6, pady=6)
-        
-        # Log textbox
-        self.log_textbox = ctk.CTkTextbox(content, fg_color=C_BTN, text_color=C_TEXT,
+        self.log_textbox = ctk.CTkTextbox(f, fg_color=C_BTN, text_color=C_TEXT,
                                           border_color=C_BORDER, border_width=1,
                                           font=("Courier New", 9))
-        self.log_textbox.pack(fill="both", expand=True)
+        self.log_textbox.pack(fill="both", expand=True, padx=6, pady=6)
         self.log_textbox.configure(state="disabled")
         
         # Load logs

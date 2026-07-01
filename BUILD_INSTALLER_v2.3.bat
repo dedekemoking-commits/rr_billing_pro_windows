@@ -26,12 +26,14 @@ if not exist "%INNO_PATH%" (
 echo ✓ Found Inno Setup: %INNO_PATH%
 echo.
 
+set "ISS_FILE=inno_build\RR_BILLING_PRO_V2.3.1.iss"
+
 REM Check if .iss file exists
-if not exist "RR_BILLING_PRO_v2.3.iss" (
-    echo ✗ FATAL: RR_BILLING_PRO_v2.3.iss not found
+if not exist "%ISS_FILE%" (
+    echo ✗ FATAL: %ISS_FILE% not found
     exit /b 1
 )
-echo ✓ Found Inno Setup script: RR_BILLING_PRO_v2.3.iss
+echo ✓ Found Inno Setup script: %ISS_FILE%
 echo.
 
 REM Create Output directory if not exists
@@ -43,7 +45,7 @@ echo.
 echo Compiling installer... (this may take a minute)
 echo.
 
-"%INNO_PATH%" "RR_BILLING_PRO_v2.3.iss"
+"%INNO_PATH%" "%ISS_FILE%"
 
 if %errorlevel% neq 0 (
     echo.

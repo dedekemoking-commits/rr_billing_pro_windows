@@ -1,0 +1,35 @@
+# Config files (local settings - jangan di-track)
+rr_billing_config.json
+rr_billing_license.json
+rr_billing_audit.jsonl
+rr_keygen_log.json
+warnet_client_session.json
+update.log
+update_pubkey.pem
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.exe
+Output/
+
+# Installer artifacts
+inno_build/
+installer/
+*.iss
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

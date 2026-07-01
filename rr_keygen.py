@@ -20,6 +20,7 @@ Flow:
 import os
 import json
 import hashlib
+import sys
 import bcrypt  # ← Password hashing with salt
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -55,8 +56,15 @@ FONT_SMALL = ("Courier New", 9)
 FONT_LABEL = ("Consolas", 10)
 FONT_MONO  = ("Consolas", 13, "bold")
 
-CONFIG_FILE  = "rr_billing_config.json"
-KEYGEN_LOG   = "rr_keygen_log.json"
+def get_app_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_BASE_DIR = get_app_base_dir()
+CONFIG_FILE  = os.path.join(APP_BASE_DIR, "rr_billing_config.json")
+KEYGEN_LOG   = os.path.join(APP_BASE_DIR, "rr_keygen_log.json")
 
 # ─── PASSWORD SECURITY HELPERS ────────────────────────────────────────────────
 def hash_dev_password(password: str) -> str:

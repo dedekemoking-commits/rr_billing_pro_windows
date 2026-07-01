@@ -5,6 +5,9 @@ color 0B
 :: ── Jalankan dari folder yang sama ───────────────────────────────────────────
 cd /d "%~dp0"
 
+:: ── Pastikan ADB & Git di PATH ──────────────────────────────────────────────
+set "PATH=%PATH%;%LOCALAPPDATA%\Android\platform-tools;C:\Program Files\Git\cmd;C:\Program Files\Git\bin"
+
 where python >nul 2>&1
 if %errorlevel% neq 0 (
     set PYTHON=python3

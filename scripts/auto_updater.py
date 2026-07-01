@@ -19,6 +19,22 @@ from pathlib import Path
 from typing import Optional, Callable, Tuple
 
 
+def _subprocess_no_window_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    kwargs = {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    startup_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startup_cls is not None:
+        startupinfo = startup_cls()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
 class AutoUpdater:
     """Auto-update manager untuk aplikasi RR Billing Pro."""
     
@@ -211,12 +227,15 @@ class AutoUpdater:
             
             # On Windows
             if sys.platform == 'win32':
-                # Use cmd to restart
-                cmd = f'cd /d "{self.app_dir}" && timeout /t 2 /nobreak && python main.py'
-                subprocess.Popen(cmd, shell=True, cwd=self.app_dir)
+                subprocess.Popen(
+                    [sys.executable, main_py],
+                    cwd=self.app_dir,
+                    close_fds=True,
+                    **_subprocess_no_window_kwargs()
+                )
             else:
                 # On Unix/Linux
-                subprocess.Popen([sys.executable, main_py], cwd=self.app_dir)
+                subprocess.Popen([sys.executable, main_py], cwd=self.app_dir, close_fds=True)
             
             self._log_update("✓ Restart command sent")
             return True

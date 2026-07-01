@@ -5,3 +5,5 @@ pywin32
 pytest
 bcrypt
 pillow
+cryptography
+PyJWT

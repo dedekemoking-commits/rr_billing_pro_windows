@@ -8,7 +8,7 @@
 #define MyAppVersion "2.3.1"
 #define MyAppPublisher "RR CCTV, Inc."
 #define MyAppURL "https://www.rrcctv.online"
-#define MyAppExeName "main.exe"
+#define MyAppExeName "RRBILLINGPRO.exe"
 
 [Setup]
 AppId={{A4605966-F3CC-4DA2-9E3D-CD66177081F6}
@@ -45,7 +45,7 @@ Name: "sendto"; Description: "Add to Send To menu"; GroupDescription: "{cm:Addit
 
 [Files]
 ; ── Main Application ────────────────────────────────────────────────────────
-Source: "C:\BillingPSkuDesktop\inno_build\app\main.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\BillingPSkuDesktop\inno_build\app\RRBILLINGPRO.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Essential Assets ────────────────────────────────────────────────────────
 Source: "C:\BillingPSkuDesktop\inno_build\app\logo.png"; DestDir: "{app}"; Flags: ignoreversion

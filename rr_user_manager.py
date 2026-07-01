@@ -16,6 +16,7 @@ Fitur:
 import os
 import json
 import hashlib
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 import customtkinter as ctk
@@ -47,8 +48,15 @@ FONT_BODY  = ("Courier New", 10)
 FONT_SMALL = ("Courier New", 9)
 FONT_LABEL = ("Consolas", 10)
 
-CONFIG_FILE = "rr_billing_config.json"
-KEYGEN_LOG  = "rr_keygen_log.json"
+def get_app_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_BASE_DIR = get_app_base_dir()
+CONFIG_FILE = os.path.join(APP_BASE_DIR, "rr_billing_config.json")
+KEYGEN_LOG  = os.path.join(APP_BASE_DIR, "rr_keygen_log.json")
 
 _DEV_PASSWORD_HASH = hashlib.sha256("rrcctv2026".encode()).hexdigest()
 

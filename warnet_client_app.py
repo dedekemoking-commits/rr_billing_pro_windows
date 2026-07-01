@@ -224,7 +224,7 @@ class WarnetClientApp(ctk.CTk):
         ctk.CTkLabel(self.config_panel, text="Password").grid(row=1, column=2, padx=6, pady=5, sticky="w")
         self.ent_password = ctk.CTkEntry(self.config_panel, show="*")
         self.ent_password.grid(row=1, column=3, padx=6, pady=5, sticky="ew")
-        self.ent_password.insert(0, "test123")
+        self.ent_password.insert(0, "admin123")
 
         ctk.CTkLabel(self.config_panel, text="IP Nyata PC").grid(row=2, column=0, padx=6, pady=5, sticky="w")
         self.lbl_real_ip = ctk.CTkLabel(self.config_panel, text="-", anchor="w")

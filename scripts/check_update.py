@@ -23,6 +23,22 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 
+def _subprocess_no_window_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    kwargs = {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    startup_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startup_cls is not None:
+        startupinfo = startup_cls()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
 def _download_url(url: str, out_path: str):
     try:
         with urllib.request.urlopen(url, timeout=30) as r:
@@ -106,5 +122,9 @@ def check_for_update(manifest_url: str, public_key_path: str, current_version: s
 
     updater = os.path.join(os.path.dirname(__file__), 'updater_helper.py')
     # run updater as separate process: python updater_helper.py <old_exe> <new_file>
-    proc = subprocess.Popen([os.sys.executable, updater, app_exe_path, asset_path], close_fds=True)
+    proc = subprocess.Popen(
+        [os.sys.executable, updater, app_exe_path, asset_path],
+        close_fds=True,
+        **_subprocess_no_window_kwargs()
+    )
     return f"Update {version} terunduh. Proses updater dimulai (PID {proc.pid})."

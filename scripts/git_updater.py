@@ -11,6 +11,22 @@ from typing import Tuple, Optional
 from datetime import datetime
 
 
+def _subprocess_no_window_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    kwargs = {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    startup_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startup_cls is not None:
+        startupinfo = startup_cls()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
 class GitUpdater:
     """Manager untuk update aplikasi via Git."""
     
@@ -43,7 +59,8 @@ class GitUpdater:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                **_subprocess_no_window_kwargs()
             )
             if result.returncode == 0:
                 return True, result.stdout.strip()
@@ -177,8 +194,8 @@ class GitUpdater:
             return False, msg
         
         # Stash uncommitted changes (local changes dibackup)
-        success, stash_msg = self._run_git_command(["git", "stash"])
-        if not success:
+        stash_success, stash_msg = self._run_git_command(["git", "stash"])
+        if not stash_success:
             self._log(f"Stash warning: {stash_msg}")
         
         # Pull latest
@@ -186,10 +203,14 @@ class GitUpdater:
             ["git", "pull", self.remote, self.branch]
         )
         
+        # Always restore stash setelah pull (sukses atau gagal)
+        if stash_success:
+            pop_success, pop_msg = self._run_git_command(["git", "stash", "pop"])
+            if not pop_success:
+                self._log(f"Stash pop warning: {pop_msg}")
+        
         if not success:
             self._log(f"Pull failed: {pull_msg}")
-            # Restore stash jika ada
-            self._run_git_command(["git", "stash", "pop"])
             return False, f"Pull gagal: {pull_msg}"
         
         self._log("Pull successful")
@@ -229,12 +250,7 @@ class GitUpdater:
                 
                 # Restart
                 if sys.platform == "win32":
-                    # Windows: gunakan START command
-                    subprocess.Popen(
-                        f'cmd /c start "" "{app_exe_path}"',
-                        shell=True,
-                        close_fds=True
-                    )
+                    subprocess.Popen([app_exe_path], close_fds=True, **_subprocess_no_window_kwargs())
                 else:
                     # Unix/Linux/Mac
                     subprocess.Popen(
