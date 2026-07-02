@@ -71,3 +71,5 @@
 {"timestamp": "2026-07-02T03:35:30.655945", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-07-02T03:39:20.226817", "action": "system_update", "username": "rrgaming", "status": "success", "details": {"type": "git", "message": "Already up to date."}}
 {"timestamp": "2026-07-02T03:39:33.371097", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-03T00:02:21.002195", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-03T00:04:13.051967", "action": "registration_pending", "username": "dedek", "status": "pending", "details": {"email": "dedekemoking10@gmail.com"}}

@@ -16,6 +16,7 @@ import hashlib
 import bcrypt  # ← Password hashing with salt
 import jwt  # ← JWT tokens
 import re
+import sys
 import webbrowser
 import smtplib
 import ssl
@@ -506,8 +507,16 @@ FONT_SMALL  = ("Courier New", 8)
 FONT_LABEL  = ("Consolas",  9)
 
 # ─── FILE KONFIGURASI ─────────────────────────────────────────────────────────
-CONFIG_FILE  = "rr_billing_config.json"
-LICENSE_FILE = "rr_billing_license.json"
+def get_app_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+def app_path(filename: str) -> str:
+    return os.path.join(get_app_base_dir(), filename)
+
+CONFIG_FILE  = app_path("rr_billing_config.json")
+LICENSE_FILE = app_path("rr_billing_license.json")
 
 # ─── DATA HARGA (default) ─────────────────────────────────────────────────────
 # Harga dikelompokkan per "Grup Tarif" (mis. PS3, PS4, Room VIP),
@@ -586,9 +595,16 @@ APP_VERSION = "2.3.1"
 #  HELPER LOGO
 # ═══════════════════════════════════════════════════════════════════════════════
 def _get_logo_path():
-    """Cari logo.png di folder yang sama dengan main.py (atau script yang berjalan)."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, "logo.png")
+    """Cari logo.png di folder aplikasi; fallback ke folder bundle PyInstaller."""
+    app_logo = app_path("logo.png")
+    if os.path.exists(app_logo):
+        return app_logo
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        bundled_logo = os.path.join(meipass, "logo.png")
+        if os.path.exists(bundled_logo):
+            return bundled_logo
+    return app_logo
 
 
 def load_ctk_image(size=(54, 54)):
@@ -724,15 +740,53 @@ class ConfigManager:
         ConfigManager.save(d)
 
 
+DEFAULT_EMAIL_SETTINGS = {
+    "smtp_server": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "from_address": "",
+    "use_tls": True,
+}
+
+
+def _normalize_email_settings(settings: dict | None) -> dict:
+    merged = dict(DEFAULT_EMAIL_SETTINGS)
+    if isinstance(settings, dict):
+        merged.update(settings)
+    try:
+        merged["smtp_port"] = int(merged.get("smtp_port", 587))
+    except Exception:
+        merged["smtp_port"] = 587
+    use_tls = merged.get("use_tls", True)
+    if isinstance(use_tls, str):
+        merged["use_tls"] = use_tls.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        merged["use_tls"] = bool(use_tls)
+    for key in ("smtp_server", "smtp_username", "smtp_password", "from_address"):
+        if merged.get(key) is None:
+            merged[key] = ""
+    return merged
+
+
+def _set_email_settings(settings: dict) -> None:
+    cfg = ConfigManager.load()
+    cfg["email_settings"] = _normalize_email_settings(settings)
+    ConfigManager.save(cfg)
+
+
 def _get_email_settings():
     cfg = ConfigManager.load()
-    return cfg.get("email_settings", {})
+    settings = cfg.get("email_settings")
+    if not isinstance(settings, dict):
+        settings = cfg.get("smtp_settings", {})
+    return _normalize_email_settings(settings)
 
 
 def _email_configured() -> bool:
     settings = _get_email_settings()
     required = ["smtp_server", "smtp_port", "smtp_username", "smtp_password", "from_address"]
-    return all(settings.get(k) for k in required)
+    return all(str(settings.get(k, "")).strip() for k in required)
 
 
 def _send_verification_email(to_email: str, username: str, code: str) -> tuple:
@@ -775,7 +829,7 @@ def _send_verification_email(to_email: str, username: str, code: str) -> tuple:
 
 
 # ─── AUDIT LOGGER ───────────────────────────────────────────────────────────
-AUDIT_FILE = "rr_billing_audit.jsonl"
+AUDIT_FILE = app_path("rr_billing_audit.jsonl")
 
 class AuditLogger:
     @staticmethod
@@ -1515,7 +1569,7 @@ class LoginPage(ctk.CTkFrame):
 
         if not _email_configured():
             self.lbl_daftar_status.configure(
-                text="⚠  Email verification belum tersedia karena SMTP belum dikonfigurasi.",
+                text="⚠  Verifikasi email belum tersedia karena SMTP belum dikonfigurasi.",
                 text_color=C_YELLOW)
             return
 
@@ -1909,10 +1963,10 @@ class LoginPage(ctk.CTkFrame):
 
     def _send_forgot_password_code(self, username: str, email: str, code: str):
         """Send verification code via email."""
-        smtp_settings = ConfigManager.get("email_settings", {})
-        if not all([smtp_settings.get('smtp_server'), smtp_settings.get('smtp_username'), smtp_settings.get('smtp_password')]):
+        smtp_settings = _get_email_settings()
+        if not _email_configured():
             self.after(0, lambda: self.lp_lbl_status.configure(
-                text="⚠  Email SMTP belum dikonfigurasi.",
+                text="⚠  SMTP belum dikonfigurasi.",
                 text_color=C_YELLOW))
             return
 
@@ -1955,8 +2009,9 @@ class LoginPage(ctk.CTkFrame):
             msg.add_alternative(html_body, subtype='html')
 
             context = ssl.create_default_context()
-            with smtplib.SMTP(smtp_settings['smtp_server'], smtp_settings['smtp_port']) as smtp:
-                smtp.starttls(context=context)
+            with smtplib.SMTP(smtp_settings['smtp_server'], smtp_settings['smtp_port'], timeout=10) as smtp:
+                if smtp_settings.get("use_tls", True):
+                    smtp.starttls(context=context)
                 smtp.login(smtp_settings['smtp_username'], smtp_settings['smtp_password'])
                 smtp.send_message(msg)
 
@@ -6840,7 +6895,7 @@ class AutoRentApp(ctk.CTk):
         
         try:
             # Baca audit log
-            audit_file = "rr_billing_audit.jsonl"
+            audit_file = app_path("rr_billing_audit.jsonl")
             if not os.path.exists(audit_file):
                 self.log_textbox.insert("end", "❌ File audit log tidak ditemukan.\n")
                 self.log_textbox.configure(state="disabled")

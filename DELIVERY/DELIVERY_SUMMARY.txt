@@ -1,0 +1,36 @@
+RR Billing Pro Delivery Summary
+===============================
+
+Version Info
+------------
+Package Name : RRBillingPro_v2.3_Final
+Version      : v2.3 Final
+Created On   : 2026-07-03 00:50:51
+
+What's Included
+----------------
+1. RRBILLINGPRO.exe - Main RR Billing Pro application
+2. RRBILLINGCLIENT.exe - Client application
+3. rr_billing_config.json - Configuration file
+4. logo.ico - Application icon
+5. logo.png - Image asset
+6. README.txt - Usage/readme information
+7. SETUP_INSTALLER.bat - Installer/setup script
+
+How to Install
+--------------
+1. Extract or copy this package to the target machine.
+2. Run SETUP_INSTALLER.bat as needed to perform setup.
+3. Ensure rr_billing_config.json remains in the same package folder.
+4. Launch RRBILLINGPRO.exe for the main app or RRBILLINGCLIENT.exe for the client app.
+5. Refer to README.txt for additional usage notes.
+
+File List
+---------
+- logo.ico (6 bytes)
+- logo.png (22,672 bytes)
+- README.txt (7,148 bytes)
+- rr_billing_config.json (33,933 bytes)
+- RRBILLINGCLIENT.exe (20,367,732 bytes)
+- RRBILLINGPRO.exe (24,858,562 bytes)
+- SETUP_INSTALLER.bat (7,904 bytes)

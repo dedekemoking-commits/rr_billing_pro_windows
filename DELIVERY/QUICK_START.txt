@@ -1,0 +1,107 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                        RR BILLING PRO v2.3 - QUICK START                   ║
+║                     Panduan Cepat Instalasi & Penggunaan                   ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+⏱️  INSTALASI HANYA BUTUH 5 MENIT!
+
+═════════════════════════════════════════════════════════════════════════════
+STEP 1: JALANKAN INSTALLER (30 detik)
+═════════════════════════════════════════════════════════════════════════════
+
+1. Klik kanan "SETUP_INSTALLER.bat"
+2. Pilih "Run as administrator"
+3. Tekan ENTER ketika diminta
+4. Tunggu sampai selesai
+
+✓ Aplikasi akan diinstal ke: C:\RRBillingPro
+✓ Shortcut akan dibuat di Desktop
+
+
+═════════════════════════════════════════════════════════════════════════════
+STEP 2: BUKA APLIKASI (10 detik)
+═════════════════════════════════════════════════════════════════════════════
+
+Pilih salah satu:
+• Double-click "RR Billing Pro" shortcut di Desktop
+• Atau buka: C:\RRBillingPro\RRBILLINGPRO.exe
+
+LOGIN:
+  Username: admin
+  Password: admin123
+
+
+═════════════════════════════════════════════════════════════════════════════
+STEP 3: SETUP AWAL (3-4 menit)
+═════════════════════════════════════════════════════════════════════════════
+
+Setelah login, lakukan ini:
+
+1. BUKA TAB "AKTIVASI"
+   • Ubah password admin (SECURITY: wajib!)
+   • Setup email SMTP untuk verifikasi user
+   • Konfigurasi server (IP & port)
+
+2. SETUP DATA AWAL
+   • Paket Rental (warnet, TV, gaming)
+   • Menu Makanan & Minuman
+   • Harga & Kategori
+
+3. TAMBAH USER OPERASIONAL
+   • Admin → Kelola User
+   • Buat user untuk kasir, admin warnet, etc
+
+4. SETUP WARNET CLIENT (jika ada)
+   • Admin → Setup Warnet Client
+   • Input IP address PC client
+   • Generate access code
+
+
+═════════════════════════════════════════════════════════════════════════════
+LANGSUNG BISA DIGUNAKAN!
+═════════════════════════════════════════════════════════════════════════════
+
+Tab Pesanan:
+  → Input transaksi makanan, minuman, warnet, TV
+  → Hitung total otomatis
+  → Proses pembayaran
+
+Tab Riwayat:
+  → Lihat semua pesanan
+  → Export laporan ke Excel
+  → Analisis penjualan
+
+Tab Warnet & TV:
+  → Monitor status PC client
+  → Kelola session
+
+Tab Profile:
+  → Edit data warnet/rental
+  → Backup database
+
+
+═════════════════════════════════════════════════════════════════════════════
+📞 JIKA ADA MASALAH?
+═════════════════════════════════════════════════════════════════════════════
+
+✗ Aplikasi tidak bisa buka
+  → Restart PC
+  → Pastikan sudah install semua file
+
+✗ Email tidak bisa dikirim
+  → Cek koneksi internet
+  → Setup SMTP di TAB AKTIVASI
+  → Gunakan app password untuk Gmail
+
+✗ Warnet client tidak connect
+  → Check IP address server
+  → Pastikan firewall membolehkan port 8888
+  → Coba restart client
+
+Lihat README.txt untuk troubleshooting lengkap.
+
+═════════════════════════════════════════════════════════════════════════════
+
+🎉 Siap! Aplikasi Anda sudah bisa digunakan.
+
+═════════════════════════════════════════════════════════════════════════════

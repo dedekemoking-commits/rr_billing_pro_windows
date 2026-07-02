@@ -1,0 +1,249 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    KONFIGURASI SERVER & CLIENT - GUIDE                     ║
+║                     RR Billing Pro v2.3 - Network Setup                    ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+INFORMASI DARI SETUP ANDA:
+─────────────────────────────────────────────────────────────────────────────
+  Admin/Server PC:   IP = 192.168.1.17
+  Client/Warnet PC:  IP = 192.168.1.9
+  Koneksi Status:    ❌ GAGAL (Koneksi ditolak di 192.168.1.17:5555)
+
+═════════════════════════════════════════════════════════════════════════════
+⚠️  MASALAH YANG DITEMUKAN
+═════════════════════════════════════════════════════════════════════════════
+
+MENGAPA ADA DIALOG KONFIGURASI DI ADMIN PC?
+
+Jawabannya: Ada dua aplikasi yang berbeda:
+
+1. RRBILLINGPRO.exe (Admin Server)
+   - Jalankan di PC Admin (192.168.1.17)
+   - Ini adalah SERVER
+   - SEHARUSNYA TIDAK ada dialog "Konfigurasi Koneksi Client"
+   - Dialog itu adalah BUG
+
+2. RRBILLINGCLIENT.exe (Warnet Client)
+   - Jalankan di PC Warnet/Display (192.168.1.9)
+   - Ini adalah CLIENT
+   - Di sini SEHARUSNYA ada dialog "Konfigurasi Koneksi Client"
+   - Di sini user input IP server (192.168.1.17)
+
+MASALAHNYA:
+  ❌ Dialog konfigurasi muncul di Admin app (seharusnya tidak ada)
+  ❌ Port yang dipakai: 5555 (seharusnya 8888)
+  ❌ Koneksi gagal karena salah konfigurasi
+
+
+═════════════════════════════════════════════════════════════════════════════
+✅ CARA SETUP YANG BENAR
+═════════════════════════════════════════════════════════════════════════════
+
+STEP 1: JALANKAN ADMIN SERVER (di PC Server/Kasir)
+───────────────────────────────────────────────────
+
+1. PC Admin dengan IP 192.168.1.17
+2. Jalankan: RRBILLINGPRO.exe
+3. Login dengan admin/admin123
+4. Buka TAB AKTIVASI → Konfigurasi Server
+5. Pastikan:
+   - Server Port: 8888 (default)
+   - Server Status: ✅ RUNNING
+
+❌ JANGAN ada dialog "Konfigurasi Koneksi Client" di admin
+✓ Admin hanya perlu SERVER running di port 8888
+
+
+STEP 2: JALANKAN CLIENT (di PC Warnet/Display)
+─────────────────────────────────────────
+
+1. PC Warnet/Display dengan IP 192.168.1.9
+2. Jalankan: RRBILLINGCLIENT.exe
+3. Dialog "Konfigurasi Koneksi Client" akan muncul
+4. Input:
+   - Host/IP Server: 192.168.1.17 (IP admin PC)
+   - Port: 8888
+5. Klik "Tes Koneksi" → harus ✅ BERHASIL
+6. Klik "Simpan Config" → Done!
+
+✓ Client sekarang connect ke Admin
+✓ Display akan menampilkan data dari server
+
+
+═════════════════════════════════════════════════════════════════════════════
+📋 KONFIGURASI YANG BENAR
+═════════════════════════════════════════════════════════════════════════════
+
+ADMIN SERVER (PC 192.168.1.17):
+  • Aplikasi: RRBILLINGPRO.exe
+  • Role: Master server & database
+  • Port: 8888
+  • Config: rr_billing_config.json
+  • Database: Semua data di-simpan di server
+  • Dialog Konfigurasi: TIDAK ada (admin tidak perlu config)
+
+WARNET CLIENT (PC 192.168.1.9):
+  • Aplikasi: RRBILLINGCLIENT.exe
+  • Role: Display client saja
+  • Connect ke: 192.168.1.17:8888
+  • Config: Disimpan di local PC
+  • Database: Read-only, pull dari server
+  • Dialog Konfigurasi: ADA (untuk input server IP)
+
+
+═════════════════════════════════════════════════════════════════════════════
+🔧 TROUBLESHOOTING - JIKA KONEKSI GAGAL
+═════════════════════════════════════════════════════════════════════════════
+
+1. ERROR: "Koneksi ditolak di 192.168.1.17:5555"
+   ─────────────────────────────────────────────
+   MASALAH: Port salah (5555 bukan 8888)
+   SOLUSI:  
+   a) Di Client PC, buka RRBILLINGCLIENT.exe
+   b) Input port: 8888 (bukan 5555)
+   c) Klik "Tes Koneksi"
+   d) Harus berhasil
+
+2. ERROR: "Koneksi ditolak" padahal port benar
+   ─────────────────────────────────────────────
+   MASALAH: Server tidak running atau firewall block
+   SOLUSI:
+   a) Pastikan Admin PC jalankan RRBILLINGPRO.exe
+   b) Cek firewall Windows - allow port 8888
+   c) Pastikan kedua PC di network yang sama
+   d) Coba ping: ping 192.168.1.17 (di client PC)
+
+3. ERROR: Client tidak bisa connect ke server
+   ─────────────────────────────────────────────
+   KEMUNGKINAN:
+   • IP Address salah
+   • Port berbeda
+   • Firewall memblokir
+   • Network cable not connected
+   • WiFi disconnected
+   
+   SOLUSI:
+   a) Check network connectivity
+   b) Verify IP addresses correct
+   c) Open firewall port 8888
+   d) Restart kedua aplikasi
+
+
+═════════════════════════════════════════════════════════════════════════════
+🌐 NETWORK DIAGRAM
+═════════════════════════════════════════════════════════════════════════════
+
+YANG BENAR:
+
+    Admin Server (192.168.1.17)
+    ┌─────────────────────┐
+    │ RRBILLINGPRO.exe    │
+    │ - Port 8888         │
+    │ - Master database   │
+    │ - Kasir operations  │
+    └──────────┬──────────┘
+               │
+        LAN Connection
+       (Port 8888)
+               │
+    ┌──────────▼──────────┐
+    │ Client PC (192.168.1.9)
+    │ RRBILLINGCLIENT.exe │
+    │ - Connect to server │
+    │ - Display only      │
+    │ - Show data         │
+    └─────────────────────┘
+
+
+YANG SALAH:
+
+    Admin Server (192.168.1.17)
+    ┌─────────────────────┐
+    │ RRBILLINGPRO.exe    │
+    │ + Dialog Config ❌  │ ← TIDAK BOLEH ADA
+    │ + Client settings   │
+    │ + IP input          │
+    └─────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════
+📝 CHECKLIST SETUP
+═════════════════════════════════════════════════════════════════════════════
+
+ADMIN PC (192.168.1.17):
+  □ RRBILLINGPRO.exe sudah jalankan
+  □ Login berhasil (admin/admin123)
+  □ TAB AKTIVASI → Server port: 8888
+  □ Server status: ✅ RUNNING
+  □ ❌ TIDAK ada dialog "Konfigurasi Koneksi Client"
+  □ Windows firewall allow port 8888
+
+CLIENT PC (192.168.1.9):
+  □ RRBILLINGCLIENT.exe sudah jalankan
+  □ Dialog "Konfigurasi Koneksi Client" muncul
+  □ Input IP: 192.168.1.17
+  □ Input Port: 8888
+  □ "Tes Koneksi" berhasil ✅
+  □ "Simpan Config" berhasil
+  □ Client connect dan display berfungsi
+
+
+═════════════════════════════════════════════════════════════════════════════
+🚀 UNTUK BEBERAPA CLIENT (Multiple Displays)
+═════════════════════════════════════════════════════════════════════════════
+
+Setup 1 Server + 3 Client:
+
+    Server (192.168.1.17)
+    RRBILLINGPRO.exe
+           │
+    ┌──────┼──────┐
+    │      │      │
+    PC1    PC2    PC3
+    9      10     11
+    
+Setup:
+1. Server: Install & jalankan RRBILLINGPRO.exe di 192.168.1.17
+2. PC1: Install RRBILLINGCLIENT.exe → Config IP 192.168.1.17:8888
+3. PC2: Install RRBILLINGCLIENT.exe → Config IP 192.168.1.17:8888
+4. PC3: Install RRBILLINGCLIENT.exe → Config IP 192.168.1.17:8888
+
+Semua client auto-connect ke server!
+
+
+═════════════════════════════════════════════════════════════════════════════
+💡 TIPS PENTING
+═════════════════════════════════════════════════════════════════════════════
+
+1. Admin app SEHARUSNYA SERVER ONLY
+   - Tidak perlu "Konfigurasi Koneksi Client"
+   - Dialog itu adalah BUG (perlu diperbaiki di versi berikutnya)
+
+2. Client app SEHARUSNYA CLIENT ONLY
+   - Hanya display, tidak bisa edit database
+   - Hanya connect ke server
+
+3. Port 8888 adalah standard
+   - Jangan ganti ke port lain kecuali ada alasan khusus
+   - Pastikan firewall allow port 8888
+
+4. Pertama kali setup:
+   - Start Server dulu (Admin PC)
+   - Tunggu 2-3 detik
+   - Baru start Client (Warnet PC)
+
+5. Network requirement:
+   - Kedua PC harus di LAN yang sama
+   - IP harus bisa saling ping
+   - Port 8888 harus terbuka di firewall
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+RINGKASAN:
+  • Admin PC (192.168.1.17) = SERVER
+  • Warnet PC (192.168.1.9) = CLIENT
+  • Client connect ke Server di port 8888
+  • Jangan ada dialog config di Admin
+
+═════════════════════════════════════════════════════════════════════════════

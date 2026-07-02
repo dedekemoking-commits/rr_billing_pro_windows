@@ -790,15 +790,53 @@ class ConfigManager:
         ConfigManager.save(d)
 
 
+DEFAULT_EMAIL_SETTINGS = {
+    "smtp_server": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "from_address": "",
+    "use_tls": True,
+}
+
+
+def _normalize_email_settings(settings: dict | None) -> dict:
+    merged = dict(DEFAULT_EMAIL_SETTINGS)
+    if isinstance(settings, dict):
+        merged.update(settings)
+    try:
+        merged["smtp_port"] = int(merged.get("smtp_port", 587))
+    except Exception:
+        merged["smtp_port"] = 587
+    use_tls = merged.get("use_tls", True)
+    if isinstance(use_tls, str):
+        merged["use_tls"] = use_tls.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        merged["use_tls"] = bool(use_tls)
+    for key in ("smtp_server", "smtp_username", "smtp_password", "from_address"):
+        if merged.get(key) is None:
+            merged[key] = ""
+    return merged
+
+
+def _set_email_settings(settings: dict) -> None:
+    cfg = ConfigManager.load()
+    cfg["email_settings"] = _normalize_email_settings(settings)
+    ConfigManager.save(cfg)
+
+
 def _get_email_settings():
     cfg = ConfigManager.load()
-    return cfg.get("email_settings", {})
+    settings = cfg.get("email_settings")
+    if not isinstance(settings, dict):
+        settings = cfg.get("smtp_settings", {})
+    return _normalize_email_settings(settings)
 
 
 def _email_configured() -> bool:
     settings = _get_email_settings()
     required = ["smtp_server", "smtp_port", "smtp_username", "smtp_password", "from_address"]
-    return all(settings.get(k) for k in required)
+    return all(str(settings.get(k, "")).strip() for k in required)
 
 
 def _send_verification_email(to_email: str, username: str, code: str) -> tuple:
@@ -1457,11 +1495,25 @@ class LoginPage(ctk.CTkFrame):
                               border_color=C_ACCENT2)
         outer.pack()
 
-        hdr = ctk.CTkFrame(outer, fg_color=C_ACCENT2, corner_radius=0)
-        hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="📝  DAFTAR RENTAL BARU",
-                     font=("Russo One", 14, "bold"),
-                     text_color="white").pack(pady=14)
+        # Logo section (consistent with login view)
+        logo_ico = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=12,
+                                 width=152, height=62)
+        logo_ico.pack(pady=(28, 8))
+        logo_ico.pack_propagate(False)
+        ctk_img = load_ctk_image(size=(143, 55))
+        if ctk_img:
+            ctk.CTkLabel(logo_ico, text="", image=ctk_img).place(
+                relx=0.5, rely=0.5, anchor="center")
+        else:
+            ctk.CTkLabel(logo_ico, text="🎮", font=("Arial", 32)).place(
+                relx=0.5, rely=0.5, anchor="center")
+
+        # Title section
+        ctk.CTkLabel(outer, text="DAFTAR AKUN BARU",
+                     font=("Russo One", 22, "bold"),
+                     text_color=C_ACCENT).pack(pady=(4, 0))
+        ctk.CTkLabel(outer, text="Sistem Billing Rental TV & PS",
+                     font=("Courier New", 11), text_color=C_MUTED).pack(pady=(0, 16))
 
         ctk.CTkLabel(outer,
                      text="Buat akun admin untuk rental Anda — trial otomatis aktif",
@@ -1471,7 +1523,7 @@ class LoginPage(ctk.CTkFrame):
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 8))
 
         scroll = ctk.CTkScrollableFrame(outer, fg_color="transparent",
-                                         width=440, height=460)
+                                         width=500, height=550)
         scroll.pack(padx=20, pady=4)
 
         # Akun login
@@ -1585,7 +1637,7 @@ class LoginPage(ctk.CTkFrame):
 
         if not _email_configured():
             self.lbl_daftar_status.configure(
-                text="⚠  Email verification belum tersedia karena SMTP belum dikonfigurasi.",
+                text="⚠  Verifikasi email belum tersedia karena SMTP belum dikonfigurasi.",
                 text_color=C_YELLOW)
             return
 
@@ -1979,10 +2031,10 @@ class LoginPage(ctk.CTkFrame):
 
     def _send_forgot_password_code(self, username: str, email: str, code: str):
         """Send verification code via email."""
-        smtp_settings = ConfigManager.get("email_settings", {})
-        if not all([smtp_settings.get('smtp_server'), smtp_settings.get('smtp_username'), smtp_settings.get('smtp_password')]):
+        smtp_settings = _get_email_settings()
+        if not _email_configured():
             self.after(0, lambda: self.lp_lbl_status.configure(
-                text="⚠  Email SMTP belum dikonfigurasi.",
+                text="⚠  SMTP belum dikonfigurasi.",
                 text_color=C_YELLOW))
             return
 
@@ -2025,8 +2077,9 @@ class LoginPage(ctk.CTkFrame):
             msg.add_alternative(html_body, subtype='html')
 
             context = ssl.create_default_context()
-            with smtplib.SMTP(smtp_settings['smtp_server'], smtp_settings['smtp_port']) as smtp:
-                smtp.starttls(context=context)
+            with smtplib.SMTP(smtp_settings['smtp_server'], smtp_settings['smtp_port'], timeout=10) as smtp:
+                if smtp_settings.get("use_tls", True):
+                    smtp.starttls(context=context)
                 smtp.login(smtp_settings['smtp_username'], smtp_settings['smtp_password'])
                 smtp.send_message(msg)
 
@@ -4640,7 +4693,7 @@ class AutoRentApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("RR BILLING PRO — Billing TV System")
-        self.geometry("560x760")
+        self.geometry("620x900")
         self.resizable(False, False)
         self.configure(fg_color=C_BG)
 
@@ -4784,7 +4837,7 @@ class AutoRentApp(ctk.CTk):
 
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
-        self.geometry("560x760")
+        self.geometry("620x900")
         self.resizable(False, False)
         for w in self.winfo_children():
             w.destroy()
