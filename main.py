@@ -3136,17 +3136,12 @@ class DialogPaket(ctk.CTkToplevel):
             all_menu    = {**self.makanan_data, **self.minuman_data}
             pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
             
-            # Hitung total pesanan dengan aman (hindari KeyError)
+            # Hitung total pesanan (food/drinks only) — paket_harga dihitung terpisah di _on_paket_confirm
             total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
             
-            if paket_nm == "Main Bebas":
-                # Total biaya waktu belum diketahui sampai pemain selesai main.
-                # Yang dikirim di sini hanya total pesanan tambahan (makanan/minuman).
-                total = total_pesanan
-            else:
-                total = paket_harga + total_pesanan
-            
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+            # Selalu kirim food-only total sebagai arg ke-5 agar _on_paket_confirm
+            # bisa memisahkan biaya_pesanan dari paket_harga dengan benar.
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan)
             self.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"Terjadi kesalahan: {str(e)}")
@@ -3635,9 +3630,21 @@ class KartuTV(ctk.CTkFrame):
 
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
         previous_session = not self.sesi_kosong()
-        self.pesanan_aktif  = pesanan
-        self.biaya_pesanan  = total_pesanan
         self.menit_dipakai_awal = 0
+
+        if not previous_session:
+            # Sesi baru: reset pesanan dan biaya
+            self.pesanan_aktif = pesanan
+            all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+            self.biaya_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+        else:
+            # Tambah paket ke sesi aktif: pertahankan pesanan lama, merge pesanan baru (jika ada)
+            for nm, qty in pesanan.items():
+                self.pesanan_aktif[nm] = qty
+            if pesanan:
+                all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+                self.biaya_pesanan += sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            # biaya_pesanan yang sudah ada dari SHOP tetap terjaga
 
         if paket_nm == "Main Bebas":
             self.is_bebas    = True
@@ -4274,9 +4281,21 @@ class KartuWarnet(ctk.CTkFrame):
 
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
         previous_session = not self.sesi_kosong()
-        self.pesanan_aktif = pesanan
-        self.biaya_pesanan = total_pesanan
         self.menit_dipakai_awal = 0
+
+        if not previous_session:
+            # Sesi baru: reset pesanan dan biaya
+            self.pesanan_aktif = pesanan
+            all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+            self.biaya_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+        else:
+            # Tambah paket ke sesi aktif: pertahankan pesanan lama, merge pesanan baru (jika ada)
+            for nm, qty in pesanan.items():
+                self.pesanan_aktif[nm] = qty
+            if pesanan:
+                all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+                self.biaya_pesanan += sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            # biaya_pesanan yang sudah ada dari SHOP tetap terjaga
 
         if paket_nm == "Main Bebas":
             self.is_bebas = True
