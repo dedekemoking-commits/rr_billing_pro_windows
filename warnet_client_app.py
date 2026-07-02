@@ -59,10 +59,20 @@ class WarnetClientProtocol:
         payload = json.dumps(message).encode("utf-8")
         with self.lock:
             self.sock.sendall(payload)
-            raw = self.sock.recv(4096)
-        if not raw:
-            raise RuntimeError("Koneksi terputus (empty response).")
-        return json.loads(raw.decode("utf-8"))
+            # Baca response dengan loop agar data tidak terpotong
+            chunks = []
+            while True:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                try:
+                    raw = b"".join(chunks)
+                    result = json.loads(raw.decode("utf-8"))
+                    return result
+                except json.JSONDecodeError:
+                    continue  # belum lengkap, baca chunk berikutnya
+        raise RuntimeError("Koneksi terputus (empty response).")
 
     def auth(self, client_id: str, password: str) -> dict:
         return self.request(
@@ -327,7 +337,7 @@ class WarnetClientApp(ctk.CTk):
             if not stored:
                 continue
 
-            if stored.startswith("bcrypt$$"):
+            if stored.startswith("bcrypt$"):
                 if bcrypt is None:
                     self._append_log("bcrypt belum tersedia untuk verifikasi admin.")
                     continue

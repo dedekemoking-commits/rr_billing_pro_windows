@@ -66,3 +66,8 @@
 {"timestamp": "2026-07-02T03:20:30.166001", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
 {"timestamp": "2026-07-02T03:21:05.076786", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "START Demo PC 1", "result": "Socket connection timeout."}}
 {"timestamp": "2026-07-02T03:21:12.055800", "action": "socket_warnet_command", "username": "rrgaming", "status": "failed", "details": {"host": "192.168.1.11", "kursi": "Demo PC 1", "command": "STOP Demo PC 1", "result": "Socket connection timeout."}}
+{"timestamp": "2026-07-02T03:21:57.387084", "action": "system_update", "username": "rrgaming", "status": "success", "details": {"type": "git", "message": "Already up to date."}}
+{"timestamp": "2026-07-02T03:22:08.069884", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-02T03:35:30.655945", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}
+{"timestamp": "2026-07-02T03:39:20.226817", "action": "system_update", "username": "rrgaming", "status": "success", "details": {"type": "git", "message": "Already up to date."}}
+{"timestamp": "2026-07-02T03:39:33.371097", "action": "login_success", "username": "rrgaming", "status": "success", "details": {"role": "admin"}}

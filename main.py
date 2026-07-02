@@ -206,7 +206,7 @@ class WarnetSocketServer:
                         }
                 
                 # Update heartbeat
-                if session_token and message.get("type") in ["COMMAND", "PING"]:
+                if session_token and message.get("type") in ["COMMAND", "PING", "GET_STATUS"]:
                     with self.sessions_lock:
                         if session_token in self.sessions:
                             self.sessions[session_token]["last_heartbeat"] = time.time()
@@ -443,19 +443,26 @@ class WarnetSocketServer:
         }
     
     def _execute_pc_command(self, pc_data: dict, action: str) -> bool:
-        """Execute actual command on PC via ADB. Currently stub."""
+        """Execute command on TV/PC via ADB."""
         pc_ip = pc_data.get("ip")
         adb_port = pc_data.get("adb_port", 5555)
-        
-        # TODO: Real ADB integration
-        # action mapping:
-        # - ON: adb shell input power (turn on)
-        # - OFF: adb shell input power (turn off)
-        # - VOL+: adb shell input keyevent 24
-        # - VOL-: adb shell input keyevent 25
-        
-        print(f"[WARNET SERVER] Would execute {action} on {pc_ip}:{adb_port}")
-        return True  # Stub: always succeed for now
+        if not pc_ip:
+            return False
+        try:
+            action_map = {
+                "ON":   lambda: ADBHelper.power_toggle(pc_ip, port=adb_port),
+                "OFF":  lambda: ADBHelper.power_toggle(pc_ip, port=adb_port),
+                "VOL+": lambda: ADBHelper.volume(pc_ip, naik=True, port=adb_port),
+                "VOL-": lambda: ADBHelper.volume(pc_ip, naik=False, port=adb_port),
+                "HOME": lambda: ADBHelper.home(pc_ip, port=adb_port),
+            }
+            if action not in action_map:
+                return False
+            ok, _, _ = action_map[action]()
+            return ok
+        except Exception as e:
+            print(f"[WARNET SERVER] ADB error {action} on {pc_ip}:{adb_port}: {e}")
+            return False
     
     def _log_warnet_activity(self, activity: dict):
         """Log warnet activity to config file."""
@@ -557,8 +564,9 @@ def app_path(filename: str) -> str:
     return os.path.join(APP_BASE_DIR, filename)
 
 
-CONFIG_FILE  = app_path("rr_billing_config.json")
-LICENSE_FILE = app_path("rr_billing_license.json")
+CONFIG_FILE   = app_path("rr_billing_config.json")
+LICENSE_FILE  = app_path("rr_billing_license.json")
+RIWAYAT_FILE  = app_path("rr_billing_riwayat.json")
 
 # ─── DATA HARGA (default) ─────────────────────────────────────────────────────
 # Harga dikelompokkan per "Grup Tarif" (mis. PS3, PS4, Room VIP),
@@ -3622,6 +3630,8 @@ class KartuTV(ctk.CTkFrame):
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
                         app._refresh_riwayat_summary()
+                    if hasattr(app, '_save_riwayat'):
+                        app._save_riwayat()
 
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan):
         previous_session = not self.sesi_kosong()
@@ -3700,6 +3710,8 @@ class KartuTV(ctk.CTkFrame):
                             pass
                         if hasattr(app, '_refresh_riwayat_summary'):
                             app._refresh_riwayat_summary()
+                        if hasattr(app, '_save_riwayat'):
+                            app._save_riwayat()
             else:
                 self._last_transaction_item = self.on_transaksi(
                     self.label_tv, paket_nm, pesanan, self.paket_harga_tetap + total_pesanan)
@@ -3759,6 +3771,8 @@ class KartuTV(ctk.CTkFrame):
                             pass
                         if hasattr(app, '_refresh_riwayat_summary'):
                             app._refresh_riwayat_summary()
+                        if hasattr(app, '_save_riwayat'):
+                            app._save_riwayat()
             else:
                 self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
 
@@ -4252,6 +4266,8 @@ class KartuWarnet(ctk.CTkFrame):
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
                         app._refresh_riwayat_summary()
+                    if hasattr(app, '_save_riwayat'):
+                        app._save_riwayat()
         app = self.winfo_toplevel()
         if hasattr(app, '_refresh_warnet_footer'):
             app._refresh_warnet_footer()
@@ -4333,6 +4349,8 @@ class KartuWarnet(ctk.CTkFrame):
                             pass
                         if hasattr(app, '_refresh_riwayat_summary'):
                             app._refresh_riwayat_summary()
+                        if hasattr(app, '_save_riwayat'):
+                            app._save_riwayat()
             else:
                 self._last_transaction_item = self.on_transaksi(
                     self.label_kursi, paket_nm, pesanan, self.paket_harga_tetap + total_pesanan, source='warnet')
@@ -4372,6 +4390,35 @@ class KartuWarnet(ctk.CTkFrame):
             total_akhir = self.paket_harga_tetap + self.biaya_pesanan
             pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
             paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
+            # Update existing riwayat row if session was previously recorded
+            if getattr(self, '_last_transaction_item', None):
+                app = self.winfo_toplevel()
+                item_id = self._last_transaction_item
+                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                    idx = app._tree_item_to_index.get(item_id)
+                    if idx is not None and idx < len(app.riwayat_transaksi):
+                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+                        updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_akhir)
+                        app.riwayat_transaksi[idx] = updated_row
+                        app.tree.item(item_id, values=updated_row)
+                        try:
+                            all_menu = {**app.menu_makanan, **app.menu_minuman}
+                            pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                            paket_harga = total_akhir - pesanan_total
+                            if paket_harga < 0:
+                                paket_harga = 0
+                            if idx < len(app.riwayat_meta):
+                                app.riwayat_meta[idx]['paket_harga'] = paket_harga
+                                app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
+                                app.riwayat_meta[idx]['total'] = total_akhir
+                        except Exception:
+                            pass
+                        if hasattr(app, '_refresh_riwayat_summary'):
+                            app._refresh_riwayat_summary()
+                        if hasattr(app, '_save_riwayat'):
+                            app._save_riwayat()
+            else:
+                self.on_transaksi(self.label_kursi, self.paket_aktif or '-', self.pesanan_aktif, total_akhir, source='warnet')
             messagebox.showwarning(
                 "⏰ Waktu PC Habis",
                 f"PC: {self.label_kursi}\n"
@@ -4552,6 +4599,15 @@ class KartuWarnet(ctk.CTkFrame):
                                           border_width=1, border_color=C_ACCENT2,
                                           text_color=C_ACCENT2)
 
+        # Nyalakan timer di kursi tujuan
+        if target._timer_job:
+            target.after_cancel(target._timer_job)
+            target._timer_job = None
+        if target.is_bebas:
+            target._tick_bebas()
+        elif target.sisa_waktu > 0:
+            target._tick_waktu()
+
         self._reset_sesi()
         dlg.destroy()
         messagebox.showinfo("✅ Berhasil Pindah",
@@ -4562,8 +4618,6 @@ class KartuWarnet(ctk.CTkFrame):
 #  APLIKASI UTAMA
 # ═══════════════════════════════════════════════════════════════════════════════
 class AutoRentApp(ctk.CTk):
-    pass
-
     def __init__(self):
         super().__init__()
         self.title("RR BILLING PRO — Billing TV System")
@@ -4577,6 +4631,7 @@ class AutoRentApp(ctk.CTk):
         self.current_user  = None
         self.current_role  = None
         self.jumlah_tv     = 0
+        self.jumlah_warnet = 0
         self.riwayat_transaksi = []
         self.riwayat_meta = []  # parallel metadata: dicts with keys: source('tv'|'warnet'), pesanan_total(int), total(int)
         self._tree_item_to_index = {}
@@ -4726,6 +4781,7 @@ class AutoRentApp(ctk.CTk):
         for w in self.winfo_children():
             w.destroy()
         self._build_layout()
+        self._load_riwayat()
         self._cek_adb_global_saat_start()
         self._cek_lisensi_saat_start()
         # Start background update checker (non-blocking)
@@ -4735,7 +4791,7 @@ class AutoRentApp(ctk.CTk):
             pass
 
     def _cek_adb_global_saat_start(self):
-        if not ADBHelper.adb_tersedia():
+        if self.current_role == "admin" and not ADBHelper.adb_tersedia():
             self.after(500, lambda: messagebox.showwarning(
                 "⚠ ADB Tidak Ditemukan",
                 "Binary 'adb' tidak ditemukan di PATH sistem.\n"
@@ -5072,7 +5128,7 @@ class AutoRentApp(ctk.CTk):
     def _refresh_riwayat_summary(self):
         # Compute totals split by source
         def paket_only(m):
-            return m.get('paket_harga', m['total'] - m.get('pesanan_total', 0))
+            return m.get('paket_harga', m.get('total', 0) - m.get('pesanan_total', 0))
         total_tv_paket = sum(paket_only(m) for m in self.riwayat_meta if m.get('source') == 'tv')
         total_warnet_paket = sum(paket_only(m) for m in self.riwayat_meta if m.get('source') == 'warnet')
         total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
@@ -5414,7 +5470,7 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_warnet_footer(self):
         # Sum warnet paket totals from riwayat_meta (package sales only)
-        total_warnet = sum(m.get('paket_harga', m['total'] - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_warnet = sum(m.get('paket_harga', m.get('total', 0) - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'warnet')
         if hasattr(self, 'lbl_warnet_total_pendapatan'):
             self.lbl_warnet_total_pendapatan.configure(text=f"Total Pendapatan Warnet: {fmt_rp(total_warnet)}")
  
@@ -6049,6 +6105,41 @@ class AutoRentApp(ctk.CTk):
             pesanan_tampil = "—"
         return (waktu, self.current_user, kota, paket_tampil, pesanan_tampil, fmt_rp(total_int))
 
+    def _save_riwayat(self):
+        """Simpan riwayat transaksi ke file JSON agar tidak hilang saat restart."""
+        try:
+            data = {
+                "riwayat_transaksi": [list(r) for r in self.riwayat_transaksi],
+                "riwayat_meta": self.riwayat_meta,
+            }
+            with open(RIWAYAT_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_riwayat(self):
+        """Load riwayat transaksi dari file JSON setelah login/restart."""
+        if not os.path.exists(RIWAYAT_FILE):
+            return
+        try:
+            with open(RIWAYAT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            rows = data.get("riwayat_transaksi", [])
+            metas = data.get("riwayat_meta", [])
+            if not rows:
+                return
+            # Muat ke memori (urutan normal, insert ke tree dengan urutan terbalik)
+            self.riwayat_transaksi = [tuple(r) for r in rows]
+            self.riwayat_meta = metas
+            # Isi tree dari terbaru ke terlama (insert ke posisi 0 = atas)
+            self._tree_item_to_index = {}
+            for idx, row in enumerate(self.riwayat_transaksi):
+                item_id = self.tree.insert("", 0, values=row)
+                self._tree_item_to_index[item_id] = idx
+            self._refresh_riwayat_summary()
+        except Exception:
+            pass
+
     def _catat_transaksi(self, kota, paket, pesanan, total, source='tv'):
         """Catat transaksi ke riwayat.
         pesanan: dict nama->qty
@@ -6093,6 +6184,7 @@ class AutoRentApp(ctk.CTk):
         if hasattr(self, '_refresh_dashboard_total_pesanan'):
             self._refresh_dashboard_total_pesanan()
 
+        self._save_riwayat()
         return item_id
 
     def _bersihkan_riwayat(self):
@@ -6102,12 +6194,15 @@ class AutoRentApp(ctk.CTk):
             return
         if messagebox.askyesno("Bersihkan Riwayat", "Hapus semua data riwayat dari tampilan?"):
             self.riwayat_transaksi.clear()
+            self.riwayat_meta.clear()
+            self._tree_item_to_index.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
             summary_text = "Total Transaksi: 0  |  Total Pendapatan: Rp 0"
             self.lbl_rekap.configure(text=summary_text)
             if hasattr(self, 'lbl_rekap_footer'):
                 self.lbl_rekap_footer.configure(text=summary_text)
+            self._save_riwayat()
 
     def _on_riwayat_right_click(self, event):
         # Dapatkan item di bawah kursor
@@ -6204,6 +6299,7 @@ class AutoRentApp(ctk.CTk):
                 self._refresh_riwayat_summary()
             if hasattr(self, 'lbl_rekap_footer'):
                 self.lbl_rekap_footer.configure(text=self.lbl_rekap.cget('text'))
+            self._save_riwayat()
 
         btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
         btn_frame.pack(fill="x", padx=16, pady=(8, 16))
@@ -6276,8 +6372,8 @@ class AutoRentApp(ctk.CTk):
         ws[f"A{last_row}"].font      = Font(name="Consolas", bold=True, color="FFD700", size=11)
         ws[f"A{last_row}"].fill      = PatternFill("solid", fgColor="1A1A3A")
         ws[f"A{last_row}"].alignment = Alignment(horizontal="right")
-        total_tv_paket = sum(m.get('paket_harga', m['total'] - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'tv')
-        total_warnet_paket = sum(m.get('paket_harga', m['total'] - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'warnet')
+        total_tv_paket = sum(m.get('paket_harga', m.get('total', 0) - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'tv')
+        total_warnet_paket = sum(m.get('paket_harga', m.get('total', 0) - m.get('pesanan_total', 0)) for m in self.riwayat_meta if m.get('source') == 'warnet')
         total_pesanan = sum(m.get('pesanan_total', 0) for m in self.riwayat_meta)
         total_all = total_tv_paket + total_warnet_paket + total_pesanan
         ws[f"F{last_row}"] = fmt_rp(total_all)
@@ -6640,18 +6736,24 @@ class AutoRentApp(ctk.CTk):
                      font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=20, pady=(16, 8))
 
         metode = [
-            ("🏦 Transfer Bank BCA",      "6145375553  a/n Rahmadani"),
-            ("🏦 Transfer Bank BRI",      "0256 0109 2349 500  a/n Rahmadani"),
-            ("💚 GoPay / OVO / Dana",     "0812-7064-7744 a/n Rahmadani (scan QR di bawah)"),
-            ("🟦 QRIS",                   "Tersedia di kantor / hubungi admin"),
+            ("🏦 Transfer Bank BCA",      "6145375553  a/n Rahmadani",           None),
+            ("🏦 Transfer Bank BRI",      "0256 0109 2349 500  a/n Rahmadani",   None),
+            ("💚 GoPay / OVO / Dana",     "0812-7064-7744 a/n Rahmadani",        None),
+            ("🟦 QRIS",                   "Scan QR untuk pembayaran",             "qris"),
         ]
-        for metode_nm, detail in metode:
+        for metode_nm, detail, aksi in metode:
             row_m = ctk.CTkFrame(pay_card, fg_color=C_CARD, corner_radius=8)
             row_m.pack(fill="x", padx=20, pady=4)
             ctk.CTkLabel(row_m, text=metode_nm, font=("Consolas", 12, "bold"),
                          text_color=C_TEXT, width=220, anchor="w").pack(side="left", padx=14, pady=10)
             ctk.CTkLabel(row_m, text=detail, font=("Courier New", 12),
                          text_color=C_MUTED).pack(side="left", padx=8)
+            if aksi == "qris":
+                ctk.CTkButton(row_m, text="🟦 Lihat QRIS", width=130, height=30,
+                              fg_color="#0A2A4A", hover_color="#0A3A6A",
+                              border_width=1, border_color="#3A8AFF",
+                              font=("Russo One", 10, "bold"), text_color="#3A8AFF",
+                              command=self._tampilkan_qris).pack(side="right", padx=14, pady=8)
 
         ctk.CTkLabel(pay_card,
                      text="💬  Setelah pembayaran, WhatsApp bukti transfer ke 0812-7064-7744\n"
@@ -6683,6 +6785,53 @@ class AutoRentApp(ctk.CTk):
         )
         url = "https://wa.me/6281270647744?text=" + urllib.parse.quote(pesan)
         webbrowser.open(url)
+
+    def _tampilkan_qris(self):
+        """Tampilkan dialog popup gambar QRIS pembayaran."""
+        qris_path = app_path("qris.png")
+        if not os.path.exists(qris_path):
+            messagebox.showinfo(
+                "🟦 QRIS Tidak Ditemukan",
+                "File gambar QRIS belum diatur.\n\n"
+                "Letakkan file gambar QRIS Anda dengan nama:\n"
+                f"  qris.png\n\n"
+                f"Di folder:\n  {APP_BASE_DIR}",
+                parent=self)
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("🟦 Pembayaran via QRIS")
+        dlg.configure(fg_color=C_BG)
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="🟦  SCAN QRIS UNTUK PEMBAYARAN",
+                     font=FONT_SUB, text_color="#3A8AFF").pack(pady=(18, 4))
+        ctk.CTkLabel(dlg, text="Scan kode QR di bawah menggunakan aplikasi e-wallet atau m-banking Anda.",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 12))
+
+        try:
+            from PIL import Image
+            img = Image.open(qris_path)
+            # Resize proporsional agar pas di dialog (max 400x400)
+            img.thumbnail((400, 400), Image.LANCZOS)
+            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
+            lbl_img = ctk.CTkLabel(dlg, image=ctk_img, text="")
+            lbl_img.pack(padx=24, pady=(0, 12))
+            dlg.geometry(f"{img.width + 48}x{img.height + 160}")
+        except Exception as e:
+            ctk.CTkLabel(dlg, text=f"Gagal memuat gambar QRIS:\n{e}",
+                         font=FONT_BODY, text_color=C_RED).pack(padx=24, pady=20)
+            dlg.geometry("400x180")
+
+        ctk.CTkLabel(dlg, text="GoPay / OVO / Dana / QRIS Bank — a/n Rahmadani",
+                     font=("Consolas", 11, "bold"), text_color=C_YELLOW).pack(pady=(0, 4))
+        ctk.CTkButton(dlg, text="✖  Tutup", width=120, height=34,
+                      fg_color=C_BTN, hover_color=C_ACCENT2,
+                      border_width=1, border_color=C_MUTED,
+                      font=FONT_SUB, text_color=C_MUTED,
+                      command=dlg.destroy).pack(pady=(4, 16))
 
     def _start_update_checker(self, interval_hours: int = 6):
         """Background loop: cek update via manifest URL atau Git setiap interval_hours."""
