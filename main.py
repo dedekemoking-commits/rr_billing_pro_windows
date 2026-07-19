@@ -5444,10 +5444,7 @@ class AutoRentApp(ctk.CTk):
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
         self.socket_warnet_config = cfg.get("socket_warnet", {})
         self.current_tab  = None
-        self._bg_label_dash   = None
-        self._bg_label_warnet = None
-        self._bg_image_path   = cfg.get("app_bg_image", "")
-        self._bg_ctk_img      = None
+        self._bg_image_path = cfg.get("app_bg_image", "")
 
         # ── Start Warnet Socket Server ──────────────────────────────────────────
         ws_port = cfg.get("warnet_ws_port", 5001)
@@ -7948,46 +7945,57 @@ class AutoRentApp(ctk.CTk):
         messagebox.showinfo("✅ Tema Berubah", f"Tema diganti ke '{choice}'.")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  BACKGROUND IMAGE — wallpaper di belakang kartu Dashboard TV & Warnet
+    #  BACKGROUND IMAGE — wallpaper di belakang Dashboard TV & Warnet
     # ──────────────────────────────────────────────────────────────────────────
     def _apply_bg_image(self):
-        for attr in ['_bg_label_dash', '_bg_label_warnet']:
-            lbl = getattr(self, attr, None)
-            if lbl:
-                lbl.destroy()
-                setattr(self, attr, None)
+        # Hapus bg label lama di content
+        for child in self.content.winfo_children():
+            if getattr(child, '_is_bg_label', False):
+                child.destroy()
+                break
 
         path = ConfigManager.get("app_bg_image", "")
         self._bg_image_path = path
 
-        for tab_key, scroll_attr in [("dashboard", "scroll_dash"), ("warnet", "scroll_warnet")]:
+        for scroll_attr in ["scroll_dash", "scroll_warnet"]:
             if hasattr(self, scroll_attr):
                 getattr(self, scroll_attr).configure(fg_color=C_BG)
+        for f in self.frames.values():
+            f.configure(fg_color=C_BG)
 
         if not path or not os.path.isfile(path):
             return
 
         try:
             pil_img = Image.open(path)
+            cw = self.content.winfo_width() or self.winfo_width() or 1280
+            ch = self.content.winfo_height() or self.winfo_height() or 800
+            ctk_img = ctk.CTkImage(pil_img, size=(cw, ch))
 
-            for tab_key, scroll_attr, label_attr in [
-                ("dashboard", "scroll_dash", "_bg_label_dash"),
-                ("warnet", "scroll_warnet", "_bg_label_warnet"),
-            ]:
-                f = self.frames.get(tab_key)
-                if not f:
-                    continue
-                fw = f.winfo_width() or self.winfo_width() or 1280
-                fh = f.winfo_height() or self.winfo_height() or 800
-                ctk_img = ctk.CTkImage(pil_img, size=(fw, fh))
+            self.content.configure(fg_color="transparent")
+            bg_label = ctk.CTkLabel(self.content, text="", image=ctk_img,
+                                     fg_color="transparent")
+            bg_label._is_bg_label = True
 
-                bg = ctk.CTkLabel(f, text="", image=ctk_img)
-                bg.place(x=0, y=0, relwidth=1, relheight=1)
-                bg.lower()
-                setattr(self, label_attr, bg)
+            try:
+                first = self.frames.get("dashboard") or self.frames.get("warnet")
+                if first and first.winfo_ismapped():
+                    bg_label.pack(fill="both", expand=True, before=first)
+                else:
+                    bg_label.pack(fill="both", expand=True)
+            except Exception:
+                bg_label.pack(fill="both", expand=True)
+            bg_label.lower()
 
+            for scroll_attr in ["scroll_dash", "scroll_warnet"]:
                 if hasattr(self, scroll_attr):
                     getattr(self, scroll_attr).configure(fg_color="transparent")
+            for tab_key in ["dashboard", "warnet"]:
+                f = self.frames.get(tab_key)
+                if f:
+                    f.configure(fg_color="transparent")
+
+            self._bg_ctk_img = ctk_img
 
         except Exception as e:
             print(f"Gagal load bg image: {e}")
