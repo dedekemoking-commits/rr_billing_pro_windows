@@ -7976,10 +7976,12 @@ class AutoRentApp(ctk.CTk):
             if not path or not os.path.isfile(path):
                 return
 
+            Image.MAX_IMAGE_PIXELS = None  # bypass limit gambar besar
             pil_img = Image.open(path)
             win_w = self.winfo_width() or 1280
             win_h = self.winfo_height() or 800
-            photo = ImageTk.PhotoImage(pil_img.resize((win_w, win_h), Image.LANCZOS))
+            pil_img.thumbnail((win_w, win_h), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(pil_img)
 
             for t in target_tabs:
                 f = self.frames.get(t)
