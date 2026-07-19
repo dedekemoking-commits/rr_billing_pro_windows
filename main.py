@@ -3982,8 +3982,8 @@ class KartuTV(ctk.CTkFrame):
                  get_paket_data, get_makanan_data, get_minuman_data,
                  get_semua_kartu, nama_grup="Reguler", is_first=False,
                  get_daftar_grup=None, on_ganti_grup=None, on_hapus=None, **kwargs):
-        super().__init__(master, fg_color=C_CARD, corner_radius=8,
-                         border_width=1, border_color=C_BORDER, **kwargs)
+        super().__init__(master, fg_color=C_BG, corner_radius=8,
+                         border_width=0, **kwargs)
         self.nomor        = nomor
         self.ip           = ip
         self.port         = port
@@ -4057,16 +4057,16 @@ class KartuTV(ctk.CTkFrame):
         self.lbl_grup.bind("<Button-1>", lambda e: self._buka_ganti_grup())
         self.lbl_paket = ctk.CTkLabel(st_row, text="—", font=("Courier New", 8), text_color=C_MUTED)
         self.lbl_paket.pack(side="right", padx=4)
- 
+        
         # Timer display
         self.lbl_timer = ctk.CTkLabel(self, text="00:00:00",
                                        font=("Russo One", 20, "bold"), text_color=C_ACCENT2)
         self.lbl_timer.pack(pady=(2, 2))
- 
+        
         # Estimasi biaya berjalan (khusus Main Bebas)
         self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_YELLOW)
         self.lbl_estimasi.pack()
- 
+        
         # Button row
         r1 = ctk.CTkFrame(self, fg_color="transparent")
         r1.pack(pady=4, fill="x", padx=3)
@@ -4719,8 +4719,8 @@ class KartuWarnet(ctk.CTkFrame):
                  get_paket_data, get_makanan_data, get_minuman_data,
                 get_semua_kartu=None, get_daftar_grup=None, on_ganti_grup=None,
                 on_hapus=None, nama_grup=None, **kwargs):
-        super().__init__(master, fg_color=C_CARD, corner_radius=8,
-                         border_width=1, border_color=C_BORDER, **kwargs)
+        super().__init__(master, fg_color=C_BG, corner_radius=8,
+                         border_width=0, **kwargs)
         self.nomor             = nomor
         self.label_kursi       = label_kursi
         self.on_transaksi      = on_transaksi
@@ -4783,14 +4783,14 @@ class KartuWarnet(ctk.CTkFrame):
         # Warnet PCs dikunci ke grup warnet - tidak bisa diubah (hapus event binding)
         self.lbl_paket = ctk.CTkLabel(st_row, text="—", font=("Courier New", 8), text_color=C_MUTED)
         self.lbl_paket.pack(side="right", padx=4)
-
+        
         self.lbl_timer = ctk.CTkLabel(self, text="00:00:00",
                                        font=("Russo One", 20, "bold"), text_color=C_ACCENT2)
         self.lbl_timer.pack(pady=(2, 2))
-
+        
         self.lbl_estimasi = ctk.CTkLabel(self, text="", font=("Courier New", 8), text_color=C_YELLOW)
         self.lbl_estimasi.pack()
-
+        
         r1 = ctk.CTkFrame(self, fg_color="transparent")
         r1.pack(pady=4, fill="x", padx=3)
         for i in range(5):
@@ -6171,15 +6171,50 @@ class AutoRentApp(ctk.CTk):
  
         self.scroll_warnet = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         self.scroll_warnet.pack(fill="both", expand=True, padx=6, pady=6)
-        cf = ctk.CTkFrame(self.scroll_warnet, fg_color="transparent")
-        cf.pack(fill="both", expand=True)
-        cf.columnconfigure(0, weight=1); cf.columnconfigure(1, weight=1); cf.columnconfigure(2, weight=1)
-        self._grid_container_warnet = cf
-        self._col_frames_warnet = []
-        for i in range(3):
-            col = ctk.CTkFrame(cf, fg_color="transparent")
-            col.grid(row=0, column=i, sticky="nsew", padx=2)
-            self._col_frames_warnet.append(col)
+        # column frames sebagai window items langsung di _parent_canvas
+        try:
+            warnet_canvas = self.scroll_warnet._parent_canvas
+        except AttributeError:
+            warnet_canvas = None
+        self._scroll_canvas_warnet = warnet_canvas
+        self._warnet_card_windows = []  # (window_id, kartu)
+        if warnet_canvas:
+            warnet_canvas.bind("<Configure>",
+                               lambda e: self._layout_warnet_columns())
+            self.after_idle(self._layout_warnet_columns)
+
+    def _layout_warnet_columns(self):
+        canvas = self._scroll_canvas_warnet
+        if not canvas:
+            return
+        cards = self._warnet_card_windows
+        n = len(cards)
+        if n == 0:
+            canvas.configure(scrollregion=(0,0,0,0))
+            return
+        total_w = max(10, canvas.winfo_width())
+        num_cols = 3
+        gap = 10
+        col_w = max(1, (total_w - (num_cols - 1) * gap) // num_cols)
+        # Pass 1: set lebar kartu
+        for wid, kartu in cards:
+            try: canvas.itemconfig(wid, width=col_w)
+            except Exception: pass
+        self.update_idletasks()
+        # Pass 2: posisikan dengan tinggi setelah reflow
+        max_x = 0
+        max_y = 0
+        for idx, (wid, kartu) in enumerate(cards):
+            col = idx % num_cols
+            row = idx // num_cols
+            x = col * (col_w + gap)
+            y = row * (kartu.winfo_reqheight() + gap)
+            canvas.coords(wid, x, y)
+            rx = x + col_w
+            ry = y + kartu.winfo_reqheight()
+            if rx > max_x: max_x = rx
+            if ry > max_y: max_y = ry
+        canvas.configure(scrollregion=(0, 0, max_x + gap, max_y + gap))
 
     def _setup_dashboard(self):
         f = self.frames["dashboard"]
@@ -6205,15 +6240,49 @@ class AutoRentApp(ctk.CTk):
         self.btn_tambah.pack(side="right", padx=8, pady=10)
         self.scroll_dash = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         self.scroll_dash.pack(fill="both", expand=True, padx=6, pady=6)
-        cf = ctk.CTkFrame(self.scroll_dash, fg_color="transparent")
-        cf.pack(fill="both", expand=True)
-        cf.columnconfigure(0, weight=1); cf.columnconfigure(1, weight=1); cf.columnconfigure(2, weight=1)
-        self._grid_container = cf
-        self._col_frames = []
-        for i in range(3):
-            col = ctk.CTkFrame(cf, fg_color="transparent")
-            col.grid(row=0, column=i, sticky="nsew", padx=2)
-            self._col_frames.append(col)
+        # column frames sebagai window items langsung di _parent_canvas
+        try:
+            dash_canvas = self.scroll_dash._parent_canvas
+        except AttributeError:
+            dash_canvas = None
+        self._scroll_canvas_dash = dash_canvas
+        self._dash_card_windows = []  # (window_id, kartu)
+        if dash_canvas:
+            dash_canvas.bind("<Configure>", lambda e: self._layout_dash_columns())
+            self.after_idle(self._layout_dash_columns)
+
+    def _layout_dash_columns(self):
+        canvas = self._scroll_canvas_dash
+        if not canvas:
+            return
+        cards = self._dash_card_windows
+        n = len(cards)
+        if n == 0:
+            canvas.configure(scrollregion=(0,0,0,0))
+            return
+        total_w = max(10, canvas.winfo_width())
+        num_cols = 3
+        gap = 10
+        col_w = max(1, (total_w - (num_cols - 1) * gap) // num_cols)
+        # Pass 1: set lebar kartu
+        for wid, kartu in cards:
+            try: canvas.itemconfig(wid, width=col_w)
+            except Exception: pass
+        self.update_idletasks()
+        # Pass 2: posisikan dengan tinggi setelah reflow
+        max_x = 0
+        max_y = 0
+        for idx, (wid, kartu) in enumerate(cards):
+            col = idx % num_cols
+            row = idx // num_cols
+            x = col * (col_w + gap)
+            y = row * (kartu.winfo_reqheight() + gap)
+            canvas.coords(wid, x, y)
+            rx = x + col_w
+            ry = y + kartu.winfo_reqheight()
+            if rx > max_x: max_x = rx
+            if ry > max_y: max_y = ry
+        canvas.configure(scrollregion=(0, 0, max_x + gap, max_y + gap))
 
     def _unlock_tambah(self):
         self._tambah_btn_enabled = True
@@ -6246,8 +6315,8 @@ class AutoRentApp(ctk.CTk):
     def _tambah_tv(self, ip, nama, port, nama_grup=None):
         nama_grup = nama_grup or NAMA_GRUP_DEFAULT
         self.jumlah_tv += 1
-        kolom = (self.jumlah_tv - 1) % 3
-        kartu = KartuTV(self._col_frames[kolom], self.jumlah_tv,
+        canvas = self._scroll_canvas_dash
+        kartu = KartuTV(canvas, self.jumlah_tv,
                         ip=ip, port=port, label_tv=nama,
                         on_transaksi=self._catat_transaksi,
                         get_paket_data=lambda g=nama_grup: self.get_paket_data(g),
@@ -6259,16 +6328,31 @@ class AutoRentApp(ctk.CTk):
                         on_hapus=self._hapus_tv,
                         nama_grup=nama_grup,
                         is_first=(self.jumlah_tv == 1))
-        kartu.pack(fill="x", pady=2)
+        wid = canvas.create_window(0, 0, window=kartu, anchor="nw", tags=("_dash_card",))
+        self._dash_card_windows.append((wid, kartu))
         self._semua_kartu_tv.append(kartu)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
-  
+        self.after_idle(self._layout_dash_columns)
+   
     def _hapus_tv(self, kartu):
         if not messagebox.askyesno("Hapus TV", f"Yakin hapus '{kartu.label_tv}' dari dashboard?"):
             return
-        if kartu in self._semua_kartu_tv:
+        wid_to_del = None
+        for wid, k in self._dash_card_windows[:]:
+            if k is kartu:
+                wid_to_del = wid
+                self._dash_card_windows.remove((wid, k))
+                break
+        if wid_to_del is not None:
+            canvas = self._scroll_canvas_dash
+            if canvas:
+                try: canvas.delete(wid_to_del)
+                except Exception: pass
+        try:
             self._semua_kartu_tv.remove(kartu)
+        except ValueError:
+            pass
         try:
             kartu.destroy()
         except Exception:
@@ -6276,6 +6360,7 @@ class AutoRentApp(ctk.CTk):
         self.jumlah_tv = max(0, self.jumlah_tv - 1)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
+        self.after_idle(self._layout_dash_columns)
  
     def _on_kartu_ganti_grup(self, kartu, grup_baru):
         """Saat user mengganti grup tarif sebuah TV: refresh closure get_paket_data
@@ -6387,30 +6472,13 @@ class AutoRentApp(ctk.CTk):
                 print(f"[WARN] Gagal update config PC: {e}", flush=True)
 
         self.jumlah_warnet = getattr(self, 'jumlah_warnet', 0) + 1
-        kolom = (self.jumlah_warnet - 1) % 3
-        # Default group for warnet: prefer the first warnet-specific group if present,
-        # otherwise fall back to supplied nama_grup or current active grup.
         warnet_daftar = self.daftar_nama_grup(for_warnet=True)
         default_group = nama_grup or (warnet_daftar[0] if warnet_daftar else (self._grup_aktif if hasattr(self, '_grup_aktif') else NAMA_GRUP_DEFAULT))
-        # Ensure the warnet cards list exists
         if not hasattr(self, '_semua_kartu_warnet'):
             self._semua_kartu_warnet = []
-        # Defensive: ensure column frames exist
-        if not hasattr(self, '_col_frames_warnet') or not self._col_frames_warnet:
-            # Try to create a simple column container in the warnet scroll area if possible
-            try:
-                cf = ctk.CTkFrame(self.scroll_warnet, fg_color="transparent")
-                cf.pack(fill="both", expand=True)
-                cf.columnconfigure(0, weight=1)
-                self._col_frames_warnet = [cf]
-                kolom = 0
-            except Exception:
-                messagebox.showwarning("⚠ Dashboard Warnet Belum Siap",
-                                       "Container untuk kartu Warnet belum dibuat dan tidak dapat dibuat otomatis.",
-                                       parent=self)
-                return
+        canvas = self._scroll_canvas_warnet
 
-        kartu = KartuWarnet(self._col_frames_warnet[kolom], self.jumlah_warnet,
+        kartu = KartuWarnet(canvas, self.jumlah_warnet,
                             label_kursi=nama,
                             on_transaksi=self._catat_transaksi,
                             get_paket_data=lambda: self.get_paket_data("Warnet", for_warnet=True),
@@ -6421,7 +6489,8 @@ class AutoRentApp(ctk.CTk):
                             on_ganti_grup=self._on_warnet_kartu_ganti_grup,
                             on_hapus=self._hapus_warnet,
                             nama_grup=default_group)
-        kartu.pack(fill="x", pady=2)
+        wid = canvas.create_window(0, 0, window=kartu, anchor="nw", tags=("_warnet_card",))
+        self._warnet_card_windows.append((wid, kartu))
         if pc_info:
             kartu._client_id = pc_info.get("client_id")
             kartu._pc_id = pc_info.get("pc_id")
@@ -6434,6 +6503,7 @@ class AutoRentApp(ctk.CTk):
             pass
         if hasattr(self, '_refresh_warnet_footer'):
             self._refresh_warnet_footer()
+        self.after_idle(self._layout_warnet_columns)
 
     def _on_warnet_kartu_ganti_grup(self, kartu, grup_baru):
         # Warnet PC dikunci ke grup "Warnet", jadi selalu ambil paket dari "Warnet"
@@ -6455,6 +6525,18 @@ class AutoRentApp(ctk.CTk):
                     self._semua_kartu_warnet.remove(kartu)
                 except ValueError:
                     pass
+            # Remove from canvas
+            wid_to_del = None
+            for wid, k in self._warnet_card_windows[:]:
+                if k is kartu:
+                    wid_to_del = wid
+                    self._warnet_card_windows.remove((wid, k))
+                    break
+            if wid_to_del is not None:
+                canvas = self._scroll_canvas_warnet
+                if canvas:
+                    try: canvas.delete(wid_to_del)
+                    except Exception: pass
             # Destroy widget
             try:
                 kartu.destroy()
@@ -6472,6 +6554,7 @@ class AutoRentApp(ctk.CTk):
                     self._refresh_warnet_footer()
                 except Exception:
                     pass
+            self.after_idle(self._layout_warnet_columns)
             AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='success', details={'label': getattr(kartu, 'label_kursi', 'unknown')})
         except Exception as e:
             AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='failed', details={'error': str(e)})
@@ -7934,7 +8017,6 @@ class AutoRentApp(ctk.CTk):
         self.content.configure(fg_color=C_BG)
         for f in self.frames.values():
             f.configure(fg_color=C_BG)
-        self._apply_bg_image()
         if self.current_tab == "profil":
             self._setup_profil()
             self._show_tab("profil")
@@ -7947,64 +8029,49 @@ class AutoRentApp(ctk.CTk):
     #  BACKGROUND IMAGE — wallpaper di belakang Dashboard TV & Warnet
     # ──────────────────────────────────────────────────────────────────────────
     def _apply_bg_image(self, tab_key=None):
-        import tkinter as tk
-        from PIL import ImageTk
         import traceback
+        from PIL import ImageTk
 
         try:
             target_tabs = [tab_key] if tab_key else ["dashboard", "warnet"]
 
             for t in target_tabs:
-                # hapus bg canvas lama di tab ini
-                attr = f"_bg_canvas_{t}"
-                old = getattr(self, attr, None)
-                if old:
-                    old.destroy()
-                    setattr(self, attr, None)
-
                 f = self.frames.get(t)
                 if f:
                     f.configure(fg_color=C_BG)
 
-            for s in ["scroll_dash", "scroll_warnet"]:
-                if hasattr(self, s):
-                    getattr(self, s).configure(fg_color=C_BG)
-
             path = ConfigManager.get("app_bg_image", "")
             self._bg_image_path = path
-
             if not path or not os.path.isfile(path):
                 return
 
-            Image.MAX_IMAGE_PIXELS = None  # bypass limit gambar besar
-            pil_img = Image.open(path)
-            self.update_idletasks()
-            win_w = self.winfo_width() or 1280
-            win_h = self.winfo_height() or 800
-            pil_img = pil_img.resize((win_w, win_h), Image.LANCZOS)
-            if pil_img.mode not in ("RGB", "RGBA"):
-                pil_img = pil_img.convert("RGBA")
-            photo = ImageTk.PhotoImage(pil_img)
+            Image.MAX_IMAGE_PIXELS = None
 
             for t in target_tabs:
-                f = self.frames.get(t)
-                if not f:
+                s_attr = "scroll_dash" if t == "dashboard" else "scroll_warnet"
+                s = getattr(self, s_attr, None)
+                if not s:
+                    continue
+                try:
+                    canvas = s._parent_canvas
+                except AttributeError:
                     continue
 
-                # canvas sebagai background di dalam tab frame
-                canvas = tk.Canvas(f, highlightthickness=0, borderwidth=0,
-                                   bg=C_BG)
-                canvas.place(x=0, y=0, relwidth=1, relheight=1)
-                canvas.create_image(0, 0, image=photo, anchor="nw")
-                self.tk.call('lower', canvas._w)
+                self.update_idletasks()
+                cw = canvas.winfo_width() or 1280
+                bbox = canvas.bbox("all")
+                ch = max(canvas.winfo_height() or 800, bbox[3] + 50 if bbox else 800)
+                pil_img = Image.open(path)
+                pil_img = pil_img.resize((cw, ch), Image.LANCZOS)
+                if pil_img.mode not in ("RGB", "RGBA"):
+                    pil_img = pil_img.convert("RGBA")
+                photo = ImageTk.PhotoImage(pil_img)
 
-                setattr(self, f"_bg_canvas_{t}", canvas)
-                setattr(self, f"_bg_photo_{t}", photo)  # keep ref alive
-                f.configure(fg_color="transparent")
-
-                s_attr = "scroll_dash" if t == "dashboard" else "scroll_warnet"
-                if hasattr(self, s_attr):
-                    getattr(self, s_attr).configure(fg_color="transparent")
+                canvas.delete("_bg_img")
+                canvas.create_image(0, 0, image=photo, anchor="nw",
+                                    tags=("_bg_img",))
+                canvas.tag_lower("_bg_img")
+                self._bg_photo = photo
 
         except Exception as e:
             traceback.print_exc()
@@ -8031,18 +8098,18 @@ class AutoRentApp(ctk.CTk):
     def _hapus_bg_image(self):
         ConfigManager.set("app_bg_image", "")
         self._bg_image_path = ""
+        self._bg_photo = None
         for t in ["dashboard", "warnet"]:
-            attr = f"_bg_canvas_{t}"
-            c = getattr(self, attr, None)
-            if c:
-                c.destroy()
-                setattr(self, attr, None)
+            s_attr = "scroll_dash" if t == "dashboard" else "scroll_warnet"
+            s = getattr(self, s_attr, None)
+            if s:
+                try:
+                    s._parent_canvas.delete("_bg_img")
+                except AttributeError:
+                    pass
             f = self.frames.get(t)
             if f:
                 f.configure(fg_color=C_BG)
-        for s in ["scroll_dash", "scroll_warnet"]:
-            if hasattr(self, s):
-                getattr(self, s).configure(fg_color=C_BG)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 6: Profil
