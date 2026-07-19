@@ -5674,7 +5674,6 @@ class AutoRentApp(ctk.CTk):
         for w in self.winfo_children():
             w.destroy()
         self._build_layout()
-        self.after(100, self._apply_bg_image)
         self._load_riwayat()
         self._cek_adb_global_saat_start()
         self._cek_lisensi_saat_start()
@@ -6033,8 +6032,8 @@ class AutoRentApp(ctk.CTk):
         for k, btn in self.nav_btns.items():
             btn.configure(fg_color=C_ACCENT2 if k == key else "transparent",
                           text_color="white" if k == key else C_TEXT)
-        if key in ("dashboard", "warnet") and self._bg_image_path:
-            self.after(50, self._apply_bg_image)
+        if key in ("dashboard", "warnet") and ConfigManager.get("app_bg_image", ""):
+            self.after(50, lambda: self._apply_bg_image(key))
 
     def get_paket_data(self, nama_grup=None, for_warnet=False):
         """Return paket dict for a group.
@@ -7947,57 +7946,63 @@ class AutoRentApp(ctk.CTk):
     # ──────────────────────────────────────────────────────────────────────────
     #  BACKGROUND IMAGE — wallpaper di belakang Dashboard TV & Warnet
     # ──────────────────────────────────────────────────────────────────────────
-    def _apply_bg_image(self):
-        # Hapus bg label lama di content
-        for child in self.content.winfo_children():
-            if getattr(child, '_is_bg_label', False):
-                child.destroy()
-                break
-
-        path = ConfigManager.get("app_bg_image", "")
-        self._bg_image_path = path
-
-        for scroll_attr in ["scroll_dash", "scroll_warnet"]:
-            if hasattr(self, scroll_attr):
-                getattr(self, scroll_attr).configure(fg_color=C_BG)
-        for f in self.frames.values():
-            f.configure(fg_color=C_BG)
-
-        if not path or not os.path.isfile(path):
-            return
+    def _apply_bg_image(self, tab_key=None):
+        import tkinter as tk
+        from PIL import ImageTk
+        import traceback
 
         try:
-            pil_img = Image.open(path)
-            cw = self.content.winfo_width() or self.winfo_width() or 1280
-            ch = self.content.winfo_height() or self.winfo_height() or 800
-            ctk_img = ctk.CTkImage(pil_img, size=(cw, ch))
+            target_tabs = [tab_key] if tab_key else ["dashboard", "warnet"]
 
-            self.content.configure(fg_color="transparent")
-            bg_label = ctk.CTkLabel(self.content, text="", image=ctk_img,
-                                     fg_color="transparent")
-            bg_label._is_bg_label = True
+            for t in target_tabs:
+                # hapus bg label lama di tab ini
+                attr = f"_bg_label_{t}"
+                old = getattr(self, attr, None)
+                if old:
+                    old.destroy()
+                    setattr(self, attr, None)
 
-            try:
-                first = self.frames.get("dashboard") or self.frames.get("warnet")
-                if first and first.winfo_ismapped():
-                    bg_label.pack(fill="both", expand=True, before=first)
-                else:
-                    bg_label.pack(fill="both", expand=True)
-            except Exception:
-                bg_label.pack(fill="both", expand=True)
-            bg_label.lower()
-
-            for scroll_attr in ["scroll_dash", "scroll_warnet"]:
-                if hasattr(self, scroll_attr):
-                    getattr(self, scroll_attr).configure(fg_color="transparent")
-            for tab_key in ["dashboard", "warnet"]:
-                f = self.frames.get(tab_key)
+                f = self.frames.get(t)
                 if f:
-                    f.configure(fg_color="transparent")
+                    f.configure(fg_color=C_BG)
 
-            self._bg_ctk_img = ctk_img
+            for s in ["scroll_dash", "scroll_warnet"]:
+                if hasattr(self, s):
+                    getattr(self, s).configure(fg_color=C_BG)
+
+            path = ConfigManager.get("app_bg_image", "")
+            self._bg_image_path = path
+
+            if not path or not os.path.isfile(path):
+                return
+
+            pil_img = Image.open(path)
+            win_w = self.winfo_width() or 1280
+            win_h = self.winfo_height() or 800
+            photo = ImageTk.PhotoImage(pil_img.resize((win_w, win_h), Image.LANCZOS))
+
+            for t in target_tabs:
+                f = self.frames.get(t)
+                if not f:
+                    continue
+
+                # canvas sebagai background di dalam tab frame
+                canvas = tk.Canvas(f, highlightthickness=0, borderwidth=0,
+                                   bg=C_BG)
+                canvas.place(x=0, y=0, relwidth=1, relheight=1)
+                canvas.create_image(0, 0, image=photo, anchor="nw")
+                canvas.lower()
+
+                setattr(self, f"_bg_canvas_{t}", canvas)
+                setattr(self, f"_bg_photo_{t}", photo)  # keep ref alive
+                f.configure(fg_color="transparent")
+
+                s_attr = "scroll_dash" if t == "dashboard" else "scroll_warnet"
+                if hasattr(self, s_attr):
+                    getattr(self, s_attr).configure(fg_color="transparent")
 
         except Exception as e:
+            traceback.print_exc()
             print(f"Gagal load bg image: {e}")
 
     def _pilih_bg_image(self):
@@ -8013,12 +8018,26 @@ class AutoRentApp(ctk.CTk):
             return
         ConfigManager.set("app_bg_image", path)
         self._bg_image_path = path
-        self._apply_bg_image()
+        tab = self.current_tab if self.current_tab in ("dashboard", "warnet") else "dashboard"
+        self._apply_bg_image(tab)
+        if tab != self.current_tab:
+            messagebox.showinfo("Info", "Buka tab Dashboard TV atau Warnet untuk melihat background.")
 
     def _hapus_bg_image(self):
         ConfigManager.set("app_bg_image", "")
         self._bg_image_path = ""
-        self._apply_bg_image()
+        for t in ["dashboard", "warnet"]:
+            attr = f"_bg_canvas_{t}"
+            c = getattr(self, attr, None)
+            if c:
+                c.destroy()
+                setattr(self, attr, None)
+            f = self.frames.get(t)
+            if f:
+                f.configure(fg_color=C_BG)
+        for s in ["scroll_dash", "scroll_warnet"]:
+            if hasattr(self, s):
+                getattr(self, s).configure(fg_color=C_BG)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 6: Profil
