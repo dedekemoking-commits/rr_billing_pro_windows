@@ -7991,7 +7991,7 @@ class AutoRentApp(ctk.CTk):
                                    bg=C_BG)
                 canvas.place(x=0, y=0, relwidth=1, relheight=1)
                 canvas.create_image(0, 0, image=photo, anchor="nw")
-                canvas.lower()
+                self.tk.call('lower', canvas._w)
 
                 setattr(self, f"_bg_canvas_{t}", canvas)
                 setattr(self, f"_bg_photo_{t}", photo)  # keep ref alive
