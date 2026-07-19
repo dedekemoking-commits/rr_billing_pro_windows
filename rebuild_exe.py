@@ -24,9 +24,9 @@ def rebuild_app(spec_file, app_name):
     print(f"Exit code: {result.returncode}")
     
     if result.returncode == 0:
-        print(f"✓ {app_name} build completed successfully")
+        print(f"[OK] {app_name} build completed successfully")
     else:
-        print(f"✗ {app_name} build failed with exit code {result.returncode}")
+        print(f"[FAIL] {app_name} build failed with exit code {result.returncode}")
     
     return result.returncode == 0
 
@@ -43,14 +43,14 @@ def main():
     print(f"\n{'='*60}")
     print("REBUILD SUMMARY")
     print(f"{'='*60}")
-    print(f"RRBILLINGPRO.exe:  {'✓ SUCCESS' if success1 else '✗ FAILED'}")
-    print(f"RRBILLINGCLIENT.exe: {'✓ SUCCESS' if success2 else '✗ FAILED'}")
-    
+    print(f"RRBILLINGPRO.exe:  {'SUCCESS' if success1 else 'FAILED'}")
+    print(f"RRBILLINGCLIENT.exe: {'SUCCESS' if success2 else 'FAILED'}")
+
     if success1 and success2:
-        print("\n✓ All builds completed successfully!")
+        print("\nAll builds completed successfully!")
         return 0
     else:
-        print("\n✗ One or more builds failed!")
+        print("\nOne or more builds failed!")
         return 1
 
 if __name__ == "__main__":

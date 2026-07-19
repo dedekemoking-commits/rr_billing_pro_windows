@@ -7,3 +7,6 @@ bcrypt
 pillow
 cryptography
 PyJWT
+androidtvremote2
+websockets
+paramiko
