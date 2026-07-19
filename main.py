@@ -5444,8 +5444,10 @@ class AutoRentApp(ctk.CTk):
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
         self.socket_warnet_config = cfg.get("socket_warnet", {})
         self.current_tab  = None
-        self.bg_image_label = None
-        self._bg_image_path = cfg.get("app_bg_image", "")
+        self._bg_label_dash   = None
+        self._bg_label_warnet = None
+        self._bg_image_path   = cfg.get("app_bg_image", "")
+        self._bg_ctk_img      = None
 
         # ── Start Warnet Socket Server ──────────────────────────────────────────
         ws_port = cfg.get("warnet_ws_port", 5001)
@@ -6034,6 +6036,8 @@ class AutoRentApp(ctk.CTk):
         for k, btn in self.nav_btns.items():
             btn.configure(fg_color=C_ACCENT2 if k == key else "transparent",
                           text_color="white" if k == key else C_TEXT)
+        if key in ("dashboard", "warnet") and self._bg_image_path:
+            self.after(50, self._apply_bg_image)
 
     def get_paket_data(self, nama_grup=None, for_warnet=False):
         """Return paket dict for a group.
@@ -7944,28 +7948,47 @@ class AutoRentApp(ctk.CTk):
         messagebox.showinfo("✅ Tema Berubah", f"Tema diganti ke '{choice}'.")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  BACKGROUND IMAGE — wallpaper di belakang konten
+    #  BACKGROUND IMAGE — wallpaper di belakang kartu Dashboard TV & Warnet
     # ──────────────────────────────────────────────────────────────────────────
     def _apply_bg_image(self):
-        if self.bg_image_label:
-            self.bg_image_label.destroy()
-            self.bg_image_label = None
+        for attr in ['_bg_label_dash', '_bg_label_warnet']:
+            lbl = getattr(self, attr, None)
+            if lbl:
+                lbl.destroy()
+                setattr(self, attr, None)
+
         path = ConfigManager.get("app_bg_image", "")
         self._bg_image_path = path
+
+        for tab_key, scroll_attr in [("dashboard", "scroll_dash"), ("warnet", "scroll_warnet")]:
+            if hasattr(self, scroll_attr):
+                getattr(self, scroll_attr).configure(fg_color=C_BG)
+
         if not path or not os.path.isfile(path):
-            self.content.configure(fg_color=C_BG)
-            for f in self.frames.values():
-                f.configure(fg_color=C_BG)
             return
+
         try:
             pil_img = Image.open(path)
-            ctk_img = ctk.CTkImage(pil_img, size=(self.winfo_width() or 1280, self.winfo_height() or 800))
-            self.content.configure(fg_color="transparent")
-            self.bg_image_label = ctk.CTkLabel(self.content, text="", image=ctk_img)
-            self.bg_image_label.place(x=0, y=0, relwidth=1, relheight=1)
-            self.bg_image_label.lower()
-            for f in self.frames.values():
-                f.configure(fg_color="transparent")
+
+            for tab_key, scroll_attr, label_attr in [
+                ("dashboard", "scroll_dash", "_bg_label_dash"),
+                ("warnet", "scroll_warnet", "_bg_label_warnet"),
+            ]:
+                f = self.frames.get(tab_key)
+                if not f:
+                    continue
+                fw = f.winfo_width() or self.winfo_width() or 1280
+                fh = f.winfo_height() or self.winfo_height() or 800
+                ctk_img = ctk.CTkImage(pil_img, size=(fw, fh))
+
+                bg = ctk.CTkLabel(f, text="", image=ctk_img)
+                bg.place(x=0, y=0, relwidth=1, relheight=1)
+                bg.lower()
+                setattr(self, label_attr, bg)
+
+                if hasattr(self, scroll_attr):
+                    getattr(self, scroll_attr).configure(fg_color="transparent")
+
         except Exception as e:
             print(f"Gagal load bg image: {e}")
 
