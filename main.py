@@ -7955,8 +7955,8 @@ class AutoRentApp(ctk.CTk):
             target_tabs = [tab_key] if tab_key else ["dashboard", "warnet"]
 
             for t in target_tabs:
-                # hapus bg label lama di tab ini
-                attr = f"_bg_label_{t}"
+                # hapus bg canvas lama di tab ini
+                attr = f"_bg_canvas_{t}"
                 old = getattr(self, attr, None)
                 if old:
                     old.destroy()
@@ -7978,9 +7978,12 @@ class AutoRentApp(ctk.CTk):
 
             Image.MAX_IMAGE_PIXELS = None  # bypass limit gambar besar
             pil_img = Image.open(path)
+            self.update_idletasks()
             win_w = self.winfo_width() or 1280
             win_h = self.winfo_height() or 800
-            pil_img.thumbnail((win_w, win_h), Image.LANCZOS)
+            pil_img = pil_img.resize((win_w, win_h), Image.LANCZOS)
+            if pil_img.mode not in ("RGB", "RGBA"):
+                pil_img = pil_img.convert("RGBA")
             photo = ImageTk.PhotoImage(pil_img)
 
             for t in target_tabs:
