@@ -411,6 +411,9 @@ class FirestoreClient:
     def update_invoice(self, invoice_id: str, updates: dict) -> bool:
         return self.set_document(f"invoices/{invoice_id}", updates, merge=True)
 
+    def create_invoice(self, invoice_id: str, data: dict) -> bool:
+        return self.set_document(f"invoices/{invoice_id}", data, merge=False)
+
 
 # ── License Poller ────────────────────────────────────────────────────────
 

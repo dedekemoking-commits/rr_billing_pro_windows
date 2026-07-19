@@ -7865,16 +7865,144 @@ class AutoRentApp(ctk.CTk):
                      justify="center").pack(pady=10)
 
     def _pilih_paket_bayar(self, nama, harga):
-        import urllib.parse
-        pesan = (
-            f"Halo Admin RR Billing Pro 👋\n\n"
-            f"Saya ingin berlangganan:\n"
-            f"📦 Paket: {nama}\n"
-            f"💰 Harga: {harga}\n\n"
-            f"Mohon info rekening/QRIS pembayaran. Terima kasih!"
+        self._buka_dialog_pembayaran(nama, harga)
+
+    def _buka_dialog_pembayaran(self, nama_paket, harga_str):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("💳 Pembayaran Paket")
+        dlg.configure(fg_color=C_BG)
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="💳  PEMBAYARAN",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(pady=(14, 2))
+        ctk.CTkLabel(dlg, text=f"{nama_paket}  —  {harga_str}",
+                     font=("Russo One", 14, "bold"), text_color=C_TEXT).pack(pady=(0, 6))
+
+        qris_path = app_path("qris.png")
+        if os.path.exists(qris_path):
+            try:
+                from PIL import Image
+                img = Image.open(qris_path)
+                img.thumbnail((280, 280), Image.LANCZOS)
+                ctk_img = ctk.CTkImage(light_image=img, dark_image=img,
+                                        size=(img.width, img.height))
+                ctk.CTkLabel(dlg, image=ctk_img, text="").pack(pady=2)
+            except Exception:
+                ctk.CTkLabel(dlg, text="(Gagal memuat QRIS)",
+                             font=FONT_SMALL, text_color=C_MUTED).pack(pady=2)
+        else:
+            ctk.CTkLabel(dlg, text="(QRIS tidak tersedia — letakkan qris.png di folder app)",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(pady=2)
+
+        frame_metode = ctk.CTkFrame(dlg, fg_color=C_PANEL, corner_radius=10)
+        frame_metode.pack(fill="x", padx=24, pady=4)
+        ctk.CTkLabel(frame_metode, text="Metode Pembayaran:",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=14, pady=(8, 2))
+        for m in [
+            "🏦 BCA        : 6145375553  a/n Rahmadani",
+            "🏦 BRI        : 0256 0109 2349 500  a/n Rahmadani",
+            "💚 GoPay/OVO/Dana : 0812-7064-7744 a/n Rahmadani",
+        ]:
+            ctk.CTkLabel(frame_metode, text=m, font=("Consolas", 11),
+                         text_color=C_TEXT, anchor="w").pack(fill="x", padx=14, pady=1)
+        ctk.CTkLabel(frame_metode, text="", font=("", 2)).pack()
+
+        frame_btn = ctk.CTkFrame(dlg, fg_color="transparent")
+        frame_btn.pack(fill="x", padx=24, pady=(8, 4))
+        btn_upload = ctk.CTkButton(frame_btn, text="📤  Upload Bukti Pembayaran", height=38,
+                                   fg_color=C_ACCENT2, hover_color="#5A0FCC",
+                                   font=("Russo One", 11, "bold"),
+                                   command=lambda: self._upload_bukti(dlg, nama_paket, harga_str, lbl_status, btn_upload))
+        btn_upload.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(frame_btn, text="⏳  Bayar Nanti", width=150, height=38,
+                      fg_color=C_BTN, hover_color=C_ACCENT2,
+                      border_width=1, border_color=C_MUTED,
+                      font=FONT_SUB, text_color=C_MUTED,
+                      command=dlg.destroy).pack(side="right")
+
+        lbl_status = ctk.CTkLabel(dlg, text="", font=FONT_SMALL, text_color=C_GREEN,
+                                   wraplength=460, justify="center")
+        lbl_status.pack(pady=(4, 12))
+
+        dlg.geometry("500x620")
+
+    def _upload_bukti(self, dlg, nama_paket, harga_str, lbl_status, btn_upload):
+        import base64, string
+        from tkinter import filedialog
+        from firestore_sync import FirestoreClient
+        path = filedialog.askopenfilename(
+            parent=dlg,
+            title="Pilih Bukti Pembayaran",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg"), ("All files", "*.*")]
         )
-        url = "https://wa.me/6281270647744?text=" + urllib.parse.quote(pesan)
-        webbrowser.open(url)
+        if not path:
+            return
+
+        try:
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception as e:
+            lbl_status.configure(text=f"✖ Gagal baca file: {e}", text_color=C_RED)
+            return
+
+        # Parse numeric price
+        harga_clean = harga_str.split("/")[0].replace("Rp", "").replace(" ", "").replace(".", "")
+        try:
+            harga_num = int(harga_clean)
+        except ValueError:
+            harga_num = 0
+
+        # Normalize package name for License Generator
+        paket_map = {"Bulanan": "1 Bulan", "3 Bulan": "3 Bulan", "Tahunan": "1 Tahun", "LIFETIME": "LIFETIME"}
+        paket_norm = paket_map.get(nama_paket, nama_paket)
+
+        # Generate invoice ID
+        from datetime import datetime
+        ts = datetime.now()
+        date_part = ts.strftime("%Y%m%d")
+        rand_part = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        inv_id = f"INV-{date_part}-{rand_part}"
+
+        uname = self.current_user or ""
+        email = get_firebase_auth().get_email() or ""
+
+        inv_data = {
+            "id": inv_id,
+            "username": uname,
+            "email": email,
+            "paket": paket_norm,
+            "harga": harga_num,
+            "status": "WAITING_CONFIRMATION",
+            "dibuat": int(ts.timestamp() * 1000),
+            "dibayar": 0,
+            "confirmedBy": "",
+            "kodeLisensi": "",
+            "buktiBase64": b64,
+        }
+
+        try:
+            fc = FirestoreClient()
+            ok = fc.create_invoice(inv_id, inv_data)
+            if not ok:
+                lbl_status.configure(text="✖ Gagal simpan invoice ke cloud.", text_color=C_RED)
+                return
+        except Exception as e:
+            lbl_status.configure(text=f"✖ Gagal simpan: {e}", text_color=C_RED)
+            return
+
+        lbl_status.configure(
+            text=f"✅  Bukti terkirim!\n"
+                 f"Invoice: {inv_id}\n"
+                 f"Menunggu konfirmasi admin via License Generator...",
+            text_color=C_GREEN)
+        btn_upload.configure(state="disabled", text="✓  Terkirim")
+        AuditLogger.log(
+            action="upload_bukti_bayar",
+            username=uname,
+            status="success",
+            details={"paket": nama_paket, "invoice_id": inv_id})
 
     def _tampilkan_qris(self):
         """Tampilkan dialog popup gambar QRIS pembayaran."""
