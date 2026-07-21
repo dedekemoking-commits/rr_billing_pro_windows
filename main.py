@@ -1241,6 +1241,8 @@ class ADBHelper:
     """Wrapper untuk Android TV Remote v2 — menggantikan ADB sepenuhnya."""
 
     _instances: dict[str, tv_mesin.AndroidTVRemote] = {}
+    _connection_methods: dict[str, str] = {}
+    _cert_paths: dict[str, str] = {}
     _lock = threading.Lock()
 
     @classmethod
@@ -1260,6 +1262,15 @@ class ADBHelper:
             return False
 
     @classmethod
+    def set_connection_method(cls, ip, method="atpv2"):
+        with cls._lock:
+            cls._connection_methods[ip] = method
+
+    @classmethod
+    def get_connection_method(cls, ip):
+        return cls._connection_methods.get(ip, "atpv2")
+
+    @classmethod
     def pair_dan_connect(cls, ip, pair_port, kode_pairing=None):
         try:
             result = tv_mesin.pair_tv_sync(ip, api_port=pair_port, pair_port=pair_port + 1)
@@ -1270,6 +1281,7 @@ class ADBHelper:
             fin = tv_mesin.finish_pair_sync(remote_obj, pin)
             if fin.get("status") != "paired":
                 return False, None, fin.get("message", "PIN salah atau pairing gagal")
+            cls.set_connection_method(ip, "atpv2")
             rem = cls._get_remote(ip)
             conn = rem.connect_blocking(ip)
             if conn.get("status") == "connected":
@@ -1279,18 +1291,32 @@ class ADBHelper:
             return False, None, str(e)
 
     @classmethod
-    def connect(cls, ip, port=0):
+    def connect(cls, ip, port=0, method="atpv2"):
+        cls.set_connection_method(ip, method)
         rem = cls._get_remote(ip)
-        res = rem.connect_blocking(ip)
+        res = rem.connect_blocking(ip) if method == "atpv2" else ADBHelper._adb_connect(ip, port)
         if res.get("status") == "connected":
             return True, res.get("message", f"Terhubung ke {ip}")
         return False, res.get("message", "Gagal terhubung")
+
+    @classmethod
+    def _adb_connect(cls, ip, port=5555):
+        import subprocess
+        try:
+            r = subprocess.run(["adb", "connect", f"{ip}:{port}"],
+                               capture_output=True, text=True, timeout=10)
+            if "connected" in r.stdout.lower() or "already connected" in r.stdout.lower():
+                return {"status": "connected", "message": r.stdout.strip()}
+            return {"status": "error", "message": r.stdout.strip() or r.stderr.strip()}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     @classmethod
     def disconnect(cls, ip, port=0):
         rem = cls._instances.pop(ip, None)
         if rem:
             rem.disconnect()
+        cls._connection_methods.pop(ip, None)
         return True, "Disconnected"
 
     @classmethod
@@ -1305,8 +1331,23 @@ class ADBHelper:
     def status_untuk_ip(cls, ip, port=0):
         rem = cls._instances.get(ip)
         if rem and rem.is_connected():
-            return "device", ""
+            method = cls._connection_methods.get(ip, "atpv2")
+            return "device", method
         return "not_found", ""
+
+    @classmethod
+    def check_connection(cls, ip):
+        rem = cls._instances.get(ip)
+        if not rem:
+            return False, "Tidak ada instance"
+        return rem.is_connected(), ""
+
+    @classmethod
+    def check_connection_detail(cls, ip):
+        rem = cls._instances.get(ip)
+        if not rem:
+            return {"status": "error", "message": "Tidak ada instance"}
+        return rem.check_connection_blocking()
 
     @classmethod
     def power_toggle(cls, ip, port=0):
@@ -2956,6 +2997,7 @@ class LoginPage(ctk.CTkFrame):
         ok, msg = auth.login_with_google()
         if ok:
             email = auth.get_email() or ""
+            nama = auth.get_display_name() or ""
             self.lbl_status.configure(text="✅ Login Google berhasil", text_color=C_GREEN)
             uname = self._find_username_by_email(email)
             if not uname:
@@ -2967,16 +3009,115 @@ class LoginPage(ctk.CTkFrame):
             if uname:
                 self.on_login_success(uname, "admin")
             else:
-                self.lbl_status.configure(text="✖ Email tidak terdaftar — hubungi admin", text_color=C_RED)
+                self._show_register_google_dialog(email, nama)
         else:
             self.lbl_status.configure(text=f"✖ {msg}", text_color=C_RED)
 
+    def _show_register_google_dialog(self, email, nama_google):
+        username_auto = email.split("@")[0].replace(".", "_").replace("-", "_").lower()
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("📝  Lengkapi Data Rental")
+        dlg.geometry("420x440")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(scroll, text="🎉  Akun Baru Ditemukan!",
+                     font=("Russo One", 16, "bold"), text_color=C_ACCENT).pack(pady=(8, 4))
+        ctk.CTkLabel(scroll, text="Lengkapi data rental Anda untuk melanjutkan.",
+                     font=FONT_BODY, text_color=C_MUTED).pack(pady=(0, 16))
+
+        card = ctk.CTkFrame(scroll, fg_color=C_CARD, corner_radius=14)
+        card.pack(fill="x")
+
+        fields = [
+            ("email",     "📧  Email",          email, False),
+            ("nama",      "👤  Nama Pemilik",   nama_google, False),
+            ("username",  "🔑  Username",       username_auto, False),
+        ]
+        entries = {}
+        for key, label, val, _ in fields:
+            ctk.CTkLabel(card, text=label, font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=18, pady=(10, 2))
+            e = ctk.CTkEntry(card, fg_color=C_BTN, text_color=C_TEXT,
+                             border_color=C_BORDER, font=FONT_BODY, height=34)
+            e.insert(0, val)
+            e.configure(state="readonly")
+            e.pack(fill="x", padx=18, pady=(0, 2))
+            entries[key] = e
+
+        # Editable fields
+        ctk.CTkLabel(card, text="🏪  Nama Rental *", font=FONT_LABEL, text_color=C_ACCENT2).pack(anchor="w", padx=18, pady=(10, 2))
+        entry_rental = ctk.CTkEntry(card, placeholder_text="contoh: RR Gaming PS", fg_color=C_BTN, text_color=C_TEXT,
+                                     border_color=C_BORDER, font=FONT_BODY, height=34)
+        entry_rental.pack(fill="x", padx=18, pady=(0, 2))
+
+        ctk.CTkLabel(card, text="📍  Alamat Rental *", font=FONT_LABEL, text_color=C_ACCENT2).pack(anchor="w", padx=18, pady=(10, 2))
+        entry_alamat = ctk.CTkTextbox(card, height=60, fg_color=C_BTN, text_color=C_TEXT,
+                                       border_color=C_BORDER, font=FONT_BODY)
+        entry_alamat.pack(fill="x", padx=18, pady=(0, 2))
+
+        ctk.CTkLabel(card, text="📱  No. WhatsApp *", font=FONT_LABEL, text_color=C_ACCENT2).pack(anchor="w", padx=18, pady=(10, 2))
+        entry_wa = ctk.CTkEntry(card, placeholder_text="08xxxxxxxxxx", fg_color=C_BTN, text_color=C_TEXT,
+                                 border_color=C_BORDER, font=FONT_BODY, height=34)
+        entry_wa.pack(fill="x", padx=18, pady=(0, 16))
+
+        lbl_error = ctk.CTkLabel(scroll, text="", font=FONT_LABEL, text_color=C_RED)
+        lbl_error.pack(pady=(4, 2))
+
+        def _save():
+            rental = entry_rental.get().strip()
+            alamat = entry_alamat.get("1.0", "end").strip()
+            wa = entry_wa.get().strip()
+            if not rental or not alamat or not wa:
+                lbl_error.configure(text="⚠  Nama Rental, Alamat, dan No WA wajib diisi.", text_color=C_YELLOW)
+                return
+            uname = username_auto
+            cfg = ConfigManager.load()
+            users = cfg.get("users", {})
+            if uname in users:
+                uname = uname + "_" + str(len(users) + 1)
+            users[uname] = {"password": hash_password("google_" + uname), "role": "admin", "email": email}
+            cfg["users"] = users
+            profil = cfg.get("profil_rental", {})
+            profil[uname] = {
+                "nama_pemilik":   nama_google or rental,
+                "nama_rental":    rental,
+                "email":          email,
+                "hp":             wa,
+                "alamat":         alamat,
+                "tanggal_daftar": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "sumber":         "google",
+            }
+            cfg["profil_rental"] = profil
+            ConfigManager.save(cfg)
+            AuditLogger.log(action="register_google", username=uname, status="success",
+                            details={"email": email, "sumber": "google"})
+            LicenseManager._set_trial_status_in_config(uname, date.today())
+            dlg.destroy()
+            self.on_login_success(uname, "admin")
+
+        btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(8, 4))
+        ctk.CTkButton(btn_frame, text="✅  Daftar & Masuk", height=40,
+                      fg_color=C_ACCENT2, font=("Russo One", 12, "bold"), text_color="white",
+                      command=_save).pack(fill="x")
+        ctk.CTkButton(btn_frame, text="❌  Batal", height=36,
+                      fg_color=C_RED, font=("Russo One", 10, "bold"), text_color="white",
+                      command=dlg.destroy).pack(fill="x", pady=(6, 0))
+
     def _find_username_by_email(self, email: str):
         try:
-            users = ConfigManager.get("users", {})
             profil = ConfigManager.get("profil_rental", {})
             for uname, p in profil.items():
                 if isinstance(p, dict) and p.get("email", "").lower() == email.lower():
+                    return uname
+            users = ConfigManager.get("users", {})
+            for uname, u in users.items():
+                if isinstance(u, dict) and u.get("email", "").lower() == email.lower():
                     return uname
         except Exception:
             pass
@@ -3061,7 +3202,7 @@ class DialogGantiIP(ctk.CTkToplevel):
     def __init__(self, master, label_tv, ip_lama, port_lama, on_confirm):
         super().__init__(master)
         self.title(f"Ganti IP — {label_tv}")
-        self.geometry("360x240")
+        self.geometry("360x300")
         self.configure(fg_color=C_BG)
         self.transient(master)
         self.resizable(False, False)
@@ -3070,12 +3211,12 @@ class DialogGantiIP(ctk.CTkToplevel):
         self.on_confirm = on_confirm
         self._connected = False
         self._build()
-        center_window(self, master, width=360, height=240)
+        center_window(self, master, width=360, height=300)
         self.after(50, self.grab_set)
 
     def _build(self):
         ctk.CTkLabel(self, text=f"📺  {self.label_tv}", font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(16, 4))
-        ctk.CTkLabel(self, text="Masukkan IP baru lalu tes koneksi (Android Remote v2)",
+        ctk.CTkLabel(self, text="Masukkan IP baru lalu tes koneksi",
                      font=FONT_BODY, text_color=C_MUTED).pack(pady=(0, 10))
 
         row = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
@@ -3100,11 +3241,11 @@ class DialogGantiIP(ctk.CTkToplevel):
         self.lbl_status.pack(pady=(0, 8))
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=18, pady=(0, 14))
+        btn_frame.pack(fill="x", padx=18, pady=(8, 18))
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
-        ctk.CTkButton(btn_frame, text="✖  Batal", fg_color=C_RED, command=self.destroy).grid(row=0, column=0, sticky="we", padx=(0, 6))
-        ctk.CTkButton(btn_frame, text="✅  Simpan", fg_color=C_ACCENT2, command=self._konfirmasi).grid(row=0, column=1, sticky="we", padx=(6, 0))
+        ctk.CTkButton(btn_frame, text="✖  Batal", fg_color=C_RED, font=FONT_SUB, height=36, command=self.destroy).grid(row=0, column=0, sticky="we", padx=(0, 6))
+        ctk.CTkButton(btn_frame, text="✅  Simpan", fg_color=C_ACCENT2, font=FONT_SUB, height=36, command=self._konfirmasi).grid(row=0, column=1, sticky="we", padx=(6, 0))
 
         self.entry_ip.focus_set()
 
@@ -3116,8 +3257,9 @@ class DialogGantiIP(ctk.CTkToplevel):
         self.btn_tes.configure(text="⏳...", state="disabled")
         threading.Thread(target=self._connect_thread, args=(ip,), daemon=True).start()
 
-    def _connect_thread(self, ip):
+    def _connect_thread(self, ip, method="atpv2"):
         try:
+            ADBHelper.set_connection_method(ip, method)
             sukses, status_awal, pesan = ADBHelper.cek_dan_reconnect(ip)
         except Exception as e:
             sukses, status_awal, pesan = False, 'error', str(e)
@@ -3131,6 +3273,49 @@ class DialogGantiIP(ctk.CTkToplevel):
         else:
             self._connected = False
             self.lbl_status.configure(text=f"✖ Gagal: {pesan}", text_color=C_RED)
+            if "sertifikat" in pesan.lower() or "pairing" in pesan.lower():
+                if messagebox.askyesno("Pairing Diperlukan",
+                                       "TV ini belum pernah di-pair. Lakukan pairing sekarang?",
+                                       parent=self):
+                    threading.Thread(target=self._pairing_flow, args=(ip,), daemon=True).start()
+
+    def _pairing_flow(self, ip):
+        try:
+            result = tv_mesin.pair_tv_sync(ip)
+            if result.get("status") != "pairing_started":
+                self.after(0, lambda: self.lbl_status.configure(
+                    text=f"✖ Gagal pairing: {result.get('message', '?')}", text_color=C_RED))
+                return
+            remote_obj = result.get("remote")
+            pin_holder = {"value": None}
+            def on_pin(pin):
+                pin_holder["value"] = pin
+            def on_cancel():
+                pin_holder["value"] = "CANCEL"
+            self.after(0, lambda: DialogPinInput(self, on_pin, on_cancel))
+            while pin_holder["value"] is None:
+                import time as _t
+                _t.sleep(0.1)
+            if pin_holder["value"] == "CANCEL":
+                self.after(0, lambda: self.lbl_status.configure(text="⛔ Pairing dibatalkan", text_color=C_YELLOW))
+                return
+            fin = tv_mesin.finish_pair_sync(remote_obj, pin_holder["value"])
+            if fin.get("status") != "paired":
+                self.after(0, lambda: self.lbl_status.configure(
+                    text=f"✖ PIN salah: {fin.get('message', '?')}", text_color=C_RED))
+                return
+            ADBHelper.set_connection_method(ip, "atpv2")
+            sukses2, _, pesan2 = ADBHelper.cek_dan_reconnect(ip)
+            if sukses2:
+                self.after(0, lambda: self.lbl_status.configure(
+                    text=f"✅ Pairing & terhubung — {ip}", text_color=C_GREEN))
+                self.after(0, lambda: setattr(self, '_connected', True))
+            else:
+                self.after(0, lambda: self.lbl_status.configure(
+                    text=f"✖ Gagal connect setelah pair: {pesan2}", text_color=C_RED))
+        except Exception as e:
+            self.after(0, lambda: self.lbl_status.configure(
+                text=f"✖ Error: {e}", text_color=C_RED))
 
     def _konfirmasi(self):
         new_ip = self.entry_ip.get().strip()
@@ -3148,21 +3333,23 @@ class DialogGantiIP(ctk.CTkToplevel):
 #  DIALOG TAMBAH TV
 # ═══════════════════════════════════════════════════════════════════════════════
 class DialogPinInput(ctk.CTkToplevel):
-    """Popup kecil untuk input PIN 6 digit dari TV."""
+    """Popup kecil untuk input kode pairing alfanumerik dari TV."""
     def __init__(self, master, on_submit, on_cancel):
         super().__init__(master)
         self.on_submit = on_submit
         self.on_cancel = on_cancel
-        self.title("Masukkan PIN dari TV")
-        self.geometry("340x180")
+        self.title("Kode Pairing dari TV")
+        self.geometry("360x200")
         self.configure(fg_color=C_BG)
         self.transient(master)
         self.resizable(False, False)
         self.grab_set()
-        ctk.CTkLabel(self, text="🔐  Masukkan PIN 6 digit yang muncul di TV",
-                     font=FONT_BODY, text_color=C_YELLOW).pack(pady=(18, 8))
-        self.entry_pin = ctk.CTkEntry(self, placeholder_text="000000",
-                                       font=("Consolas", 20, "bold"), width=180, height=40,
+        ctk.CTkLabel(self, text="🔐  Masukkan kode pairing yang muncul di TV",
+                     font=FONT_BODY, text_color=C_YELLOW).pack(pady=(18, 4))
+        ctk.CTkLabel(self, text="(alfanumerik, 4-6 karakter)",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
+        self.entry_pin = ctk.CTkEntry(self, placeholder_text="contoh: A1B2C3",
+                                       font=("Consolas", 20, "bold"), width=200, height=44,
                                        fg_color=C_BTN, text_color=C_GREEN, border_color=C_GREEN,
                                        justify="center")
         self.entry_pin.pack(pady=4)
@@ -3176,15 +3363,14 @@ class DialogPinInput(ctk.CTkToplevel):
                       fg_color=C_RED, command=self._cancel).pack(side="left", padx=6)
 
     def _submit(self):
-        raw = self.entry_pin.get().strip()
-        pin = "".join(ch for ch in raw if ch.isdigit())
-        if not pin:
-            messagebox.showwarning("PIN Salah", "Masukkan kode PIN dari TV", parent=self)
+        raw = self.entry_pin.get().strip().upper()
+        if not raw:
+            messagebox.showwarning("Kode Kosong", "Masukkan kode pairing dari TV", parent=self)
             return
-        if len(pin) != 6:
-            messagebox.showwarning("PIN Salah", "PIN harus terdiri dari 6 digit angka", parent=self)
+        if len(raw) < 4 or len(raw) > 6:
+            messagebox.showwarning("Kode Salah", "Kode pairing terdiri dari 4-6 karakter", parent=self)
             return
-        self.on_submit(pin)
+        self.on_submit(raw)
         self.destroy()
 
     def _cancel(self):
@@ -3246,7 +3432,6 @@ class DialogTambahTV(ctk.CTkToplevel):
                                       fg_color=C_BTN, text_color=C_ACCENT,
                                       border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
         self.entry_ip.pack(fill="x", padx=14, pady=(0, 10))
-
     def _build_status_bar(self):
         self.lbl_status = ctk.CTkLabel(self, text="", font=FONT_SMALL, text_color=C_MUTED)
         self.lbl_status.pack(pady=(8, 2))
@@ -3327,6 +3512,7 @@ class DialogTambahTV(ctk.CTkToplevel):
         ip = self._pairing_ip
         self.lbl_status.configure(text="⏳  Pair OK — menghubungkan...", text_color=C_GREEN)
         try:
+            ADBHelper.set_connection_method(ip, "atpv2")
             rem = tv_mesin.AndroidTVRemote()
             conn = rem.connect_blocking(ip)
             if conn.get("status") == "connected":
@@ -4013,6 +4199,8 @@ class KartuTV(ctk.CTkFrame):
         self._timer_job    = None
         self._last_transaction_item = None
         self._warning_blink_on = False
+        self._timer_paused = False
+        self._timer_was_running = False
 
         self._build()
  
@@ -4043,8 +4231,20 @@ class KartuTV(ctk.CTkFrame):
                                        font=("Russo One", 8, "bold"), text_color="white",
                                        command=self._confirm_hapus)
         self.btn_hapus.pack(side="right", padx=(0, 8))
- 
- 
+
+        # IP + method badge row
+        ip_row = ctk.CTkFrame(hdr, fg_color=C_ACCENT2)
+        ip_row.pack(fill="x", padx=4, pady=(0, 6))
+        self.lbl_ip_footer = ctk.CTkLabel(ip_row, text=f"IP: {self.ip}",
+                                           font=("Courier New", 8, "bold"), text_color="white")
+        self.lbl_ip_footer.pack(side="left", padx=(8, 0))
+        _method = ADBHelper.get_connection_method(self.ip)
+        _badge_text = "ONLINE" if _method == "atpv2" else "ADB"
+        _badge_color = "#00D68F" if _method == "atpv2" else "#FFAA00"
+        self.lbl_metode_badge = ctk.CTkLabel(ip_row, text=_badge_text,
+                                              font=("Courier New", 8, "bold"), text_color=_badge_color)
+        self.lbl_metode_badge.pack(side="right", padx=(0, 8))
+  
         # Status row: HIDEN/Reguler indicators
         st_row = ctk.CTkFrame(self, fg_color="transparent")
         st_row.pack(fill="x", padx=3, pady=(0, 4))
@@ -4172,7 +4372,7 @@ class KartuTV(ctk.CTkFrame):
             display_label = display_label[3:]
         self.lbl_tv_name.configure(text=display_label)
         if hasattr(self, 'lbl_ip_footer'):
-            self.lbl_ip_footer.configure(text=self.ip)
+            self.lbl_ip_footer.configure(text=f"IP: {self.ip}")
         AuditLogger.log(action="rename_tv", username="", status="success", details={"old": lama, "new": nama_baru})
  
     def _confirm_hapus(self):
@@ -4188,6 +4388,14 @@ class KartuTV(ctk.CTkFrame):
                 self.lbl_port_info.configure(text=f"Port {self.port}")
         except Exception:
             pass
+        if hasattr(self, 'lbl_ip_footer'):
+            self.lbl_ip_footer.configure(text=f"IP: {self.ip}")
+        if hasattr(self, 'lbl_metode_badge'):
+            _method = ADBHelper.get_connection_method(self.ip)
+            self.lbl_metode_badge.configure(
+                text="ONLINE" if _method == "atpv2" else "ADB",
+                text_color="#00D68F" if _method == "atpv2" else "#FFAA00"
+            )
         if hasattr(self, 'btn_status'):
             self.btn_status.configure(text="● ON", fg_color=C_GREEN, border_color=C_GREEN)
 
@@ -4245,10 +4453,19 @@ class KartuTV(ctk.CTkFrame):
         sukses, status_awal, pesan = ADBHelper.cek_dan_reconnect(self.ip, self.port)
         self.after(0, self._cek_koneksi_selesai, sukses, status_awal, pesan)
 
+    def _refresh_metode_badge(self):
+        if hasattr(self, 'lbl_metode_badge'):
+            _method = ADBHelper.get_connection_method(self.ip)
+            self.lbl_metode_badge.configure(
+                text="ONLINE" if _method == "atpv2" else "ADB",
+                text_color="#00D68F" if _method == "atpv2" else "#FFAA00"
+            )
+
     def _cek_koneksi_selesai(self, sukses, status_awal, pesan):
         self._cek_busy = False
         if hasattr(self, 'btn_status'):
             self.btn_status.configure(state="normal")
+        self._refresh_metode_badge()
         if sukses:
             self.connected = True
             if hasattr(self, 'btn_status'):
@@ -4448,6 +4665,8 @@ class KartuTV(ctk.CTkFrame):
 
     # ── Timer paket berwaktu (mundur) ───────────────────────────────────────
     def _tick_waktu(self):
+        if self._timer_paused:
+            return
         if self.sisa_waktu > 0:
             h, rem = divmod(self.sisa_waktu, 3600)
             m, s   = divmod(rem, 60)
@@ -4464,7 +4683,8 @@ class KartuTV(ctk.CTkFrame):
                 self.configure(fg_color="white")
                 self.lbl_timer.configure(text_color=C_ACCENT2)
             self.sisa_waktu -= 1
-            self._timer_job = self.after(1000, self._tick_waktu)
+            if not self._timer_paused:
+                self._timer_job = self.after(1000, self._tick_waktu)
         else:
             # WAKTU HABIS — auto power off dan selesai sesi
             self.lbl_timer.configure(text="WAKTU HABIS ⏹", text_color=C_RED)
@@ -4518,7 +4738,7 @@ class KartuTV(ctk.CTkFrame):
 
     # ── Timer Main Bebas (maju, hitung estimasi biaya berjalan) ─────────────
     def _tick_bebas(self):
-        if not self.is_bebas or self.waktu_mulai is None:
+        if self._timer_paused or not self.is_bebas or self.waktu_mulai is None:
             return
         total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds())
         h, rem = divmod(total_detik, 3600)
@@ -4534,7 +4754,25 @@ class KartuTV(ctk.CTkFrame):
             text_color=C_YELLOW
         )
 
-        self._timer_job = self.after(1000, self._tick_bebas)
+        if not self._timer_paused:
+            self._timer_job = self.after(1000, self._tick_bebas)
+
+    # ── Pause/Resume timer untuk virtual scroll ────────────────────────────
+    def _pause_timer(self):
+        self._timer_paused = True
+        self._timer_was_running = self._timer_job is not None
+        if self._timer_job:
+            self.after_cancel(self._timer_job)
+            self._timer_job = None
+
+    def _resume_timer(self):
+        self._timer_paused = False
+        if self._timer_was_running:
+            self._timer_was_running = False
+            if self.is_bebas:
+                self._tick_bebas()
+            elif self.sisa_waktu > 0:
+                self._tick_waktu()
 
     # ── Hitung total menit yang sudah dipakai sesi saat ini ─────────────────
     def _total_menit_terpakai(self):
@@ -4742,6 +4980,8 @@ class KartuWarnet(ctk.CTkFrame):
         self.biaya_pesanan     = 0
         self.paket_harga_tetap = 0
         self._timer_job        = None
+        self._timer_paused = False
+        self._timer_was_running = False
         self._last_transaction_item = None
         self.is_on            = False
         self._warning_blink_on = False
@@ -5151,6 +5391,8 @@ class KartuWarnet(ctk.CTkFrame):
             app._refresh_warnet_footer()
 
     def _tick_waktu(self):
+        if self._timer_paused:
+            return
         if self.sisa_waktu > 0:
             h, rem = divmod(self.sisa_waktu, 3600)
             m, s = divmod(rem, 60)
@@ -5167,7 +5409,8 @@ class KartuWarnet(ctk.CTkFrame):
                 self.configure(fg_color="white")
                 self.lbl_timer.configure(text_color=C_ACCENT2)
             self.sisa_waktu -= 1
-            self._timer_job = self.after(1000, self._tick_waktu)
+            if not self._timer_paused:
+                self._timer_job = self.after(1000, self._tick_waktu)
         else:
             self.lbl_timer.configure(text="WAKTU HABIS ⏹", text_color=C_RED)
             total_akhir = self.paket_harga_tetap + self.biaya_pesanan
@@ -5222,7 +5465,7 @@ class KartuWarnet(ctk.CTkFrame):
             self._reset_sesi()
 
     def _tick_bebas(self):
-        if not self.is_bebas or self.waktu_mulai is None:
+        if self._timer_paused or not self.is_bebas or self.waktu_mulai is None:
             return
         total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds())
         h, rem = divmod(total_detik, 3600)
@@ -5236,7 +5479,24 @@ class KartuWarnet(ctk.CTkFrame):
             text=f"Total berjalan: {fmt_rp(total_berjalan)}",
             text_color=C_YELLOW
         )
-        self._timer_job = self.after(1000, self._tick_bebas)
+        if not self._timer_paused:
+            self._timer_job = self.after(1000, self._tick_bebas)
+
+    def _pause_timer(self):
+        self._timer_paused = True
+        self._timer_was_running = self._timer_job is not None
+        if self._timer_job:
+            self.after_cancel(self._timer_job)
+            self._timer_job = None
+
+    def _resume_timer(self):
+        self._timer_paused = False
+        if self._timer_was_running:
+            self._timer_was_running = False
+            if self.is_bebas:
+                self._tick_bebas()
+            elif self.sisa_waktu > 0:
+                self._tick_waktu()
 
     def _total_menit_terpakai(self):
         if self.is_bebas:
@@ -5451,12 +5711,24 @@ class AutoRentApp(ctk.CTk):
         self.warnet_server = WarnetSocketServer(app=self, ws_port=ws_port)
         self.warnet_server.start()
 
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
+
         self._show_login()
 
         threading.Thread(
             target=lambda: get_firebase_auth().ensure_anonymous(),
             daemon=True
         ).start()
+
+    def _on_app_close(self):
+        self.warnet_server.stop()
+        try:
+            loop = _WSLoopThread.get_loop()
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+        except Exception:
+            pass
+        self.destroy()
 
     def _lakukan_aktivasi(self):
         kode = self.entry_kode.get().strip()
@@ -5853,7 +6125,7 @@ class AutoRentApp(ctk.CTk):
         self.lbl_sidebar_license_status.pack(pady=(2, 10))
 
         ctk.CTkLabel(self.sidebar, text=f"👤 {self.current_user} [{self.current_role}]",
-                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 10))
+                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 2))
 
         sep = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
         sep.pack(fill="x", padx=10, pady=4)
@@ -5863,7 +6135,7 @@ class AutoRentApp(ctk.CTk):
             ("🖥️", "Dashboard Warnet", "warnet"),
             ("💰", "Kontrol Harga",   "harga"),
             ("📜", "Riwayat",         "riwayat"),
-            ("📶", "Koneksi WiFi",    "wifi"),
+            ("🔗", "Panduan Koneksi",  "wifi"),
             ("🔓", "Aktivasi",        "aktivasi"),
             ("👤", "Profil",          "profil"),
             ("📋", "Log Aplikasi",    "log_aplikasi"),
@@ -6178,10 +6450,19 @@ class AutoRentApp(ctk.CTk):
             warnet_canvas = None
         self._scroll_canvas_warnet = warnet_canvas
         self._warnet_card_windows = []  # (window_id, kartu)
+        self._warnet_layout_debounce_job = None
+        self._warnet_last_view_pos = (0, 0)
         if warnet_canvas:
             warnet_canvas.bind("<Configure>",
-                               lambda e: self._layout_warnet_columns())
-            self.after_idle(self._layout_warnet_columns)
+                               lambda e: self._debounced_layout_warnet())
+            warnet_canvas.bind("<MouseWheel>", lambda e: self.after_idle(self._update_visible_warnet_cards))
+            self.after_idle(self._debounced_layout_warnet)
+            self.after(500, self._schedule_warnet_visibility_check)
+
+    def _debounced_layout_warnet(self):
+        if self._warnet_layout_debounce_job:
+            self.after_cancel(self._warnet_layout_debounce_job)
+        self._warnet_layout_debounce_job = self.after(30, self._layout_warnet_columns)
 
     def _layout_warnet_columns(self):
         canvas = self._scroll_canvas_warnet
@@ -6201,20 +6482,65 @@ class AutoRentApp(ctk.CTk):
             try: canvas.itemconfig(wid, width=col_w)
             except Exception: pass
         self.update_idletasks()
-        # Pass 2: posisikan dengan tinggi setelah reflow
+        # Pass 2: hitung scrollregion dan posisikan kartu yg terlihat
         max_x = 0
         max_y = 0
         for idx, (wid, kartu) in enumerate(cards):
             col = idx % num_cols
             row = idx // num_cols
-            x = col * (col_w + gap)
-            y = row * (kartu.winfo_reqheight() + gap)
-            canvas.coords(wid, x, y)
-            rx = x + col_w
-            ry = y + kartu.winfo_reqheight()
+            card_x = col * (col_w + gap)
+            card_y = row * (kartu.winfo_reqheight() + gap)
+            canvas.coords(wid, card_x, card_y)
+            rx = card_x + col_w
+            ry = card_y + kartu.winfo_reqheight()
             if rx > max_x: max_x = rx
             if ry > max_y: max_y = ry
         canvas.configure(scrollregion=(0, 0, max_x + gap, max_y + gap))
+        self.after_idle(self._update_visible_warnet_cards)
+
+    def _update_visible_warnet_cards(self):
+        canvas = self._scroll_canvas_warnet
+        if not canvas or not self._warnet_card_windows:
+            return
+        cards = self._warnet_card_windows
+        n = len(cards)
+        if n == 0:
+            return
+        total_w = max(10, canvas.winfo_width())
+        num_cols = 3
+        gap = 10
+        col_w = max(1, (total_w - (num_cols - 1) * gap) // num_cols)
+        view_top = canvas.canvasy(0)
+        view_bot = view_top + canvas.winfo_height()
+        margin = 100
+        for idx, (wid, kartu) in enumerate(cards):
+            col = idx % num_cols
+            row = idx // num_cols
+            card_x = col * (col_w + gap)
+            card_y = row * (kartu.winfo_reqheight() + gap)
+            in_view = card_y < view_bot + margin and card_y + kartu.winfo_reqheight() > view_top - margin
+            if in_view:
+                try: canvas.coords(wid, card_x, card_y)
+                except Exception: pass
+                try: canvas.itemconfig(wid, state="normal")
+                except Exception: pass
+            else:
+                try: canvas.coords(wid, -9999, -9999)
+                except Exception: pass
+                try: canvas.itemconfig(wid, state="hidden")
+                except Exception: pass
+
+    def _schedule_warnet_visibility_check(self):
+        if not self._scroll_canvas_warnet:
+            return
+        canvas = self._scroll_canvas_warnet
+        cur_pos = (canvas.canvasx(0), canvas.canvasy(0))
+        last_pos = getattr(self, '_warnet_last_view_pos', (0, 0))
+        if abs(cur_pos[0] - last_pos[0]) > 5 or abs(cur_pos[1] - last_pos[1]) > 5:
+            self._warnet_last_view_pos = cur_pos
+            self._update_visible_warnet_cards()
+        if self._scroll_canvas_warnet:
+            self.after(300, self._schedule_warnet_visibility_check)
 
     def _setup_dashboard(self):
         f = self.frames["dashboard"]
@@ -6247,9 +6573,18 @@ class AutoRentApp(ctk.CTk):
             dash_canvas = None
         self._scroll_canvas_dash = dash_canvas
         self._dash_card_windows = []  # (window_id, kartu)
+        self._dash_layout_debounce_job = None
+        self._dash_last_view_pos = (0, 0)
         if dash_canvas:
-            dash_canvas.bind("<Configure>", lambda e: self._layout_dash_columns())
-            self.after_idle(self._layout_dash_columns)
+            dash_canvas.bind("<Configure>", lambda e: self._debounced_layout_dash())
+            dash_canvas.bind("<MouseWheel>", lambda e: self.after_idle(self._update_visible_dash_cards))
+            self.after_idle(self._debounced_layout_dash)
+            self.after(500, self._schedule_dash_visibility_check)
+
+    def _debounced_layout_dash(self):
+        if self._dash_layout_debounce_job:
+            self.after_cancel(self._dash_layout_debounce_job)
+        self._dash_layout_debounce_job = self.after(30, self._layout_dash_columns)
 
     def _layout_dash_columns(self):
         canvas = self._scroll_canvas_dash
@@ -6269,20 +6604,65 @@ class AutoRentApp(ctk.CTk):
             try: canvas.itemconfig(wid, width=col_w)
             except Exception: pass
         self.update_idletasks()
-        # Pass 2: posisikan dengan tinggi setelah reflow
+        # Pass 2: hitung scrollregion dan posisikan kartu yg terlihat
         max_x = 0
         max_y = 0
         for idx, (wid, kartu) in enumerate(cards):
             col = idx % num_cols
             row = idx // num_cols
-            x = col * (col_w + gap)
-            y = row * (kartu.winfo_reqheight() + gap)
-            canvas.coords(wid, x, y)
-            rx = x + col_w
-            ry = y + kartu.winfo_reqheight()
+            card_x = col * (col_w + gap)
+            card_y = row * (kartu.winfo_reqheight() + gap)
+            canvas.coords(wid, card_x, card_y)
+            rx = card_x + col_w
+            ry = card_y + kartu.winfo_reqheight()
             if rx > max_x: max_x = rx
             if ry > max_y: max_y = ry
         canvas.configure(scrollregion=(0, 0, max_x + gap, max_y + gap))
+        self.after_idle(self._update_visible_dash_cards)
+
+    def _update_visible_dash_cards(self):
+        canvas = self._scroll_canvas_dash
+        if not canvas or not self._dash_card_windows:
+            return
+        cards = self._dash_card_windows
+        n = len(cards)
+        if n == 0:
+            return
+        total_w = max(10, canvas.winfo_width())
+        num_cols = 3
+        gap = 10
+        col_w = max(1, (total_w - (num_cols - 1) * gap) // num_cols)
+        view_top = canvas.canvasy(0)
+        view_bot = view_top + canvas.winfo_height()
+        margin = 100
+        for idx, (wid, kartu) in enumerate(cards):
+            col = idx % num_cols
+            row = idx // num_cols
+            card_x = col * (col_w + gap)
+            card_y = row * (kartu.winfo_reqheight() + gap)
+            in_view = card_y < view_bot + margin and card_y + kartu.winfo_reqheight() > view_top - margin
+            if in_view:
+                try: canvas.coords(wid, card_x, card_y)
+                except Exception: pass
+                try: canvas.itemconfig(wid, state="normal")
+                except Exception: pass
+            else:
+                try: canvas.coords(wid, -9999, -9999)
+                except Exception: pass
+                try: canvas.itemconfig(wid, state="hidden")
+                except Exception: pass
+
+    def _schedule_dash_visibility_check(self):
+        if not self._scroll_canvas_dash:
+            return
+        canvas = self._scroll_canvas_dash
+        cur_pos = (canvas.canvasx(0), canvas.canvasy(0))
+        last_pos = getattr(self, '_dash_last_view_pos', (0, 0))
+        if abs(cur_pos[0] - last_pos[0]) > 5 or abs(cur_pos[1] - last_pos[1]) > 5:
+            self._dash_last_view_pos = cur_pos
+            self._update_visible_dash_cards()
+        if self._scroll_canvas_dash:
+            self.after(300, self._schedule_dash_visibility_check)
 
     def _unlock_tambah(self):
         self._tambah_btn_enabled = True
@@ -6333,8 +6713,8 @@ class AutoRentApp(ctk.CTk):
         self._semua_kartu_tv.append(kartu)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
-        self.after_idle(self._layout_dash_columns)
-   
+        self.after_idle(self._debounced_layout_dash)
+    
     def _hapus_tv(self, kartu):
         if not messagebox.askyesno("Hapus TV", f"Yakin hapus '{kartu.label_tv}' dari dashboard?"):
             return
@@ -6360,7 +6740,7 @@ class AutoRentApp(ctk.CTk):
         self.jumlah_tv = max(0, self.jumlah_tv - 1)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
-        self.after_idle(self._layout_dash_columns)
+        self.after_idle(self._debounced_layout_dash)
  
     def _on_kartu_ganti_grup(self, kartu, grup_baru):
         """Saat user mengganti grup tarif sebuah TV: refresh closure get_paket_data
@@ -6503,7 +6883,7 @@ class AutoRentApp(ctk.CTk):
             pass
         if hasattr(self, '_refresh_warnet_footer'):
             self._refresh_warnet_footer()
-        self.after_idle(self._layout_warnet_columns)
+        self.after_idle(self._debounced_layout_warnet)
 
     def _on_warnet_kartu_ganti_grup(self, kartu, grup_baru):
         # Warnet PC dikunci ke grup "Warnet", jadi selalu ambil paket dari "Warnet"
@@ -6554,7 +6934,7 @@ class AutoRentApp(ctk.CTk):
                     self._refresh_warnet_footer()
                 except Exception:
                     pass
-            self.after_idle(self._layout_warnet_columns)
+            self.after_idle(self._debounced_layout_warnet)
             AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='success', details={'label': getattr(kartu, 'label_kursi', 'unknown')})
         except Exception as e:
             AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='failed', details={'error': str(e)})
@@ -7536,196 +7916,124 @@ class AutoRentApp(ctk.CTk):
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="📡  KONEKSI ADB via Wi-Fi",
+        ctk.CTkLabel(hdr, text="🔗  PANDUAN KONEKSI TV (ATPv2)",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
-        self.btn_scan = ctk.CTkButton(hdr, text="🔍  Scan Devices", width=150, height=34,
-                                       fg_color="#1A3A1A", hover_color="#0A2A0A",
-                                       border_width=1, border_color=C_GREEN,
-                                       font=("Russo One", 10, "bold"), text_color=C_GREEN,
-                                       command=self._wifi_scan_devices)
-        self.btn_scan.pack(side="right", padx=18, pady=10)
 
         scroll = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         scroll.pack(fill="both", expand=True, padx=14, pady=10)
 
-        panduan_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
-        panduan_f.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(panduan_f, text="📋  CARA AKTIFKAN ADB Wi-Fi DI ANDROID TV",
+        # ── Frame 1: Langkah di TV ──────────────────────────────────────────
+        tv_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
+        tv_f.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(tv_f, text="📱  LANGKAH DI ANDROID TV",
                      font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(14, 8))
 
-        tabs_panduan = ctk.CTkSegmentedButton(panduan_f, values=["Android TV 11+", "Android TV 10 ↓"],
-                                               font=FONT_SMALL,
-                                               selected_color=C_ACCENT2, selected_hover_color="#5A0FCC",
-                                               unselected_color=C_BTN, unselected_hover_color=C_BORDER,
-                                               command=lambda v: self._tampilkan_panduan_wifi(v))
-        tabs_panduan.set("Android TV 11+")
-        tabs_panduan.pack(fill="x", padx=16, pady=(0, 8))
-
-        self.frame_panduan_11 = ctk.CTkFrame(panduan_f, fg_color="transparent")
-        self.frame_panduan_10 = ctk.CTkFrame(panduan_f, fg_color="transparent")
-
-        langkah_11 = [
-            ("1", "Pengaturan → Preferensi Perangkat → Tentang", "Klik 'Build' 7x sampai mode developer aktif"),
-            ("2", "Pengaturan → Opsi Developer", "Aktifkan 'ADB via Jaringan' / 'Wireless Debugging'"),
-            ("3", "Tap 'Pair device with pairing code'", "Catat IP, Port Pairing & Kode PIN"),
-            ("4", "Klik tombol 📡 Pairing di bawah", "Isi form → Pair & Connect — selesai otomatis!"),
+        langkah_tv = [
+            ("1", "Pengaturan → Preferensi Perangkat → Tentang",
+             "Klik 'Build' 7x sampai mode developer aktif"),
+            ("2", "Pengaturan → Opsi Developer",
+             "Aktifkan 'Wireless Debugging'"),
+            ("3", "Opsi Developer → Stay awake",
+             "Aktifkan 'Stay awake' (Tetap terjaga saat charging)"),
+            ("4", "Tap 'Pair device with pairing code'",
+             "Catat IP Address, Port Pairing (6466), dan Kode PIN 6 digit"),
         ]
-        langkah_10 = [
-            ("1", "Pengaturan → Preferensi Perangkat → Tentang", "Klik 'Build' 7x sampai mode developer aktif"),
-            ("2", "Pengaturan → Opsi Developer", "Aktifkan 'USB debugging' & 'ADB Debugging/Network debugging'"),
-            ("3", "Cek IP TV", "Pengaturan → Jaringan & Internet → lihat alamat IP"),
-            ("4", "Connect langsung, TANPA pairing", "Isi IP & Port 5555 di form Tambah TV → klik Tes Koneksi"),
+        for no, judul, sub in langkah_tv:
+            row = ctk.CTkFrame(tv_f, fg_color=C_CARD, corner_radius=8)
+            row.pack(fill="x", padx=14, pady=4)
+            ctk.CTkLabel(row, text=no, font=("Russo One", 12, "bold"),
+                         text_color=C_BG, fg_color=C_ACCENT2, corner_radius=14,
+                         width=28, height=28).pack(side="left", padx=(10, 12), pady=10)
+            txt_f = ctk.CTkFrame(row, fg_color="transparent")
+            txt_f.pack(side="left", fill="x", expand=True, pady=8)
+            ctk.CTkLabel(txt_f, text=judul, font=("Consolas", 10, "bold"),
+                         text_color=C_TEXT, anchor="w").pack(anchor="w")
+            ctk.CTkLabel(txt_f, text=sub, font=FONT_SMALL,
+                         text_color=C_MUTED, anchor="w").pack(anchor="w")
+        ctk.CTkFrame(tv_f, fg_color="transparent", height=8).pack()
+
+        # ── Frame 2: Langkah di Aplikasi ────────────────────────────────────
+        app_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
+        app_f.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(app_f, text="💻  LANGKAH DI APLIKASI (RR Billing PRO)",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(14, 8))
+
+        langkah_app = [
+            ("1", "Dashboard → Klik ➕ Tambah TV",
+             "Isi IP TV dan Nama TV, klik Simpan & Pair"),
+            ("2", "Masukkan PIN 6 angka dari TV",
+             "Klik 'Pasangkan' — pairing akan dimulai"),
+            ("3", "TV siap digunakan",
+             "Badge ONLINE hijau muncul di KartuTV — TV siap digunakan"),
         ]
-        for parent, langkah in [(self.frame_panduan_11, langkah_11), (self.frame_panduan_10, langkah_10)]:
-            for no, judul, sub in langkah:
-                row = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=8)
-                row.pack(fill="x", padx=14, pady=4)
-                ctk.CTkLabel(row, text=no, font=("Russo One", 12, "bold"),
-                             text_color=C_BG, fg_color=C_ACCENT2, corner_radius=14,
-                             width=28, height=28).pack(side="left", padx=(10, 12), pady=10)
-                txt_f = ctk.CTkFrame(row, fg_color="transparent")
-                txt_f.pack(side="left", fill="x", expand=True, pady=8)
-                ctk.CTkLabel(txt_f, text=judul, font=("Consolas", 10, "bold"),
-                             text_color=C_TEXT, anchor="w").pack(anchor="w")
-                ctk.CTkLabel(txt_f, text=sub, font=FONT_SMALL,
-                             text_color=C_MUTED, anchor="w").pack(anchor="w")
-        self.frame_panduan_11.pack(fill="x")
-        ctk.CTkFrame(panduan_f, fg_color="transparent", height=8).pack()
+        for no, judul, sub in langkah_app:
+            row = ctk.CTkFrame(app_f, fg_color=C_CARD, corner_radius=8)
+            row.pack(fill="x", padx=14, pady=4)
+            ctk.CTkLabel(row, text=no, font=("Russo One", 12, "bold"),
+                         text_color=C_BG, fg_color=C_ACCENT2, corner_radius=14,
+                         width=28, height=28).pack(side="left", padx=(10, 12), pady=10)
+            txt_f = ctk.CTkFrame(row, fg_color="transparent")
+            txt_f.pack(side="left", fill="x", expand=True, pady=8)
+            ctk.CTkLabel(txt_f, text=judul, font=("Consolas", 10, "bold"),
+                         text_color=C_TEXT, anchor="w").pack(anchor="w")
+            ctk.CTkLabel(txt_f, text=sub, font=FONT_SMALL,
+                         text_color=C_MUTED, anchor="w").pack(anchor="w")
+        ctk.CTkFrame(app_f, fg_color="transparent", height=8).pack()
 
-        conn_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
-        conn_f.pack(fill="x", pady=8)
-        ctk.CTkLabel(conn_f, text="🔌  CONNECT MANUAL",
-                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(14, 6))
-        input_row = ctk.CTkFrame(conn_f, fg_color="transparent")
-        input_row.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(input_row, text="IP :", font=FONT_LABEL, text_color=C_MUTED).pack(side="left", padx=(0, 4))
-        self.wifi_entry_ip = ctk.CTkEntry(input_row, placeholder_text="192.168.1.xxx",
-                                           fg_color=C_BTN, text_color=C_ACCENT,
-                                           border_color=C_BORDER, font=("Consolas", 12, "bold"),
-                                           height=34, width=170)
-        self.wifi_entry_ip.pack(side="left", padx=(0, 8))
-        for txt, cmd, color in [
-            ("⚡ Connect",    self._wifi_connect,        C_GREEN),
-            ("✖ Disconnect", self._wifi_disconnect,     C_RED),
-            ("📡 Pairing",   self._wifi_buka_pairing,   C_ACCENT),
-        ]:
-            ctk.CTkButton(input_row, text=txt, width=100, height=34,
-                          fg_color=C_BTN, border_width=1, border_color=color,
-                          font=FONT_LABEL, text_color=color,
-                          command=cmd).pack(side="left", padx=4)
-        ctk.CTkLabel(conn_f, text="Log Output:", font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=16, pady=(4, 2))
-        self.wifi_log = ctk.CTkTextbox(conn_f, height=80, fg_color=C_BTN, text_color=C_GREEN,
-                                        font=("Consolas", 10), border_color=C_BORDER, border_width=1)
-        self.wifi_log.pack(fill="x", padx=14, pady=(0, 12))
-        self.wifi_log.configure(state="disabled")
+        # ── Frame 3: Ganti metode di TV existing ───────────────────────────
+        ganti_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
+        ganti_f.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(ganti_f, text="🔄  GANTI METODE DI TV SUDAH ADA",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(14, 8))
 
-        scan_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
-        scan_f.pack(fill="x", pady=8)
-        ctk.CTkLabel(scan_f, text="📟  DEVICES TERDETEKSI",
-                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=14, pady=(12, 6))
+        langkah_ganti = [
+            ("1", "Klik tombol IP di KartuTV (ucok/192.168.x.x)",
+             "Dialog Ganti IP akan terbuka"),
+            ("2", "Klik 🔗 Tes Koneksi",
+             "Jika perlu pairing, masukkan PIN 6 angka dari TV"),
+            ("3", "Jika berhasil",
+             "Badge berubah jadi ONLINE hijau"),
+        ]
+        for no, judul, sub in langkah_ganti:
+            row = ctk.CTkFrame(ganti_f, fg_color=C_CARD, corner_radius=8)
+            row.pack(fill="x", padx=14, pady=4)
+            ctk.CTkLabel(row, text=no, font=("Russo One", 12, "bold"),
+                         text_color=C_BG, fg_color=C_ACCENT2, corner_radius=14,
+                         width=28, height=28).pack(side="left", padx=(10, 12), pady=10)
+            txt_f = ctk.CTkFrame(row, fg_color="transparent")
+            txt_f.pack(side="left", fill="x", expand=True, pady=8)
+            ctk.CTkLabel(txt_f, text=judul, font=("Consolas", 10, "bold"),
+                         text_color=C_TEXT, anchor="w").pack(anchor="w")
+            ctk.CTkLabel(txt_f, text=sub, font=FONT_SMALL,
+                         text_color=C_MUTED, anchor="w").pack(anchor="w")
+        ctk.CTkFrame(ganti_f, fg_color="transparent", height=8).pack()
 
-        style2 = ttk.Style()
-        style2.configure("Wifi.Treeview", background=C_CARD, fieldbackground=C_CARD,
-                         foreground=C_TEXT, rowheight=26, font=("Consolas", 10))
-        style2.configure("Wifi.Treeview.Heading", background=C_PANEL, foreground=C_ACCENT,
-                         font=("Russo One", 9, "bold"), relief="flat")
-        cols2 = ("IP Address", "Status", "Keterangan")
-        self.wifi_tree = ttk.Treeview(scan_f, columns=cols2, show="headings",
-                                       style="Wifi.Treeview", height=5)
-        for col, w in zip(cols2, [240, 120, 300]):
-            self.wifi_tree.heading(col, text=col)
-            self.wifi_tree.column(col, width=w, anchor="center" if w < 200 else "w")
-        self.wifi_tree.pack(fill="x", padx=14, pady=(0, 14))
-        self.wifi_tree.tag_configure("device",       foreground=C_GREEN)
-        self.wifi_tree.tag_configure("offline",      foreground=C_RED)
-        self.wifi_tree.tag_configure("unauthorized", foreground=C_YELLOW)
-        self.wifi_tree.tag_configure("empty",        foreground=C_MUTED)
+        # ── Frame 4: Troubleshooting ────────────────────────────────────────
+        trouble_f = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=12)
+        trouble_f.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(trouble_f, text="🔧  TROUBLESHOOTING",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(14, 12))
 
-    def _tampilkan_panduan_wifi(self, pilihan):
-        if pilihan == "Android TV 11+":
-            self.frame_panduan_10.pack_forget()
-            self.frame_panduan_11.pack(fill="x")
-        else:
-            self.frame_panduan_11.pack_forget()
-            self.frame_panduan_10.pack(fill="x")
+        tips = [
+            ("🌐", "Satu jaringan", "PC dan TV harus terhubung ke jaringan LAN/Wi-Fi yang sama"),
+            ("🧱", "Firewall", "Pastikan firewall tidak memblokir port 6466 (API) dan 6467 (Pairing)"),
+            ("⏳", "Stay awake", "Aktifkan 'Stay awake' di Opsi Developer agar TV tidak tidur saat pairing"),
+            ("🔄", "Pairing ulang", "Jika pairing gagal, tutup dialog dan ulangi dari awal — pastikan PIN benar"),
+        ]
+        for ico, judul, sub in tips:
+            row = ctk.CTkFrame(trouble_f, fg_color=C_CARD, corner_radius=8)
+            row.pack(fill="x", padx=14, pady=4)
+            ctk.CTkLabel(row, text=ico, font=("Segoe UI Emoji", 14),
+                         width=32).pack(side="left", padx=(8, 4), pady=10)
+            txt_f = ctk.CTkFrame(row, fg_color="transparent")
+            txt_f.pack(side="left", fill="x", expand=True, pady=8)
+            ctk.CTkLabel(txt_f, text=judul, font=("Consolas", 10, "bold"),
+                         text_color=C_TEXT, anchor="w").pack(anchor="w")
+            ctk.CTkLabel(txt_f, text=sub, font=FONT_SMALL,
+                         text_color=C_MUTED, anchor="w").pack(anchor="w")
+        ctk.CTkFrame(trouble_f, fg_color="transparent", height=8).pack()
 
-    def _wifi_buka_pairing(self):
-        ip_awal = self.wifi_entry_ip.get().strip()
-        def on_pair_done(ip, nama, _, grup):
-            self.wifi_entry_ip.delete(0, "end"); self.wifi_entry_ip.insert(0, ip)
-            self._wifi_log_tulis(f"✅  Paired & Connected — {ip}")
-            self._wifi_scan_devices()
-        DialogTambahTV(self, nomor_tv=1, on_confirm=on_pair_done,
-                       on_close_cb=lambda: None, daftar_grup=self.daftar_nama_grup())
 
-    def _wifi_log_tulis(self, teks):
-        self.wifi_log.configure(state="normal")
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.wifi_log.insert("end", f"[{ts}]  {teks}\n")
-        self.wifi_log.see("end")
-        self.wifi_log.configure(state="disabled")
-
-    def _wifi_get_ip(self):
-        return self.wifi_entry_ip.get().strip()
-
-    def _wifi_connect(self):
-        ip = self._wifi_get_ip()
-        if not ip:
-            self._wifi_log_tulis("⚠  IP tidak valid.")
-            return
-        if not ADBHelper.adb_tersedia():
-            self._wifi_log_tulis("✖  androidtvremote2 tidak terinstal.")
-            return
-        self._wifi_log_tulis(f"→  Menghubungkan ke {ip}...")
-        threading.Thread(target=lambda: self.after(0, self._wifi_connect_selesai,
-            *ADBHelper.connect(ip), ip), daemon=True).start()
-
-    def _wifi_connect_selesai(self, sukses, pesan, ip):
-        if sukses:
-            self._wifi_log_tulis(f"✅  Terhubung ke {ip}")
-        else:
-            self._wifi_log_tulis(f"✖  Gagal: {pesan}")
-        self._wifi_scan_devices()
-
-    def _wifi_disconnect(self):
-        ip = self._wifi_get_ip()
-        if not ip: return
-        self._wifi_log_tulis(f"→  Memutus {ip}...")
-        threading.Thread(target=lambda: self.after(0, self._wifi_disconnect_selesai,
-            *ADBHelper.disconnect(ip), ip), daemon=True).start()
-
-    def _wifi_disconnect_selesai(self, ok, pesan, ip):
-        self._wifi_log_tulis(f"{'✅' if ok else '✖'}  {pesan or f'Disconnected {ip}'}")
-        self._wifi_scan_devices()
-
-    def _wifi_scan_devices(self):
-        self.btn_scan.configure(state="disabled", text="⏳ Scanning...")
-        threading.Thread(target=self._wifi_scan_thread, daemon=True).start()
-
-    def _wifi_scan_thread(self):
-        if not ADBHelper.adb_tersedia():
-            self.after(0, self._wifi_scan_selesai, {}, "androidtvremote2 tidak ditemukan")
-            return
-        devices, err = ADBHelper.list_devices()
-        self.after(0, self._wifi_scan_selesai, devices, err)
-
-    def _wifi_scan_selesai(self, devices, err):
-        self.btn_scan.configure(state="normal", text="🔍  Scan Devices")
-        for item in self.wifi_tree.get_children():
-            self.wifi_tree.delete(item)
-        if not devices:
-            self.wifi_tree.insert("", "end", values=("—", "Tidak ada", "Jalankan Connect dulu"), tags=("empty",))
-            return
-        ket_map = {
-            "device":       "Terhubung & siap",
-            "offline":      "Tidak merespon",
-            "unauthorized": "Perlu otorisasi di TV",
-        }
-        for serial, status in devices.items():
-            ket = ket_map.get(status, f"Status: {status}")
-            tag = status if status in ket_map else "empty"
-            self.wifi_tree.insert("", "end", values=(serial, status.upper(), ket), tags=(tag,))
-        self._wifi_log_tulis(f"↺  Scan selesai — {len(devices)} device.")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 5: AKTIVASI
@@ -7740,7 +8048,11 @@ class AutoRentApp(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         scroll.pack(fill="both", expand=True, padx=20, pady=16)
 
-        status_lic = LicenseManager.get_status(current_user=self.current_user or "")
+        try:
+            status_lic = LicenseManager.get_status(current_user=self.current_user or "")
+        except Exception as e:
+            _LOGGER.exception("Gagal get_status di _setup_aktivasi: %s", e)
+            status_lic = {"status": "unknown", "sisa_hari": 0, "pesan": f"Error: {e}"}
         status_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14,
                                     border_width=2,
                                     border_color=C_GREEN if status_lic["status"] == "active"
@@ -8251,6 +8563,14 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkLabel(hdr, text="👤  PROFIL & MANAJEMEN USER",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
 
+        try:
+            self._build_profil_content(f)
+        except Exception as e:
+            _LOGGER.exception("Gagal _setup_profil: %s", e)
+            ctk.CTkLabel(f, text=f"⚠ Gagal memuat profil: {e}",
+                         font=FONT_BODY, text_color=C_RED).pack(pady=40)
+
+    def _build_profil_content(self, f):
         scroll = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         scroll.pack(fill="both", expand=True, padx=20, pady=16)
 
