@@ -107,20 +107,25 @@ class FirestoreClient:
             return None
 
     def set_document(self, path: str, data: dict, merge: bool = True) -> bool:
+        ok, _ = self._set_document_detailed(path, data, merge)
+        return ok
+
+    def _set_document_detailed(self, path: str, data: dict, merge: bool = True) -> tuple[bool, str]:
         url = f"{FIRESTORE_BASE}/{path}"
         doc = _dict_to_doc(data)
         params = {}
         if merge:
             params["updateMask.fieldPaths"] = list(data.keys())
         try:
-            resp = self._session.patch(url, params=params, json=doc, headers=self._headers(), timeout=15)
+            resp = self._session.patch(url, params=params, json=doc, headers=self._headers(), timeout=30)
             if resp.status_code in (200, 201):
-                return True
-            _LOGGER.warning("set_document(%s) HTTP %d: %s", path, resp.status_code, resp.text[:200])
-            return False
+                return True, ""
+            err_msg = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
+            _LOGGER.warning("set_document(%s) HTTP %d: %s", path, resp.status_code, err_msg)
+            return False, err_msg
         except requests.RequestException as e:
             _LOGGER.warning("set_document(%s) error: %s", path, e)
-            return False
+            return False, str(e)
 
     def delete_document(self, path: str) -> bool:
         url = f"{FIRESTORE_BASE}/{path}"
@@ -165,9 +170,15 @@ class FirestoreClient:
     # ── User Doc Helpers ─────────────────────────────────────────────────
 
     def get_user_doc(self, username: str) -> Optional[dict]:
-        return self.get_document(f"billingps_users/{username}")
+        # Try direct path first (Android writes to {username} without prefix)
+        doc = self.get_document(f"billingps_users/{username}")
+        if doc is not None:
+            return doc
+        # Fallback: try _user_{username} prefix (legacy)
+        return self.get_document(f"billingps_users/_user_{username}")
 
     def set_user_doc(self, username: str, data: dict, merge: bool = True) -> bool:
+        # Always write to {username} without _user_ prefix, matching Android behavior
         return self.set_document(f"billingps_users/{username}", data, merge=merge)
 
     def push_transaction(self, username: str, tx: dict) -> bool:
@@ -178,6 +189,26 @@ class FirestoreClient:
             tx_list = doc.get("transaksiList", [])
             tx_list.insert(0, tx)
         return self.set_user_doc(username, {"transaksiList": tx_list}, merge=True)
+
+    def fetch_transactions(self, username: str, max_days: int = 6) -> list[dict]:
+        doc = self.get_user_doc(username)
+        if doc is None:
+            return []
+        tx_list = doc.get("transaksiList", [])
+        if not isinstance(tx_list, list):
+            return []
+        if max_days <= 0:
+            return tx_list
+        cutoff = time.time() - max_days * 86400
+        result = []
+        for tx in tx_list:
+            try:
+                tx_time = tx.get("timestamp", tx.get("waktu_epoch", 0))
+                if tx_time >= cutoff:
+                    result.append(tx)
+            except Exception:
+                result.append(tx)
+        return result
 
     def sync_tv_list(self, username: str, tv_list: list[dict]) -> bool:
         return self.set_user_doc(username, {"tvList": tv_list}, merge=True)
@@ -231,7 +262,7 @@ class FirestoreClient:
     # ── License Code Activation ────────────────────────────────────────────
 
     def find_license_by_code(self, kode: str) -> Optional[dict]:
-        results = self.query_where_equal("licenses", "kode", kode.upper())
+        results = self.query_where_equal("licenses", "kode", kode)
         if not results:
             return None
         return results[0]
@@ -277,7 +308,23 @@ class FirestoreClient:
         
         return ok
 
+    def revoke_license(self, doc_id: str, reason: str = "") -> bool:
+        """Revoke a license in Firestore by setting revoked=True."""
+        updates = {
+            "revoked": True,
+            "revokedAt": int(__import__("time").time() * 1000),
+        }
+        if reason:
+            updates["revokeReason"] = reason
+        return self.set_document(f"licenses/{doc_id}", updates, merge=True)
+
     def write_license_status(self, username: str, ls: dict) -> bool:
+        # Preserve existing promoAddTv from cloud if not provided
+        promo = ls.get("promoAddTv", 0)
+        if not promo:
+            existing = self.get_user_doc(username)
+            if existing:
+                promo = existing.get("licenseStatus", {}).get("promoAddTv", 0)
         data = {
             "licenseStatus": {
                 "status": ls.get("status", ""),
@@ -285,6 +332,7 @@ class FirestoreClient:
                 "expiresAt": ls.get("expiresAt", ""),
                 "maxTv": ls.get("maxTv", 0),
                 "maxPc": ls.get("maxPc", ls.get("maxTv", 0)),
+                "promoAddTv": promo,
                 "cloud_restored": ls.get("cloud_restored", False),
             }
         }
@@ -332,10 +380,12 @@ class FirestoreClient:
                 _LOGGER.info("fetch_license_status_by_username: found via alt username '%s'", alt)
                 return result
 
-        # Fallback: cari by email (untuk antisipasi Android nulis pake email sbg doc ID)
+        # Fallback: cari by email (untuk antisipasi login pake email atau Android nulis pake email sbg doc ID)
         email_to_try = None
         if primary_doc and primary_doc.get("email"):
             email_to_try = primary_doc["email"]
+        elif "@" in username:
+            email_to_try = username  # user logged in with email directly
         else:
             for alt in alt_usernames:
                 alt_doc = self.get_user_doc(alt)
@@ -350,12 +400,27 @@ class FirestoreClient:
                 if ls and isinstance(ls, dict) and ls.get("status") == "active":
                     _LOGGER.info("fetch_license_status_by_username: found via email '%s'", email_to_try)
                     return ls
+                # licenseStatus might be in the non-_user_ doc (Android writes to {username} directly)
+                doc_id = r.get("_id", "")
+                if doc_id.startswith("_user_"):
+                    bare_user = doc_id[6:]
+                    bare_doc = self.get_user_doc(bare_user)
+                    if bare_doc:
+                        ls = bare_doc.get("licenseStatus")
+                        if ls and isinstance(ls, dict) and ls.get("status") == "active":
+                            _LOGGER.info("fetch_license_status_by_username: found via email -> bare user '%s'", bare_user)
+                            return ls
 
         return None
 
     # ── Invoice ────────────────────────────────────────────────────────────
 
-    def query_invoices(self, status: str = None, limit: int = 50) -> list[dict]:
+    def query_invoices(self, status: str = None, limit: int = 50, username: str = "") -> list[dict]:
+        # Query from user subcollection first, fallback to top-level collection
+        if username:
+            docs = self.query_where_equal(f"billingps_users/{username}/invoices", "status", status) if status else self.query_all(f"billingps_users/{username}/invoices", limit=limit)
+            if docs:
+                return docs
         url = f"{FIRESTORE_BASE}:runQuery"
         body = {
             "structuredQuery": {
@@ -411,8 +476,39 @@ class FirestoreClient:
     def update_invoice(self, invoice_id: str, updates: dict) -> bool:
         return self.set_document(f"invoices/{invoice_id}", updates, merge=True)
 
-    def create_invoice(self, invoice_id: str, data: dict) -> bool:
-        return self.set_document(f"invoices/{invoice_id}", data, merge=False)
+    def create_invoice(self, invoice_id: str, data: dict, username: str = "") -> tuple[bool, str]:
+        # Save image locally, only upload metadata to cloud
+        bukti_b64 = data.pop("buktiBase64", "")
+        bukti_local = data.pop("bukti_local", "")
+        # Upload lightweight metadata only (no base64 image) to avoid 1MB doc limit
+        user = username or data.get("username", "")
+        if user:
+            ok, err = self._set_document_detailed(
+                f"invoices/{invoice_id}", data, merge=False)
+            if ok:
+                return True, ""
+            # Fallback: store in user doc as nested map
+            doc = self.get_document(f"billingps_users/{user}")
+            if doc is None:
+                doc = {}
+            invoices = doc.get("invoices", {})
+            data["has_bukti"] = bool(bukti_b64 or bukti_local)
+            invoices[invoice_id] = data
+            return self._set_document_detailed(
+                f"billingps_users/{user}", {"invoices": invoices}, merge=True)
+        return False, "Tidak ada username"
+
+    def fetch_promo_settings(self) -> Optional[dict]:
+        doc = self.get_document("settings/global")
+        if doc is None:
+            return None
+        return {
+            "promoAktif": doc.get("promoAktif", False),
+            "diskonPerPaket": doc.get("diskonPerPaket", {}),
+            "addTvOverride": doc.get("addTvOverride", {}),
+            "updatedBy": doc.get("updatedBy", ""),
+            "updatedAt": doc.get("updatedAt", 0),
+        }
 
 
 # ── License Poller ────────────────────────────────────────────────────────

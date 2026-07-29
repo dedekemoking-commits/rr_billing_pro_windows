@@ -68,10 +68,10 @@ KEYGEN_LOG   = os.path.join(APP_BASE_DIR, "rr_keygen_log.json")
 
 # --- PAKET LISENSI -------------------------------------------------
 PAKET_INFO = {
-    "BULANAN":  {"hari": 30,  "maxTv": 5,  "harga": 99_000,  "char": "B", "color": C_ACCENT},
-    "3BULAN":   {"hari": 90,  "maxTv": 8,  "harga": 299_000, "char": "T", "color": C_GREEN},
-    "TAHUNAN":  {"hari": 360, "maxTv": 15, "harga": 999_000, "char": "S", "color": C_YELLOW},
-    "LIFETIME": {"hari": 99999, "maxTv": 0, "harga": 2_000_000, "char": "L", "color": C_RED},
+    "BULANAN":  {"hari": 30,  "maxTv": 5,      "harga": 99_000,  "char": "B", "color": C_ACCENT},
+    "3BULAN":   {"hari": 90,  "maxTv": 10,     "harga": 299_000, "char": "T", "color": C_GREEN},
+    "TAHUNAN":  {"hari": 360, "maxTv": 15,     "harga": 999_000, "char": "S", "color": C_YELLOW},
+    "LIFETIME": {"hari": 99999, "maxTv": 999999, "harga": 2_000_000, "char": "L", "color": C_RED},
 }
 
 # ─── PASSWORD SECURITY HELPERS ────────────────────────────────────────────────
@@ -147,7 +147,7 @@ def generate_for_username(username: str,
     """
     from rr_license import (
         EDITION_MAP, EDITION_HARI, _build_payload, _sign,
-        _to_b32, _format_kode, _days_since_epoch, _crc16
+        _to_b64, _format_kode, _days_since_epoch, _crc16
     )
 
     edition_upper = edition.upper().replace(" ", "").replace("-", "")
@@ -166,8 +166,7 @@ def generate_for_username(username: str,
 
     payload   = _build_payload(edition_byte, expiry_days, machine_crc)
     signature = _sign(payload)
-    from rr_license import _to_b32, _format_kode
-    encoded   = _to_b32(payload + signature)
+    encoded   = _to_b64(payload + signature)
     return _format_kode(encoded)
 
 

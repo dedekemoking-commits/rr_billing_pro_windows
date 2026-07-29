@@ -18,23 +18,31 @@ CERT_DIR_NAME = "android_tv_certs"
 CLIENT_NAME   = "RR Billing Pro"
 
 KEY_MAP = {
-    "POWER":          "KEYCODE_POWER",
-    "HOME":           "KEYCODE_HOME",
-    "BACK":           "KEYCODE_BACK",
-    "DPAD_UP":        "KEYCODE_DPAD_UP",
-    "DPAD_DOWN":      "KEYCODE_DPAD_DOWN",
-    "DPAD_LEFT":      "KEYCODE_DPAD_LEFT",
-    "DPAD_RIGHT":     "KEYCODE_DPAD_RIGHT",
-    "DPAD_CENTER":    "KEYCODE_DPAD_CENTER",
-    "VOLUME_UP":      "KEYCODE_VOLUME_UP",
-    "VOLUME_DOWN":    "KEYCODE_VOLUME_DOWN",
-    "MUTE":           "KEYCODE_MUTE",
-    "MEDIA_PLAY_PAUSE":  "KEYCODE_MEDIA_PLAY_PAUSE",
-    "MEDIA_STOP":     "KEYCODE_MEDIA_STOP",
-    "SLEEP":          "KEYCODE_SLEEP",
-    "WAKEUP":         "KEYCODE_WAKEUP",
-    "SETTINGS":       "KEYCODE_SETTINGS",
-    "TV_POWER":       "KEYCODE_TV_POWER",
+    "POWER":              "KEYCODE_POWER",
+    "HOME":               "KEYCODE_HOME",
+    "BACK":               "KEYCODE_BACK",
+    "DPAD_UP":            "KEYCODE_DPAD_UP",
+    "DPAD_DOWN":          "KEYCODE_DPAD_DOWN",
+    "DPAD_LEFT":          "KEYCODE_DPAD_LEFT",
+    "DPAD_RIGHT":         "KEYCODE_DPAD_RIGHT",
+    "DPAD_CENTER":        "KEYCODE_DPAD_CENTER",
+    "VOLUME_UP":          "KEYCODE_VOLUME_UP",
+    "VOLUME_DOWN":        "KEYCODE_VOLUME_DOWN",
+    "MUTE":               "KEYCODE_MUTE",
+    "MEDIA_PLAY_PAUSE":   "KEYCODE_MEDIA_PLAY_PAUSE",
+    "MEDIA_STOP":         "KEYCODE_MEDIA_STOP",
+    "SLEEP":              "KEYCODE_SLEEP",
+    "WAKEUP":             "KEYCODE_WAKEUP",
+    "SETTINGS":           "KEYCODE_SETTINGS",
+    "TV_POWER":           "KEYCODE_TV_POWER",
+    "TV_INPUT":           "KEYCODE_TV_INPUT",
+    "HDMI_1":             "KEYCODE_TV_INPUT_HDMI_1",
+    "HDMI_2":             "KEYCODE_TV_INPUT_HDMI_2",
+    "HDMI_3":             "KEYCODE_TV_INPUT_HDMI_3",
+    "HDMI_4":             "KEYCODE_TV_INPUT_HDMI_4",
+    "ENTER":              "KEYCODE_ENTER",
+    "MENU":               "KEYCODE_MENU",
+    "INFO":               "KEYCODE_INFO",
 }
 
 
@@ -167,6 +175,7 @@ class AndroidTVRemote:
         self._remote: Optional[_AndroidTVRemote] = None
         self._lock = threading.Lock()
         self._ip: str = ""
+        self._connection_method: str = "atpv2"
 
     def _submit_sync(self, coro, timeout: float = 10):
         loop_th = _get_global_loop()
@@ -218,6 +227,7 @@ class AndroidTVRemote:
         remote.keep_reconnecting()
         with self._lock:
             self._remote = remote
+            self._ip = ip_address
         _LOGGER.info("Connected to Android TV at %s", ip_address)
         return {"status": "connected", "message": f"Terhubung ke {ip_address}"}
 
@@ -298,7 +308,32 @@ class AndroidTVRemote:
                 self._remote = None
 
     def is_connected(self) -> bool:
-        return self._remote is not None
+        if not self._remote:
+            return False
+        try:
+            proto = getattr(self._remote, '_remote_message_protocol', None)
+            if not proto:
+                return False
+            transport = getattr(proto, 'transport', None)
+            if not transport or transport.is_closing():
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def check_connection(self) -> dict:
+        if not self.is_connected():
+            return {"status": "error", "message": "Tidak terhubung"}
+        try:
+            info = self._remote.device_info
+            if info:
+                return {"status": "ok", "device_info": str(info)}
+            return {"status": "error", "message": "Device info tidak tersedia"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def check_connection_blocking(self) -> dict:
+        return self._submit_sync(self.check_connection(), timeout=8)
 
     @property
     def device_info(self) -> Optional[dict]:

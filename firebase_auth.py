@@ -163,12 +163,19 @@ class FirebaseAuth:
 
     @staticmethod
     def _load_logo() -> str:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_billingpro.b64")
-        try:
-            with open(path) as f:
-                return f.read().strip()
-        except Exception:
-            return ""
+        paths = []
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            paths.append(os.path.join(meipass, "logo_billingpro.b64"))
+        paths.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "logo_billingpro.b64"))
+        paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_billingpro.b64"))
+        for p in paths:
+            try:
+                with open(p) as f:
+                    return f.read().strip()
+            except Exception:
+                continue
+        return ""
 
     @staticmethod
     def _google_html(port: int) -> str:

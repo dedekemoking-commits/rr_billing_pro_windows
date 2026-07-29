@@ -4,7 +4,7 @@ rr_license.py — Sistem Aktivasi Aman untuk RR BILLING PRO
 
 ARSITEKTUR KEAMANAN
 -------------------
-1. Kode lisensi = Base32 dari payload terenkripsi HMAC-SHA256
+1. Kode lisensi = Base64 dari payload terenkripsi HMAC-SHA256
    Format internal (sebelum encode):
        <edition>:<machine_id>:<expiry_yyyymmdd>:<checksum_8hex>
 
@@ -15,7 +15,7 @@ ARSITEKTUR KEAMANAN
    Di produksi, simpan di environment variable / server — JANGAN hardcode.
 
 4. Format kode yang dilihat user:
-       RR-XXXX-XXXX-XXXX-XXXX   (Base32, 20 char payload + dashes)
+       RR-XXXX-XXXX-XXXX-XXXX   (Base64, 16 char payload + dashes)
 
 WORKFLOW
 --------
@@ -76,36 +76,41 @@ def get_machine_id() -> str:
 
 
 # ─── ENCODE / DECODE KODE LISENSI ─────────────────────────────────────────────
-_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # 32 simbol, tanpa I/O/0/1
+# Legacy custom Base32 (untuk backward compatibility dengan kode lama)
+_CHARSET_LEGACY = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-def _to_b32(data: bytes) -> str:
-    """Encode bytes ke custom Base32 string (tanpa padding '=')."""
-    bits = int.from_bytes(data, "big")
-    n = len(data) * 8
-    chars = []
-    while n >= 5:
-        chars.append(_CHARSET[(bits >> (n - 5)) & 0x1F])
-        n -= 5
-    # Sisa bit < 5: pad ke kiri jadi 5 bit
-    if n > 0:
-        chars.append(_CHARSET[(bits & ((1 << n) - 1)) << (5 - n)])
-    return "".join(chars)
-
-def _from_b32(s: str) -> bytes:
-    """Decode custom Base32 string ke bytes. Raise ValueError jika invalid."""
+def _from_b32_legacy(s: str) -> bytes:
+    """Decode legacy custom Base32 string. Fallback untuk kode lama."""
     bits = 0
     count = 0
     for ch in s:
-        idx = _CHARSET.find(ch.upper())
+        idx = _CHARSET_LEGACY.find(ch.upper())
         if idx == -1:
             raise ValueError(f"Karakter tidak valid: '{ch}'")
         bits = (bits << 5) | idx
         count += 5
-    # Potong bit berlebih (padding)
     extra = count % 8
     bits >>= extra
     count -= extra
     return bits.to_bytes(count // 8, "big")
+
+def _to_b64(data: bytes) -> str:
+    """Encode bytes ke standard Base64 UPPERCASE string (tanpa padding '=')."""
+    return base64.b64encode(data).rstrip(b"=").decode()
+
+def _from_b64(s: str) -> bytes:
+    """
+    Decode standard Base64 string ke bytes.
+    Fallback ke custom Base32 legacy jika Base64 gagal (backward compat).
+    """
+    # Tambah padding jika perlu
+    padding = 4 - len(s) % 4
+    if padding != 4:
+        s += "=" * padding
+    try:
+        return base64.b64decode(s)
+    except Exception:
+        return _from_b32_legacy(s)
 
 def _format_kode(raw: str) -> str:
     """Tambahkan prefix RR- dan pisahkan tiap 4 karakter dengan dash."""
@@ -115,8 +120,8 @@ def _format_kode(raw: str) -> str:
     return "RR-" + "-".join(groups)
 
 def _unformat_kode(kode: str) -> str:
-    """Hapus prefix dan dash dari kode lisensi, kembalikan raw Base32."""
-    clean = kode.upper().replace("-", "").replace(" ", "")
+    """Hapus prefix dan dash dari kode lisensi, kembalikan raw string."""
+    clean = kode.replace("-", "").replace(" ", "")
     if clean.startswith("RR"):
         clean = clean[2:]
     return clean
@@ -274,7 +279,7 @@ class LicenseGenerator:
 
         payload   = _build_payload(edition_byte, expiry_days, machine_crc)
         signature = _sign(payload)
-        encoded   = _to_b32(payload + signature)
+        encoded   = _to_b64(payload + signature)
         return _format_kode(encoded)
 
     @staticmethod
@@ -282,7 +287,7 @@ class LicenseGenerator:
         """Decode dan tampilkan info kode tanpa verifikasi machine_id (untuk admin)."""
         raw = _unformat_kode(kode)
         try:
-            data = _from_b32(raw)
+            data = _from_b64(raw)
         except ValueError as e:
             return {"valid": False, "error": str(e)}
 
@@ -330,9 +335,9 @@ class LicenseValidator:
 
         raw = _unformat_kode(kode)
 
-        # 1. Decode Base32
+        # 1. Decode (Base64 dengan fallback legacy Base32)
         try:
-            data = _from_b32(raw)
+            data = _from_b64(raw)
         except ValueError as e:
             return False, f"Format kode tidak valid: {e}", {}
 
@@ -566,6 +571,33 @@ class LicenseManager:
                 except Exception:
                     pass
             if sisa_hari > 0:
+                # ── CEK BINDING MODE untuk cloud-synced license ──────────────
+                binding_mode = lic.get("binding_mode", "machine")
+                bound_username = lic.get("username", "")
+                if binding_mode == "username" and bound_username:
+                    if not current_user:
+                        return {
+                            "status": "unknown",
+                            "sisa_hari": 0,
+                            "pesan": "Silakan login untuk melihat status lisensi.",
+                        }
+                    if current_user != bound_username:
+                        trial_cfg = LicenseManager._get_user_trial_status(current_user)
+                        trial_start = trial_cfg.get("trial_start")
+                        trial_days = int(trial_cfg.get("trial_days", TRIAL_DAYS))
+                        if trial_start:
+                            try:
+                                start_date = date.fromisoformat(trial_start)
+                                sisa = max(0, trial_days - (date.today() - start_date).days)
+                            except Exception:
+                                sisa = trial_days
+                        else:
+                            sisa = trial_days
+                        return {
+                            "status":    "trial" if sisa > 0 else "expired",
+                            "sisa_hari": sisa,
+                            "pesan":     f"Mode Trial — sisa {sisa} hari",
+                        }
                 return {
                     "status": "active",
                     "sisa_hari": sisa_hari,
@@ -701,20 +733,40 @@ class LicenseManager:
                 "pesan": "Trial habis — Aktifkan lisensi"}
 
     @staticmethod
-    def aktivasi(kode: str, username: str = "", binding_mode: str = "machine") -> tuple:
+    def deactivate():
+        """Revoke/deactivate license by clearing the local license file.
+        Returns (success: bool, message: str)."""
+        try:
+            import os as _os, json as _json, datetime as _dt
+            lic_path = LicenseManager.load.__globals__.get("LICENSE_FILE", "rr_billing_license.json")
+            if _os.path.exists(lic_path):
+                data = LicenseManager.load()
+                data["aktif"] = False
+                data["revoked"] = True
+                data["revoked_at"] = _dt.datetime.now().isoformat()
+                LicenseManager.save(data)
+                return True, "Lisensi telah dinonaktifkan."
+            return False, "Tidak ada file lisensi ditemukan."
+        except Exception as e:
+            return False, f"Gagal menonaktifkan lisensi: {e}"
+
+    @staticmethod
+    def aktivasi(kode: str, username: str = "", binding_mode: str = "machine", promo_add_tv: int = None) -> tuple:
         """
-        Verifikasi & simpan lisensi.
+        Verifikasi & simpan lisensi dengan aturan akumulasi hari dan promo.
 
         Parameters
         ----------
         kode         : kode aktivasi format RR-XXXX-XXXX-XXXX
-        username     : username yang login saat aktivasi (untuk binding username)
+        username     : username yang login saat aktivasi
         binding_mode : "username" | "universal" | "machine"
+        promo_add_tv : limit TV dari promo (None = otomatis dari lisensi lama/default)
 
         Returns (sukses: bool, pesan: str)
         """
         mid = get_machine_id()
 
+        # ── 1. Verifikasi kode ────────────────────────────────────────────────
         if binding_mode == "username" and username:
             try:
                 from rr_keygen import verify_for_username
@@ -724,7 +776,7 @@ class LicenseManager:
         else:
             sukses, pesan, info = LicenseValidator.verify(kode, machine_id=mid)
 
-        # Fallback: coba universal jika gagal
+        # Fallback: coba universal jika machine-gagal tapi universal
         if not sukses:
             sukses_uni, pesan_uni, info_uni = LicenseValidator.verify(kode)
             if sukses_uni and info_uni.get("universal"):
@@ -734,17 +786,42 @@ class LicenseManager:
         if not sukses:
             return False, pesan
 
+        edition       = info.get("edition", "BULANAN")
+        edition_byte  = info.get("edition_byte", EDITION_MAP.get(edition, 0x01))
+        default_days  = EDITION_HARI.get(edition_byte, 31)
+        default_limit = EDITION_TV_LIMIT.get(edition_byte, 5)
+
+        # ── 2. Load lisensi lama ──────────────────────────────────────────────
         lic = LicenseManager.load()
+
+        # ── 3. Hitung expired_date BARU (akumulasi) ────────────────────────────
+        today = date.today()
+        try:
+            old_expiry = date.fromisoformat(lic["expiry"][:10]) if lic.get("expiry") else None
+        except Exception:
+            old_expiry = None
+
+        if lic.get("aktif") and old_expiry and old_expiry > today:
+            new_expiry = old_expiry + timedelta(days=default_days)
+        else:
+            new_expiry = today + timedelta(days=default_days)
+
+        # ── 4. Tentukan promo_add_tv ──────────────────────────────────────────
+        if promo_add_tv is None:
+            promo_add_tv = lic.get("promo_add_tv", default_limit)
+
+        # ── 5. Simpan ke license.json ─────────────────────────────────────────
         lic.update({
             "aktif":          True,
             "status":         "active",
-            "kode_aktivasi":  kode.upper(),
+            "kode_aktivasi":  kode,
             "tgl_aktivasi":   datetime.now().isoformat(),
-            "edition":        info.get("edition", ""),
-            "expiry":         info.get("expiry", ""),
+            "edition":        edition,
+            "expiry":         new_expiry.isoformat(),
             "machine_id":     mid,
             "username":       username,
-            "binding_mode":   binding_mode,   # ← KUNCI SINKRONISASI
+            "binding_mode":   binding_mode,
+            "promo_add_tv":   promo_add_tv,
         })
         LicenseManager.save(lic)
         return True, pesan
@@ -753,6 +830,8 @@ def get_edition_limits(current_user: str = "") -> tuple:
     """Mengembalikan (tv_limit, warnet_limit) berdasarkan edisi lisensi aktif."""
     lic = LicenseManager.load()
     status = LicenseManager.get_status(current_user=current_user)
+    if status.get("status") == "trial":
+        return 2, 2
     edition_str = status.get("edition", "")
     edition_byte = EDITION_MAP.get(edition_str, 0x01) if edition_str else 0x01
     tv_limit = EDITION_TV_LIMIT.get(edition_byte, 5)
