@@ -602,6 +602,7 @@ class LicenseManager:
                     "status": "active",
                     "sisa_hari": sisa_hari,
                     "pesan": lic.get("pesan", f"Lisensi aktif ✅ (sisa {sisa_hari} hari)"),
+                    "edition": lic.get("edition", ""),
                 }
             else:
                 lic["aktif"] = False
@@ -832,7 +833,7 @@ def get_edition_limits(current_user: str = "") -> tuple:
     status = LicenseManager.get_status(current_user=current_user)
     if status.get("status") == "trial":
         return 2, 2
-    edition_str = status.get("edition", "")
+    edition_str = status.get("edition", "") or lic.get("edition", "")
     edition_byte = EDITION_MAP.get(edition_str, 0x01) if edition_str else 0x01
     tv_limit = EDITION_TV_LIMIT.get(edition_byte, 5)
     warnet_limit = EDITION_WARNET_LIMIT.get(edition_byte, 5)

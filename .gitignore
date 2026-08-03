@@ -7,6 +7,17 @@ warnet_client_session.json
 update.log
 update_pubkey.pem
 
+# Data user (riwayat/auth/invoices - jangan pernah di-commit)
+rr_billing_riwayat.json
+rr_billing_auth.json
+rr_billing_invoices.json
+rr_billing_config.json.lock
+main.py.old
+
+# Kunci privat signing - JANGAN commit
+keys/private_key.pem
+keys/private_key_new.pem
+
 # Python bytecode
 __pycache__/
 *.pyc

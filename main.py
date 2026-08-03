@@ -23,6 +23,8 @@ import webbrowser
 import smtplib
 import ssl
 import random
+import uuid
+import tempfile
 import logging
 from email.message import EmailMessage
 _LOGGER = logging.getLogger(__name__)
@@ -36,6 +38,9 @@ from typing import Optional
 from firebase_auth import get_firebase_auth
 from firestore_sync import FirestoreClient
 import tv_mesin
+from tv_ws_hub import TvWsHub
+from tv_test_api import TvTestApi
+from tv_media_server import TvMediaServer
 
 try:
     import matplotlib
@@ -678,12 +683,66 @@ class WarnetSocketServer:
         })
         
         if request_type == "add_time":
-            # Client requests to add time to a PC package
+            # Client minta tambah waktu: cari kartu warnet by pc_id, lalu tambahkan
+            # paket langsung (jalan di main thread via after) dan catat transaksi.
             paket = data.get("package", "")
+            kursi = None
+            app = self.app
+            if app is not None and hasattr(app, '_semua_kartu_warnet'):
+                for k in app._semua_kartu_warnet:
+                    if getattr(k, '_pc_id', None) == pc_id:
+                        kursi = k
+                        break
+            if kursi is None:
+                return {
+                    "type": "REQUEST_RESPONSE",
+                    "status": "FAIL",
+                    "message": f"Kursi untuk PC {pc_id} belum ada di dashboard warnet."
+                }
+            if not paket:
+                return {
+                    "type": "REQUEST_RESPONSE",
+                    "status": "FAIL",
+                    "message": "Nama paket kosong."
+                }
+            try:
+                paket_map = app.get_paket_data("Warnet", for_warnet=True)
+            except Exception:
+                paket_map = {}
+            info = paket_map.get(paket) if isinstance(paket_map, dict) else None
+            if not isinstance(info, dict):
+                return {
+                    "type": "REQUEST_RESPONSE",
+                    "status": "FAIL",
+                    "message": f"Paket {paket!r} tidak dikenal di grup tarif Warnet."
+                }
+            harga = int(info.get("harga", 0) or 0)
+            menit = int(info.get("menit", 0) or 0)
+            if menit <= 0:
+                return {
+                    "type": "REQUEST_RESPONSE",
+                    "status": "FAIL",
+                    "message": f"Paket {paket!r} tanpa durasi tidak bisa ditambahkan via add_time."
+                }
+
+            def _apply():
+                try:
+                    kursi._on_paket_confirm(paket, harga, menit, {}, 0)
+                except Exception as e:
+                    print(f"[WARNET] add_time apply error: {e}", flush=True)
+
+            try:
+                app.after(0, _apply)
+            except Exception as e:
+                return {
+                    "type": "REQUEST_RESPONSE",
+                    "status": "FAIL",
+                    "message": f"Gagal memproses add_time: {e}"
+                }
             return {
                 "type": "REQUEST_RESPONSE",
                 "status": "OK",
-                "message": f"Request tambah waktu ({paket}) diterima admin."
+                "message": f"Tambah waktu {paket} ({menit} menit) diproses."
             }
         elif request_type == "order":
             return {
@@ -758,6 +817,11 @@ def is_valid_phone(phone: str) -> bool:
 
 def is_valid_password(password: str) -> bool:
     return len(password) >= 8 and bool(re.search(r"[A-Za-z]", password)) and bool(re.search(r"[0-9]", password))
+
+
+def is_valid_kasir_password(password: str) -> bool:
+    # Aturan APTV2: min 6 karakter, wajib huruf besar & angka
+    return (len(password) >= 6 and any(c.isupper() for c in password) and any(c.isdigit() for c in password))
 
 EMAIL_VERIFICATION_EXPIRY_MINUTES = 30
 EMAIL_VERIFICATION_CODE_LENGTH = 6
@@ -933,7 +997,7 @@ def fmt_durasi(menit):
     return f"{sisa} menit"
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.4"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1027,7 +1091,7 @@ class ConfigManager:
         if isinstance(obj, dict):
             decrypted = {}
             for k, v in obj.items():
-                if k.endswith("_enc") and isinstance(v, str):
+                if isinstance(k, str) and k.endswith("_enc") and isinstance(v, str):
                     decrypted[k] = CryptoConfig.decrypt(v)
                 elif k == "password" and isinstance(v, str) and not v.startswith("bcrypt$") and len(v) != 64:
                     decrypted[k] = v
@@ -1043,7 +1107,7 @@ class ConfigManager:
         if isinstance(obj, dict):
             encrypted = {}
             for k, v in obj.items():
-                if k.endswith("_enc") and isinstance(v, str):
+                if isinstance(k, str) and k.endswith("_enc") and isinstance(v, str):
                     encrypted[k] = CryptoConfig.encrypt(v)
                 else:
                     encrypted[k] = ConfigManager._encrypt_all(v)
@@ -1355,7 +1419,9 @@ class TimerService:
         now = time.time()
         for kartu in getattr(app, '_semua_kartu_tv', []):
             try:
-                if kartu.paket_aktif and kartu.sisa_waktu > 0 and not kartu._timer_paused:
+                if (kartu.paket_aktif and kartu.sisa_waktu > 0
+                        and not kartu._timer_paused
+                        and not getattr(kartu, '_billing_paused', False)):
                     kartu.sisa_waktu = max(0, kartu.sisa_waktu - 1)
                     if kartu.sisa_waktu <= 0:
                         app.after_idle(lambda k=kartu: k._timer_habis())
@@ -1383,7 +1449,7 @@ class TimerService:
             state = {"tv": {}, "warnet": {}}
             for kartu in getattr(self.app, '_semua_kartu_tv', []):
                 if kartu.paket_aktif and kartu.sisa_waktu > 0:
-                    state["tv"][kartu.nomor] = {
+                    state["tv"][str(kartu.nomor)] = {
                         "label": kartu.label_tv,
                         "paket": kartu.paket_aktif,
                         "sisa_waktu": kartu.sisa_waktu,
@@ -1391,13 +1457,15 @@ class TimerService:
                         "waktu_mulai": kartu.waktu_mulai.isoformat() if kartu.waktu_mulai else None,
                         "biaya_pesanan": kartu.biaya_pesanan,
                         "paket_harga_tetap": kartu.paket_harga_tetap,
+                        "pesanan_aktif": dict(kartu.pesanan_aktif),
+                        "daftar_paket_sesi": list(kartu.daftar_paket_sesi),
                         "menit_dipakai_awal": kartu.menit_dipakai_awal,
                         "diskoni": kartu.diskoni,
                         "diskoni_mode": kartu.diskoni_mode,
                     }
             for kartu in getattr(self.app, '_semua_kartu_warnet', []):
                 if kartu.paket_aktif and kartu.sisa_waktu > 0:
-                    state["warnet"][getattr(kartu, '_pc_id', kartu.nomor)] = {
+                    state["warnet"][str(getattr(kartu, '_pc_id', kartu.nomor))] = {
                         "label": getattr(kartu, 'label_kursi', str(kartu.nomor)),
                         "paket": kartu.paket_aktif,
                         "sisa_waktu": kartu.sisa_waktu,
@@ -1405,6 +1473,8 @@ class TimerService:
                         "waktu_mulai": kartu.waktu_mulai.isoformat() if kartu.waktu_mulai else None,
                         "biaya_pesanan": kartu.biaya_pesanan,
                         "paket_harga_tetap": kartu.paket_harga_tetap,
+                        "pesanan_aktif": dict(kartu.pesanan_aktif),
+                        "daftar_paket_sesi": list(kartu.daftar_paket_sesi),
                         "menit_dipakai_awal": kartu.menit_dipakai_awal,
                         "diskoni": kartu.diskoni,
                         "diskoni_mode": kartu.diskoni_mode,
@@ -1436,6 +1506,8 @@ class TimerService:
                         kartu.is_bebas = s.get("is_bebas", False)
                         kartu.biaya_pesanan = s.get("biaya_pesanan", 0)
                         kartu.paket_harga_tetap = s.get("paket_harga_tetap", 0)
+                        kartu.pesanan_aktif = dict(s.get("pesanan_aktif", {}))
+                        kartu.daftar_paket_sesi = list(s.get("daftar_paket_sesi", []))
                         kartu.menit_dipakai_awal = s.get("menit_dipakai_awal", 0)
                         kartu.diskoni = s.get("diskoni", 0)
                         kartu.diskoni_mode = s.get("diskoni_mode", "nominal")
@@ -1462,6 +1534,7 @@ class CryptoConfig:
     """AES-256 encryption for sensitive config values using cryptography.fernet."""
     SALT_FILE = app_path(".rr_salt")
     KEY_FILE = app_path(".rr_key")
+    _cached_key = None
 
     @staticmethod
     def _derive_key(password: str, salt: bytes) -> bytes:
@@ -1482,9 +1555,13 @@ class CryptoConfig:
 
     @staticmethod
     def _get_machine_key() -> bytes:
+        if CryptoConfig._cached_key is not None:
+            return CryptoConfig._cached_key
         machine_id = get_machine_id()[:32]
         salt = CryptoConfig._get_or_create_salt()
-        return CryptoConfig._derive_key(machine_id, salt)
+        key = CryptoConfig._derive_key(machine_id, salt)
+        CryptoConfig._cached_key = key
+        return key
 
     @staticmethod
     def encrypt(plaintext: str) -> str:
@@ -1601,7 +1678,8 @@ class ADBHelper:
         import subprocess
         try:
             r = subprocess.run(["adb", "connect", f"{ip}:{port}"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10,
+                               **subprocess_no_window_kwargs())
             if "connected" in r.stdout.lower() or "already connected" in r.stdout.lower():
                 return {"status": "connected", "message": r.stdout.strip()}
             return {"status": "error", "message": r.stdout.strip() or r.stderr.strip()}
@@ -1688,11 +1766,12 @@ class ADBHelper:
 
     # ── TV Client Features ─────────────────────────────────────────────────
     @classmethod
-    def adb_shell(cls, ip, command, timeout=15):
+    def adb_shell(cls, ip, command, timeout=15, port=5555):
         """Jalankan perintah ADB shell pada TV target."""
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:5555", "shell", command],
-                               capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(["adb", "-s", f"{ip}:{port}", "shell", command],
+                               capture_output=True, text=True, timeout=timeout,
+                               **subprocess_no_window_kwargs())
             if r.returncode == 0:
                 return True, r.stdout.strip()
             return False, r.stderr.strip() or r.stdout.strip()
@@ -1702,6 +1781,22 @@ class ADBHelper:
             return False, "adb.exe tidak ditemukan"
         except Exception as e:
             return False, str(e)
+
+    @classmethod
+    def tv_power_state(cls, ip, port=5555):
+        """Status nyala TV sesungguhnya: True=HIDUP, False=MATI, None=tidak terdeteksi."""
+        try:
+            rem = cls._instances.get(ip)
+            if rem and rem.is_connected() and rem.is_on is not None:
+                return bool(rem.is_on)
+        except Exception:
+            pass
+        ok, out = cls.adb_shell(ip, "dumpsys power", timeout=8, port=port)
+        if ok and out:
+            for line in out.splitlines():
+                if line.strip().startswith("mWakefulness="):
+                    return line.strip().split("=", 1)[1].strip() == "Awake"
+        return None
 
     @classmethod
     def send_intent(cls, ip, action, data_uri=None, extra_args=None):
@@ -1729,7 +1824,8 @@ class ADBHelper:
         """Push file ke TV via ADB."""
         try:
             r = subprocess.run(["adb", "-s", f"{ip}:5555", "push", local_path, remote_path],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, timeout=120,
+                               **subprocess_no_window_kwargs())
             if r.returncode == 0:
                 return True, r.stdout.strip()
             return False, r.stderr.strip() or r.stdout.strip()
@@ -1745,7 +1841,8 @@ class ADBHelper:
         """Install APK ke TV via ADB."""
         try:
             r = subprocess.run(["adb", "-s", f"{ip}:5555", "install", "-r", apk_path],
-                               capture_output=True, text=True, timeout=180)
+                               capture_output=True, text=True, timeout=180,
+                               **subprocess_no_window_kwargs())
             if r.returncode == 0:
                 return True, r.stdout.strip()
             return False, r.stderr.strip() or r.stdout.strip()
@@ -1769,208 +1866,6 @@ class ADBHelper:
     def get_connected_tvs(cls):
         """Kembalikan daftar IP TV yang sedang terhubung untuk dropdown."""
         return list(cls._instances.keys())
-
-
-class SocketHelper:
-    @staticmethod
-    def send(host, port, message, timeout=15):
-        if not host or not port or not message:
-            return False, "Socket host, port, dan perintah harus diisi."
-
-        try:
-            port = int(port)
-        except Exception:
-            return False, "Port socket tidak valid."
-
-        try:
-            with socket.create_connection((host, port), timeout=timeout) as sock:
-                sock.settimeout(timeout)
-                payload = message.strip()
-                if not payload.endswith("\n"):
-                    payload += "\n"
-                sock.sendall(payload.encode("utf-8"))
-
-                response_chunks = []
-                while True:
-                    try:
-                        chunk = sock.recv(4096)
-                    except socket.timeout:
-                        break
-                    if not chunk:
-                        break
-                    response_chunks.append(chunk)
-
-                response = b"".join(response_chunks).decode("utf-8", errors="ignore").strip()
-                return True, response or "Perintah socket berhasil dikirim."
-        except socket.timeout:
-            return False, "Socket connection timeout."
-        except ConnectionRefusedError:
-            return False, "Koneksi socket ditolak oleh host."
-        except Exception as e:
-            return False, str(e)
-
-
-class DialogSocketConfig(ctk.CTkToplevel):
-    def __init__(self, master, config=None, on_save=None, on_test=None):
-        super().__init__(master)
-        self.title("Konfigurasi Koneksi Client")
-        self.geometry("620x380")
-        self.configure(fg_color=C_BG)
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-        self.on_save = on_save
-        self.on_test = on_test
-
-        cfg = config or {}
-        host = cfg.get("host", "")
-        port = cfg.get("port", DEFAULT_PORT)
-        self.start_cmd = cfg.get("on_start_command", "START {kursi}")
-        self.finish_cmd = cfg.get("on_finish_command", "STOP {kursi}")
-
-        ctk.CTkLabel(
-            self,
-            text="Konfigurasi Koneksi PC Client",
-            font=FONT_TITLE,
-            text_color=C_ACCENT,
-        ).pack(pady=(18, 6))
-        ctk.CTkLabel(
-            self,
-            text="Isi alamat server billing yang akan dipakai aplikasi client warnet.",
-            font=FONT_BODY,
-            text_color=C_MUTED,
-        ).pack(pady=(0, 10))
-
-        body = ctk.CTkFrame(
-            self,
-            fg_color=C_CARD,
-            corner_radius=12,
-            border_width=1,
-            border_color=C_ACCENT2,
-        )
-        body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=0)
-
-        self.host_var = tk.StringVar(value=host)
-        self.port_var = tk.StringVar(value=str(port))
-
-        ctk.CTkLabel(
-            body,
-            text="Host / IP Server",
-            font=FONT_LABEL,
-            text_color=C_MUTED,
-        ).grid(row=0, column=0, padx=(18, 10), pady=(18, 6), sticky="w")
-        ctk.CTkLabel(
-            body,
-            text="Port",
-            font=FONT_LABEL,
-            text_color=C_MUTED,
-        ).grid(row=0, column=1, padx=(0, 18), pady=(18, 6), sticky="w")
-
-        entry_host = ctk.CTkEntry(
-            body,
-            textvariable=self.host_var,
-            fg_color=C_BTN,
-            text_color=C_TEXT,
-            border_color=C_ACCENT,
-            font=("Consolas", 13, "bold"),
-            height=38,
-        )
-        entry_host.grid(row=1, column=0, padx=(18, 10), pady=(0, 8), sticky="ew")
-
-        entry_port = ctk.CTkEntry(
-            body,
-            textvariable=self.port_var,
-            fg_color=C_BTN,
-            text_color=C_TEXT,
-            border_color=C_ACCENT,
-            font=("Consolas", 13, "bold"),
-            width=120,
-            height=38,
-        )
-        entry_port.grid(row=1, column=1, padx=(0, 18), pady=(0, 8), sticky="ew")
-
-        info_box = ctk.CTkFrame(body, fg_color=C_PANEL, corner_radius=10)
-        info_box.grid(row=2, column=0, columnspan=2, padx=18, pady=(4, 10), sticky="ew")
-        ctk.CTkLabel(
-            info_box,
-            text="Panduan cepat:",
-            font=FONT_SUB,
-            text_color=C_ACCENT,
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-        self.info_label = ctk.CTkLabel(
-            info_box,
-            text=(
-                "• Host/IP diisi alamat laptop/PC server billing.\n"
-                "• Port harus sama dengan port server socket warnet.\n"
-                "• Klik Tes Koneksi dulu, lalu Simpan jika sudah benar."
-            ),
-            font=FONT_SMALL,
-            text_color=C_TEXT,
-            justify="left",
-        )
-        self.info_label.pack(anchor="w", padx=12, pady=(0, 10))
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=(0, 16))
-        ctk.CTkButton(
-            btn_frame,
-            text="🔍 Tes Koneksi",
-            width=150,
-            height=38,
-            fg_color=C_ACCENT2,
-            hover_color="#5A0FCC",
-            font=FONT_SUB,
-            command=self._test_connection,
-        ).pack(side="left")
-        ctk.CTkButton(
-            btn_frame,
-            text="✖ Batal",
-            width=120,
-            height=38,
-            fg_color=C_RED,
-            hover_color="#7A1A1A",
-            font=FONT_SUB,
-            command=self.destroy,
-        ).pack(side="right")
-        ctk.CTkButton(
-            btn_frame,
-            text="✅ Simpan Config",
-            width=170,
-            height=38,
-            fg_color=C_GREEN,
-            hover_color="#2F7A2F",
-            font=FONT_SUB,
-            command=self._save,
-        ).pack(side="right", padx=(0, 8))
-
-        entry_host.focus_set()
-
-    def _test_connection(self):
-        if callable(self.on_test):
-            self.on_test(self._collect_config())
-
-    def _collect_config(self):
-        try:
-            port_value = int(self.port_var.get().strip() or DEFAULT_PORT)
-        except ValueError:
-            port_value = DEFAULT_PORT
-        return {
-            "host": self.host_var.get().strip(),
-            "port": port_value,
-            "on_start_command": self.start_cmd,
-            "on_finish_command": self.finish_cmd,
-        }
-
-    def _save(self):
-        cfg = self._collect_config()
-        if not cfg["host"]:
-            messagebox.showwarning("Lengkapi Konfigurasi", "Host/IP wajib diisi terlebih dahulu.", parent=self)
-            return
-        if callable(self.on_save):
-            self.on_save(cfg)
-        self.destroy()
 
 
 class DialogWarnetAdminCode(ctk.CTkToplevel):
@@ -2044,6 +1939,76 @@ class DialogWarnetAdminCode(ctk.CTkToplevel):
         self.clipboard_append(code)
         self.update()
         messagebox.showinfo("Berhasil", "Kode berhasil disalin ke clipboard.", parent=self)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DIALOG OVERLAY SETTING (TV)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DialogOverlaySetting(ctk.CTkToplevel):
+    """Pengaturan tampilan overlay countdown di TV (mode + menit terakhir)."""
+
+    MODE_OPTIONS = [
+        ("always", "Selalu tampil"),
+        ("last_minutes", "Hanya N menit terakhir"),
+        ("hidden", "Sembunyi (tidak tampil)"),
+    ]
+
+    def __init__(self, master, mode="always", last_minutes=5, on_save=None):
+        super().__init__(master)
+        self.on_save = on_save
+        self.title("Pengaturan Overlay TV")
+        self.geometry("480x300")
+        self.configure(fg_color=C_BG)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        ctk.CTkLabel(self, text="⚙️  OVERLAY COUNTDOWN TV",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(16, 4))
+        ctk.CTkLabel(self, text="Kapan widget waktu di pojok kanan atas TV ditampilkan?",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 10))
+
+        self.mode_var = tk.StringVar(value=mode)
+        for value, label in self.MODE_OPTIONS:
+            ctk.CTkRadioButton(self, text=label, variable=self.mode_var, value=value,
+                               font=FONT_BODY, fg_color=C_ACCENT2,
+                               command=self._on_mode_change).pack(anchor="w", padx=30, pady=4)
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=30, pady=(8, 4))
+        ctk.CTkLabel(row, text="Tampil sejak sisa waktu (menit):", font=FONT_BODY,
+                     text_color=C_TEXT).pack(side="left")
+        self.minutes_var = tk.StringVar(value=str(last_minutes))
+        self.entry_minutes = ctk.CTkEntry(row, textvariable=self.minutes_var,
+                                          width=70, height=32,
+                                          font=("Consolas", 13, "bold"))
+        self.entry_minutes.pack(side="left", padx=10)
+        self._on_mode_change()
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=30, pady=(10, 14))
+        ctk.CTkButton(btns, text="✖ Batal", width=110, height=36,
+                      fg_color=C_RED, hover_color="#7A1A1A",
+                      font=FONT_SUB, command=self.destroy).pack(side="right")
+        ctk.CTkButton(btns, text="✅ Simpan", width=130, height=36,
+                      fg_color=C_GREEN, hover_color="#2F7A2F",
+                      font=FONT_SUB, command=self._save).pack(side="right", padx=(0, 8))
+
+    def _on_mode_change(self):
+        state = "normal" if self.mode_var.get() == "last_minutes" else "disabled"
+        self.entry_minutes.configure(state=state)
+
+    def _save(self):
+        mode = self.mode_var.get()
+        try:
+            minutes = max(1, min(60, int(self.minutes_var.get().strip() or 5)))
+        except ValueError:
+            messagebox.showwarning("Input Salah", "Jumlah menit harus angka 1–60.", parent=self)
+            return
+        if callable(self.on_save):
+            self.on_save(mode, minutes)
+        self.destroy()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2329,11 +2294,12 @@ class DialogDeployClient(ctk.CTkToplevel):
                                         fg_color=C_ACCENT2, hover_color="#5A0FCC",
                                         height=32, command=self._start_deploy)
         self.btn_deploy.pack(side="right")
-        ctk.CTkButton(action_frame, text="📱 Install via ADB", width=140, height=32,
-                      fg_color=C_GREEN, hover_color="#2E7D32",
-                      font=("Russo One", 9, "bold"), text_color="white",
-                      command=self._buka_install_apk
-                      ).pack(side="right", padx=(0, 8))
+        self.btn_config = ctk.CTkButton(action_frame, text="⚙️ Config Client",
+                                        fg_color=C_BTN, hover_color="#3A3A2A",
+                                        border_width=1, border_color=C_YELLOW,
+                                        text_color=C_YELLOW,
+                                        height=32, command=self._open_config_client)
+        self.btn_config.pack(side="right", padx=(0, 6))
 
         # ── Log output ────────────────────────────────────────────────────
         log_frame = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
@@ -2514,6 +2480,9 @@ class DialogDeployClient(ctk.CTkToplevel):
         )
         self.deploy_thread.start()
 
+    def _open_config_client(self):
+        DialogConfigClient(self)
+
     def _deploy_worker(self, targets, exe_path, ssh_user, ssh_pass):
         # Import here to avoid circular import at module level
         from scripts.deploy_manager import DeployManager
@@ -2557,8 +2526,509 @@ class DialogDeployClient(ctk.CTkToplevel):
         self.after(0, lambda: self.btn_deploy.configure(
             state="normal", text=f"Deploy ke ({len(targets)}) PC"))
 
-    def _buka_install_apk(self):
-        DialogInstallAPK(self.winfo_toplevel(), self.config_manager)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIG CLIENT (WARNET) — dialog kelola client & PC + generate paket client
+# ═══════════════════════════════════════════════════════════════════════════════
+class DialogConfigClient(ctk.CTkToplevel):
+    """Dialog untuk mengelola warnet_clients di config dan menyiapkan
+    paket client (3 exe + rr_billing_config.json) siap-copy ke PC warnet."""
+
+    DEPLOY_EXE_DIR = os.path.join(APP_BASE_DIR, "BillingClientCSharp", "dist")
+    DEPLOY_OUT_DIR = os.path.join(APP_BASE_DIR, "deploy_warnet")
+    SERVER_PORT = 5000
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.config_manager = ConfigManager
+        self.title("⚙️ Config Client")
+        self.geometry("660x680")
+        self.configure(fg_color=C_BG)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        self._clients = []
+        self._gen_pcs = []
+        self._load_from_config()
+
+        self._build_ui()
+        self._refresh_client_combo()
+        self._refresh_pc_combo()
+        self._refresh_gen_combo()
+
+    # ── Load / save config ──────────────────────────────────────────────
+    def _load_from_config(self):
+        cfg = self.config_manager.load()
+        self._clients = cfg.get("warnet_clients", []) or []
+        for c in self._clients:
+            c.setdefault("pcs", [])
+        self._server_ip = cfg.get("warnet_server_host", "") or _detect_local_ip()
+
+    def _simpan_config(self):
+        cfg = self.config_manager.load()
+        server_ip = self.entry_server_ip.get().strip()
+        if server_ip:
+            cfg["warnet_server_host"] = server_ip
+        cfg["warnet_clients"] = self._clients
+        self.config_manager.save(cfg)
+        self.lbl_status.configure(
+            text="💾 Tersimpan ke rr_billing_config.json", text_color=C_YELLOW)
+
+    def _find_client(self, client_id):
+        for c in self._clients:
+            if c.get("client_id") == client_id:
+                return c
+        return None
+
+    # ── UI ──────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        title_frame = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=0)
+        title_frame.pack(fill="x")
+        ctk.CTkLabel(title_frame, text="⚙️  CONFIG CLIENT",
+                     font=FONT_TITLE, text_color=C_YELLOW).pack(side="left", padx=18, pady=12)
+
+        # A. INFO SERVER
+        info_frame = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
+        info_frame.pack(fill="x", padx=14, pady=(10, 4))
+        info_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(info_frame, text="🌐 INFO SERVER", font=FONT_SUB,
+                     text_color=C_YELLOW).grid(row=0, column=0, columnspan=3,
+                                               sticky="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(info_frame, text="IP Server", font=FONT_LABEL,
+                     text_color=C_YELLOW).grid(row=1, column=0, padx=10, pady=6, sticky="w")
+        self.entry_server_ip = ctk.CTkEntry(info_frame)
+        self.entry_server_ip.insert(0, self._server_ip)
+        self.entry_server_ip.grid(row=1, column=1, columnspan=2, padx=6, pady=6, sticky="ew")
+        ctk.CTkLabel(info_frame, text=f"Port: {self.SERVER_PORT}", font=FONT_LABEL,
+                     text_color=C_YELLOW).grid(row=2, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkLabel(info_frame, text="Nilai IP + Port di atas yang harus diisi "
+                                      "di config client tiap PC warnet.",
+                     font=FONT_SMALL, text_color=C_YELLOW).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 8))
+
+        # B. KELOLA CLIENT & PC
+        kelola_frame = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
+        kelola_frame.pack(fill="both", expand=True, padx=14, pady=4)
+        kelola_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(kelola_frame, text="📋 KELOLA CLIENT & PC", font=FONT_SUB,
+                     text_color=C_YELLOW).grid(row=0, column=0, sticky="w",
+                                               padx=10, pady=(8, 2))
+        self.cb_client = ctk.CTkComboBox(kelola_frame, values=[""], width=300,
+                                         state="readonly", command=self._on_pick_client)
+        self.cb_client.grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        self.cb_pc = ctk.CTkComboBox(kelola_frame, values=[""], width=300,
+                                     state="readonly")
+        self.cb_pc.grid(row=2, column=0, sticky="w", padx=10, pady=4)
+
+        btn_row = ctk.CTkFrame(kelola_frame, fg_color="transparent")
+        btn_row.grid(row=3, column=0, sticky="ew", padx=10, pady=4)
+        ctk.CTkButton(btn_row, text="➕ Tambah Client", width=120, height=30,
+                      fg_color=C_BTN, hover_color="#3A3A2A", border_width=1,
+                      border_color=C_YELLOW, text_color=C_YELLOW,
+                      command=self._tambah_client).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="🔑 Ganti Password", width=130, height=30,
+                      fg_color=C_BTN, hover_color="#3A3A2A", border_width=1,
+                      border_color=C_YELLOW, text_color=C_YELLOW,
+                      command=self._ganti_password).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="🗑 Hapus Client", width=115, height=30,
+                      fg_color=C_BTN, hover_color="#3A3A2A", border_width=1,
+                      border_color=C_YELLOW, text_color=C_YELLOW,
+                      command=self._hapus_client).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="➕ Tambah PC", width=105, height=30,
+                      fg_color=C_BTN, hover_color="#3A3A2A", border_width=1,
+                      border_color=C_YELLOW, text_color=C_YELLOW,
+                      command=self._tambah_pc).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="🗑 Hapus PC", width=95, height=30,
+                      fg_color=C_BTN, hover_color="#3A3A2A", border_width=1,
+                      border_color=C_YELLOW, text_color=C_YELLOW,
+                      command=self._hapus_pc).pack(side="left", padx=(0, 6))
+
+        # C. GENERATE PAKET CLIENT
+        gen_frame = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
+        gen_frame.pack(fill="x", padx=14, pady=4)
+        gen_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(gen_frame, text="📦 GENERATE PAKET CLIENT", font=FONT_SUB,
+                     text_color=C_YELLOW).grid(row=0, column=0, columnspan=3,
+                                               sticky="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(gen_frame, text="Pilih PC", font=FONT_LABEL,
+                     text_color=C_YELLOW).grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        self.cb_gen = ctk.CTkComboBox(gen_frame, values=[""], width=320,
+                                      state="readonly")
+        self.cb_gen.grid(row=1, column=1, padx=6, pady=4, sticky="ew")
+        ctk.CTkButton(gen_frame, text="📦 Siapkan Paket", width=130, height=30,
+                      fg_color=C_ACCENT2, hover_color="#5A0FCC",
+                      command=self._siapkan_paket).grid(row=1, column=2, padx=6, pady=4)
+        ctk.CTkButton(gen_frame, text="📁 Buka Folder Deploy", width=160, height=30,
+                      fg_color=C_BTN, hover_color="#3A3A2A", border_width=1,
+                      border_color=C_YELLOW, text_color=C_YELLOW,
+                      command=self._buka_folder).grid(row=2, column=1, columnspan=2,
+                                                      sticky="e", padx=6, pady=(2, 8))
+
+        # Footer
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.pack(fill="x", padx=14, pady=(4, 10))
+        self.lbl_status = ctk.CTkLabel(foot, text="", font=FONT_SMALL, text_color=C_YELLOW)
+        self.lbl_status.pack(side="left")
+        ctk.CTkButton(foot, text="💾 Simpan", width=110, height=32,
+                      fg_color=C_GREEN, hover_color="#2E7D32",
+                      command=self._simpan_config).pack(side="right")
+        ctk.CTkButton(foot, text="Tutup", width=90, height=32,
+                      fg_color=C_BTN, command=self.destroy).pack(side="right", padx=6)
+
+    # ── Combo refresh ───────────────────────────────────────────────────
+    def _client_labels(self):
+        return [f"{c.get('client_id','?')}  ({c.get('location','-')}) — {len(c.get('pcs',[]))} PC"
+                for c in self._clients]
+
+    def _on_pick_client(self, _=None):
+        self._refresh_pc_combo()
+
+    def _refresh_client_combo(self):
+        self.cb_client.configure(values=self._client_labels() or [""])
+        if self._clients:
+            self.cb_client.set(self._client_labels()[0])
+        else:
+            self.cb_client.set("")
+
+    def _selected_client(self):
+        labels = self._client_labels()
+        cur = self.cb_client.get()
+        if cur in labels:
+            return self._clients[labels.index(cur)]
+        return None
+
+    def _refresh_pc_combo(self):
+        c = self._selected_client()
+        vals = [f"{p.get('pc_id','?')} · {p.get('ip','-')} · {p.get('name','-')}"
+                for p in (c.get("pcs", []) if c else [])]
+        self.cb_pc.configure(values=vals or [""])
+        self.cb_pc.set(vals[0] if vals else "")
+
+    def _selected_pc(self):
+        c = self._selected_client()
+        if not c:
+            return None, None
+        vals = [f"{p.get('pc_id','?')} · {p.get('ip','-')} · {p.get('name','-')}"
+                for p in c.get("pcs", [])]
+        cur = self.cb_pc.get()
+        if cur in vals:
+            return c, c["pcs"][vals.index(cur)]
+        return c, None
+
+    def _refresh_gen_combo(self):
+        self._gen_pcs = []
+        labels = []
+        for c in self._clients:
+            for p in c.get("pcs", []):
+                self._gen_pcs.append({"client_id": c.get("client_id", ""),
+                                      "pc_id": p.get("pc_id", ""),
+                                      "ip": p.get("ip", ""),
+                                      "name": p.get("name", "")})
+                labels.append(f"{c.get('client_id','?')} / {p.get('pc_id','?')} "
+                              f"({p.get('name','?')})")
+        self.cb_gen.configure(values=labels or [""])
+        self.cb_gen.set(labels[0] if labels else "")
+
+    # ── Input helper ────────────────────────────────────────────────────
+    def _ask_fields(self, title, fields):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(title)
+        dlg.geometry(f"420x{130 + len(fields) * 46}")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self)
+        dlg.grab_set()
+        result = {}
+        entries = []
+        for i, (key, label, default) in enumerate(fields):
+            ctk.CTkLabel(dlg, text=label, font=FONT_LABEL,
+                         text_color=C_YELLOW).grid(row=i, column=0, padx=10, pady=6, sticky="w")
+            e = ctk.CTkEntry(dlg, width=230, show="*" if key == "password" else "")
+            e.insert(0, default or "")
+            e.grid(row=i, column=1, padx=10, pady=6)
+            entries.append((key, e))
+        state = {"ok": False}
+
+        def _ok():
+            for k, e in entries:
+                result[k] = e.get().strip()
+            state["ok"] = True
+            dlg.destroy()
+
+        ctk.CTkButton(dlg, text="OK", width=90, height=30, fg_color=C_ACCENT2,
+                      command=_ok).grid(row=len(fields), column=0, padx=10, pady=10)
+        ctk.CTkButton(dlg, text="Batal", width=90, height=30, fg_color=C_BTN,
+                      command=dlg.destroy).grid(row=len(fields), column=1, padx=10, pady=10)
+        dlg.bind("<Return>", lambda _e: _ok())
+        dlg.wait_window()
+        return result if state["ok"] else None
+
+    # ── CRUD client / PC ────────────────────────────────────────────────
+    def _next_id(self, prefix, used):
+        i = 1
+        while f"{prefix}{i}" in used:
+            i += 1
+        return f"{prefix}{i}"
+
+    def _tambah_client(self):
+        used = {c.get("client_id", "") for c in self._clients}
+        default_id = self._next_id("WARNET_", used)
+        vals = self._ask_fields("➕ Tambah Client", [
+            ("client_id", "Client ID", default_id),
+            ("password", "Password", "admin123"),
+            ("location", "Lokasi", "Warnet Lokasi 1"),
+        ])
+        if not vals or not vals.get("client_id") or not vals.get("password"):
+            return
+        if vals["client_id"] in used:
+            messagebox.showwarning("⚠ Sudah Ada", f"Client ID '{vals['client_id']}' sudah dipakai.",
+                                   parent=self)
+            return
+        self._clients.append({
+            "client_id": vals["client_id"],
+            "password_hash": hash_password(vals["password"]),
+            "password_enc": vals["password"],
+            "location": vals.get("location", ""),
+            "pcs": [],
+            "allowed_actions": [],
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        })
+        self._refresh_client_combo()
+        self.cb_client.set(self._client_labels()[-1])
+        self._refresh_pc_combo()
+        self._refresh_gen_combo()
+        self._simpan_config()
+        self.lbl_status.configure(text=f"✅ Client '{vals['client_id']}' ditambahkan.",
+                                  text_color=C_YELLOW)
+
+    def _ganti_password(self):
+        c = self._selected_client()
+        if not c:
+            messagebox.showinfo("Pilih Client", "Pilih client dulu dari daftar.", parent=self)
+            return
+        vals = self._ask_fields("🔑 Ganti Password", [("password", "Password Baru", "")])
+        if not vals or not vals.get("password"):
+            return
+        c["password_hash"] = hash_password(vals["password"])
+        c["password_enc"] = vals["password"]
+        self._simpan_config()
+        self.lbl_status.configure(text=f"✅ Password '{c['client_id']}' diganti.",
+                                  text_color=C_YELLOW)
+
+    def _hapus_client(self):
+        c = self._selected_client()
+        if not c:
+            messagebox.showinfo("Pilih Client", "Pilih client dulu dari daftar.", parent=self)
+            return
+        if not messagebox.askyesno("🗑 Hapus Client",
+                                   f"Hapus client '{c.get('client_id')}' beserta semua PC-nya?",
+                                   parent=self):
+            return
+        self._clients.remove(c)
+        self._refresh_client_combo()
+        self._refresh_pc_combo()
+        self._refresh_gen_combo()
+        self._simpan_config()
+        self.lbl_status.configure(text=f"🗑 Client '{c.get('client_id')}' dihapus.",
+                                  text_color=C_YELLOW)
+
+    def _tambah_pc(self):
+        c = self._selected_client()
+        if not c:
+            messagebox.showinfo("Pilih Client", "Pilih client dulu dari daftar.", parent=self)
+            return
+        used = {p.get("pc_id", "") for p in c.get("pcs", [])}
+        default_pc = self._next_id("PC_", used)
+        vals = self._ask_fields("➕ Tambah PC", [
+            ("pc_id", "PC ID", default_pc),
+            ("ip", "IP PC Warnet", ""),
+            ("name", "Nama Kursi", ""),
+        ])
+        if not vals or not vals.get("pc_id"):
+            return
+        if vals["pc_id"] in used:
+            messagebox.showwarning("⚠ Sudah Ada", f"PC ID '{vals['pc_id']}' sudah dipakai.",
+                                   parent=self)
+            return
+        c["pcs"].append({"pc_id": vals["pc_id"], "ip": vals.get("ip", ""),
+                         "name": vals.get("name", "")})
+        self._refresh_pc_combo()
+        self._refresh_gen_combo()
+        self._simpan_config()
+        self.lbl_status.configure(
+            text=f"✅ PC '{vals['pc_id']}' ditambahkan ke '{c.get('client_id')}'.",
+            text_color=C_YELLOW)
+
+    def _hapus_pc(self):
+        c, p = self._selected_pc()
+        if not c or not p:
+            messagebox.showinfo("Pilih PC", "Pilih PC dulu dari daftar.", parent=self)
+            return
+        if not messagebox.askyesno("🗑 Hapus PC",
+                                   f"Hapus PC '{p.get('pc_id')}' dari '{c.get('client_id')}'?",
+                                   parent=self):
+            return
+        c["pcs"].remove(p)
+        self._refresh_pc_combo()
+        self._refresh_gen_combo()
+        self._simpan_config()
+        self.lbl_status.configure(text=f"🗑 PC '{p.get('pc_id')}' dihapus.", text_color=C_YELLOW)
+
+    # ── Generate paket client ───────────────────────────────────────────
+    def _siapkan_paket(self):
+        idx = self.cb_gen.current()
+        if idx < 0 or idx >= len(self._gen_pcs):
+            messagebox.showinfo("Pilih PC", "Pilih PC dulu di bagian Generate Paket Client.",
+                                parent=self)
+            return
+        info = self._gen_pcs[idx]
+        c = self._find_client(info["client_id"])
+        if not c:
+            return
+        plain = c.get("password_enc", "")
+        if not plain:
+            messagebox.showerror("Password Tidak Ada",
+                                 f"Client '{info['client_id']}' belum punya password "
+                                 "(set via Ganti Password).", parent=self)
+            return
+        server_ip = self.entry_server_ip.get().strip() or _detect_local_ip()
+        out_dir = os.path.join(self.DEPLOY_OUT_DIR, f"{info['client_id']}_{info['pc_id']}")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            cfg = {
+                "server_host": server_ip,
+                "server_port": self.SERVER_PORT,
+                "client_id": info["client_id"],
+                "password": plain,
+                "pc_id": info["pc_id"],
+            }
+            with open(os.path.join(out_dir, "rr_billing_config.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+            copied = []
+            if os.path.isdir(self.DEPLOY_EXE_DIR):
+                for exe in ("BillingClientService.exe", "BillingLockScreenUI.exe",
+                            "BillingClientApp.exe"):
+                    src = os.path.join(self.DEPLOY_EXE_DIR, exe)
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(out_dir, exe))
+                        copied.append(exe)
+
+            self._tulis_install_bat(out_dir)
+            self._tulis_tray_bat(out_dir)
+            self._tulis_baca_dulu(out_dir, server_ip)
+
+            msg = f"✅ Paket siap di: {out_dir}"
+            if copied:
+                msg += f"  ({len(copied)} exe)"
+            self.lbl_status.configure(text=msg, text_color=C_YELLOW)
+            messagebox.showinfo("📦 Paket Siap", msg + "\n\nCopy folder ini ke PC warnet "
+                                "lalu jalankan install_service.bat (Run as administrator).",
+                                parent=self)
+        except Exception as e:
+            self.lbl_status.configure(text=f"❌ Gagal: {e}", text_color=C_RED)
+            messagebox.showerror("Gagal", str(e), parent=self)
+
+    def _tulis_install_bat(self, out_dir):
+        content = (
+            "@echo off\r\n"
+            "net session >nul 2>&1\r\n"
+            "if %errorlevel% neq 0 (\r\n"
+            "  echo Jalankan sebagai Administrator! Klik kanan file ini lalu pilih \"Run as administrator\".\r\n"
+            "  pause\r\n"
+            "  exit /b 1\r\n"
+            ")\r\n"
+            "echo Menginstall RR Billing Client Service...\r\n"
+            "BillingClientService.exe -i\r\n"
+            "if %errorlevel% neq 0 (\r\n"
+            "  echo Gagal menginstall service.\r\n"
+            "  pause\r\n"
+            "  exit /b 1\r\n"
+            ")\r\n"
+            "echo Memulai service...\r\n"
+            "net start RRBillingClientService\r\n"
+            "echo.\r\n"
+            "echo Selesai! Client akan tersambung ke server billing.\r\n"
+            "echo Jalankan install_tray.bat untuk tray info billing.\r\n"
+            "pause\r\n"
+        )
+        with open(os.path.join(out_dir, "install_service.bat"), "w",
+                  encoding="ascii") as f:
+            f.write(content)
+
+    def _tulis_tray_bat(self, out_dir):
+        content = (
+            "@echo off\r\n"
+            "set STARTUP=%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\r\n"
+            "set SCRIPT_TMP=%TEMP%\\rr_mk_tray_link.vbs\r\n"
+            "echo Set WshShell = WScript.CreateObject(\"WScript.Shell\") > \"%SCRIPT_TMP%\"\r\n"
+            "echo Set sc = WshShell.CreateShortcut(\"%STARTUP%\\RR Billing Client.lnk\") >> \"%SCRIPT_TMP%\"\r\n"
+            "echo sc.TargetPath = \"%~dp0BillingClientApp.exe\" >> \"%SCRIPT_TMP%\"\r\n"
+            "echo sc.WorkingDirectory = \"%~dp0\" >> \"%SCRIPT_TMP%\"\r\n"
+            "echo sc.Save >> \"%SCRIPT_TMP%\"\r\n"
+            "cscript //nologo \"%SCRIPT_TMP%\"\r\n"
+            "del \"%SCRIPT_TMP%\"\r\n"
+            "echo Shortcut tray dibuat. Tray akan otomatis jalan saat login Windows.\r\n"
+            "pause\r\n"
+        )
+        with open(os.path.join(out_dir, "install_tray.bat"), "w", encoding="ascii") as f:
+            f.write(content)
+
+    def _tulis_baca_dulu(self, out_dir, server_ip):
+        lines = [
+            "=== RR BILLING PRO — PAKET CLIENT WARNET ===",
+            "",
+            f"Server billing: {server_ip}:5000",
+            "",
+            "LANGKAH DI PC WARNET (Windows 10):",
+            "1. Copy SELURUH isi folder ini ke satu folder di PC warnet,",
+            "   misalnya C:\\RRBillingClient\\",
+            "2. Jalankan install_service.bat — KLIK KANAN lalu 'Run as administrator'.",
+            "   (menginstall & memulai BillingClientService, konek ke server)",
+            "3. Jalankan install_tray.bat sekali (shortcut tray ke Startup).",
+            "",
+            "Cek hasil:",
+            "- Di PC admin: Dashboard Warnet -> 'Client: Tersambung'",
+            "- File rr_billing_config.json berisi IP server; ubah bila IP server berubah.",
+            "",
+            "CATATAN:",
+            "- IP server HARUS statis di jaringan warnet.",
+            "- Jika PC di-lock oleh server saat waktu habis, lock screen akan muncul.",
+        ]
+        with open(os.path.join(out_dir, "BACA_DULU.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def _buka_folder(self):
+        try:
+            os.makedirs(self.DEPLOY_OUT_DIR, exist_ok=True)
+            os.startfile(self.DEPLOY_OUT_DIR)
+        except Exception as e:
+            self.lbl_status.configure(text=f"❌ Gagal buka folder: {e}", text_color=C_RED)
+
+
+def _detect_local_ip() -> str:
+    """Deteksi IPv4 lokal PC admin (bukan 127.0.0.1)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and "." in ip:
+                return ip
+    except Exception:
+        pass
+    return "192.168.1.100"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2670,6 +3140,15 @@ class LoginPage(ctk.CTkFrame):
             font=("Russo One", 11, "bold"), text_color="white",
             command=self._login_google)
         self.btn_google.pack(pady=(4, 2), padx=30)
+
+        # Login Kasir (sub-akun admin) — APTV2 style
+        self.btn_kasir_login = ctk.CTkButton(
+            outer, text="👤  LOGIN KASIR", width=280, height=38,
+            fg_color="#0A2A2A", hover_color="#0A3A3A",
+            border_width=1, border_color=C_GREEN,
+            font=("Russo One", 11, "bold"), text_color=C_GREEN,
+            command=self._show_kasir_login_view)
+        self.btn_kasir_login.pack(pady=(6, 2), padx=30)
 
         ctk.CTkLabel(outer,
                      text="Hubungi administrator untuk akses.",
@@ -3299,7 +3778,7 @@ class LoginPage(ctk.CTkFrame):
 
             self.after(0, lambda: self._show_forgot_password_verify_code_view())
         except Exception as e:
-            self.after(0, lambda: self.lp_lbl_status.configure(
+            self.after(0, lambda e=e: self.lp_lbl_status.configure(
                 text=f"❌  Gagal kirim email: {str(e)[:50]}",
                 text_color=C_RED))
 
@@ -3517,6 +3996,13 @@ class LoginPage(ctk.CTkFrame):
         if not password_hash:
             password_hash = user_data.get("password", "") if isinstance(user_data, dict) else ""
 
+        # Akun kasir tidak bisa login lewat form admin — pakai tombol LOGIN KASIR
+        if user_data and isinstance(user_data, dict) and user_data.get("role", "kasir") == "kasir":
+            self.lbl_status.configure(
+                text="⚠ Akun kasir — gunakan tombol '👤 LOGIN KASIR' di bawah.",
+                text_color=C_YELLOW)
+            return
+
         # Gunakan verify_password() yang support bcrypt dan legacy SHA256
         if user_data and verify_password(password, password_hash):
             self._attempt = 0
@@ -3551,6 +4037,110 @@ class LoginPage(ctk.CTkFrame):
                 status="failed",
                 details={"attempts": self._attempt}
             )
+
+    def _kasir_accounts(self):
+        users = ConfigManager.get("users", self.DEFAULT_USERS)
+        if not isinstance(users, dict):
+            return []
+        return [uname for uname, u in users.items()
+                if isinstance(u, dict) and u.get("role", "kasir") == "kasir"]
+
+    def _show_kasir_login_view(self):
+        for w in self._view_container.winfo_children():
+            w.destroy()
+
+        outer = ctk.CTkFrame(self._view_container, fg_color=C_PANEL,
+                             corner_radius=20, border_width=2, border_color=C_GREEN)
+        outer.pack(anchor="n", pady=(10, 10), padx=4, fill="x")
+
+        ctk.CTkLabel(outer, text="RR BILLING PRO",
+                     font=("Russo One", 22, "bold"), text_color=C_GREEN).pack(pady=(26, 0))
+        ctk.CTkLabel(outer, text="LOGIN KASIR",
+                     font=("Russo One", 12, "bold"), text_color=C_YELLOW).pack(pady=(2, 4))
+        ctk.CTkLabel(outer, text="Pilih akun kasir Anda, lalu masukkan password.",
+                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 12))
+
+        kasir_users = self._kasir_accounts()
+        if not kasir_users:
+            ctk.CTkLabel(outer,
+                         text="Belum ada akun kasir.\nMinta admin mendaftarkan Anda terlebih dahulu.",
+                         font=("Courier New", 11), text_color=C_YELLOW,
+                         justify="center").pack(pady=10)
+            ctk.CTkButton(outer, text="← Kembali", fg_color="transparent", hover_color=C_BTN,
+                          border_width=1, border_color=C_BORDER, font=("Russo One", 11),
+                          text_color=C_MUTED, command=self._show_login_view).pack(
+                              pady=(4, 22), padx=30, fill="x")
+            return
+
+        ctk.CTkLabel(outer, text="Akun Kasir", font=("Consolas", 11),
+                     text_color=C_MUTED).pack(padx=40)
+        self.opt_kasir = ctk.CTkOptionMenu(outer, values=kasir_users,
+                                           variable=ctk.StringVar(value=kasir_users[0]),
+                                           fg_color=C_BTN, button_color=C_ACCENT2,
+                                           button_hover_color="#5A0FCC",
+                                           text_color=C_TEXT,
+                                           dropdown_fg_color=C_CARD,
+                                           dropdown_text_color=C_TEXT,
+                                           font=("Consolas", 12), width=280)
+        self.opt_kasir.pack(pady=(2, 10), padx=40)
+
+        ctk.CTkLabel(outer, text="Password", font=("Consolas", 11),
+                     text_color=C_MUTED).pack(padx=40)
+        self.entry_kasir_pass = ctk.CTkEntry(
+            outer, placeholder_text="Masukkan password",
+            fg_color=C_BTN, text_color=C_ACCENT,
+            border_color=C_BORDER, font=("Consolas", 14),
+            height=40, width=320, show="●", justify="center")
+        self.entry_kasir_pass.pack(pady=(2, 6), padx=40)
+        self.entry_kasir_pass.bind("<Return>", lambda e: self._login_kasir())
+
+        show_kasir_pw = ctk.CTkCheckBox(outer, text="👁 Lihat Password",
+                                        fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                                        font=("Consolas", 10), text_color=C_MUTED,
+                                        command=lambda: self.entry_kasir_pass.configure(
+                                            show="" if show_kasir_pw.get() else "●"))
+        show_kasir_pw.pack(pady=(0, 6))
+
+        self.lbl_kasir_status = ctk.CTkLabel(outer, text="", font=("Consolas", 11),
+                                             text_color=C_RED)
+        self.lbl_kasir_status.pack(pady=(0, 8))
+
+        ctk.CTkButton(outer, text="🔓  MASUK SEBAGAI KASIR", width=280, height=44,
+                      fg_color=C_GREEN, hover_color="#0A6A3A",
+                      font=("Russo One", 13, "bold"), text_color="white",
+                      command=self._login_kasir).pack(pady=(0, 4), padx=30)
+
+        ctk.CTkButton(outer, text="←  Kembali ke Login Admin", width=280, height=34,
+                      fg_color="transparent", hover_color=C_BTN,
+                      border_width=1, border_color=C_BORDER,
+                      font=("Russo One", 10, "bold"), text_color=C_MUTED,
+                      command=self._show_login_view).pack(pady=(6, 22), padx=30)
+
+    def _login_kasir(self):
+        username = self.opt_kasir.get() if hasattr(self, "opt_kasir") else ""
+        username = sanitize_text(username).lower()
+        password = self.entry_kasir_pass.get() if hasattr(self, "entry_kasir_pass") else ""
+        password = password.strip()
+        if not username or not password:
+            if hasattr(self, "lbl_kasir_status"):
+                self.lbl_kasir_status.configure(
+                    text="⚠ Pilih akun kasir dan isi password.", text_color=C_YELLOW)
+            return
+        users = ConfigManager.get("users", self.DEFAULT_USERS)
+        user_data = users.get(username) if isinstance(users, dict) else None
+        if not user_data or not isinstance(user_data, dict) or user_data.get("role", "kasir") != "kasir":
+            if hasattr(self, "lbl_kasir_status"):
+                self.lbl_kasir_status.configure(text="✖ Akun bukan kasir.", text_color=C_RED)
+            return
+        password_hash = user_data.get("password_enc") or user_data.get("password", "")
+        if verify_password(password, password_hash):
+            self._attempt = 0
+            AuditLogger.log(action="login_success", username=username, status="success",
+                            details={"role": "kasir", "via": "login_kasir"})
+            self.on_login_success(username, "kasir")
+            return
+        if hasattr(self, "lbl_kasir_status"):
+            self.lbl_kasir_status.configure(text="✖ Password salah.", text_color=C_RED)
 
     def _login_google(self):
         self.lbl_status.configure(text="⏳ Membuka browser untuk login Google...")
@@ -3901,7 +4491,7 @@ class DialogGantiIP(ctk.CTkToplevel):
                 self.after(0, lambda: self.lbl_status.configure(
                     text=f"✖ Gagal connect setelah pair: {pesan2}", text_color=C_RED))
         except Exception as e:
-            self.after(0, lambda: self.lbl_status.configure(
+            self.after(0, lambda e=e: self.lbl_status.configure(
                 text=f"✖ Error: {e}", text_color=C_RED))
 
     def _konfirmasi(self):
@@ -4125,7 +4715,8 @@ class DialogTambahTV(ctk.CTkToplevel):
 # ═══════════════════════════════════════════════════════════════════════════════
 class DialogTambahPesanan(ctk.CTkToplevel):
     """Dialog untuk tambah pesanan makanan/minuman saat sesi TV sedang berjalan."""
-    def __init__(self, master, tv_label, on_confirm, makanan_data, minuman_data, pesanan_aktif=None):
+    def __init__(self, master, tv_label, on_confirm, makanan_data, minuman_data, pesanan_aktif=None,
+                 paket_harga=0, paket_label=""):
         super().__init__(master)
         self.title(f"Tambah Pesanan — {tv_label}")
         self.geometry("380x460")
@@ -4137,6 +4728,8 @@ class DialogTambahPesanan(ctk.CTkToplevel):
         self.makanan_data = makanan_data or {}
         self.minuman_data = minuman_data or {}
         self.pesanan_aktif = pesanan_aktif or {}
+        self.paket_harga = paket_harga or 0
+        self.paket_label = paket_label or ""
         self.order_qty = {}
          
         self._build()
@@ -4155,7 +4748,10 @@ class DialogTambahPesanan(ctk.CTkToplevel):
         # Total display
         self.lbl_total = ctk.CTkLabel(self, text="Total Pesanan: Rp 0",
                                        font=("Russo One", 12, "bold"), text_color=C_YELLOW)
-        self.lbl_total.pack(pady=(0, 8))
+        self.lbl_total.pack(pady=(0, 2))
+        self.lbl_paket_info = ctk.CTkLabel(self, text="",
+                                            font=FONT_SMALL, text_color=C_MUTED)
+        self.lbl_paket_info.pack(pady=(0, 8))
         
         # Scrollable content
         scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG)
@@ -4185,6 +4781,8 @@ class DialogTambahPesanan(ctk.CTkToplevel):
                      fg_color=C_RED, hover_color="#CC0033",
                      font=("Russo One", 10, "bold"), height=38,
                      command=self.destroy).pack(fill="x")
+
+        self._update_total()
     
     def _build_menu_section(self, parent, title, menu_dict):
         """Build collapsible menu section."""
@@ -4225,10 +4823,17 @@ class DialogTambahPesanan(ctk.CTkToplevel):
                          ).pack(side="left", padx=2)
     
     def _update_total(self):
-        """Update total pesanan."""
+        """Update total pesanan (termasuk qty yang sudah ada)."""
         all_menu = {**self.makanan_data, **self.minuman_data}
         total = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.order_qty.items())
-        self.lbl_total.configure(text=f"Total Pesanan: {fmt_rp(total)}")
+        if self.paket_harga > 0 or self.paket_label:
+            total_sesi = self.paket_harga + total
+            self.lbl_total.configure(text=f"Total Sesi: {fmt_rp(total_sesi)}")
+            self.lbl_paket_info.configure(
+                text=f"Paket: {self.paket_label} ({fmt_rp(self.paket_harga)}) + Pesanan {fmt_rp(total)}")
+        else:
+            self.lbl_total.configure(text=f"Total Pesanan: {fmt_rp(total)}")
+            self.lbl_paket_info.configure(text="")
     
     def _confirm(self):
         """Confirm and return new order data."""
@@ -4771,6 +5376,7 @@ class VirtualRemoteDialog(ctk.CTkToplevel):
             ("📺 Kirim Video", self._send_video),
             ("💾 Cache Media", self._cache_media),
             ("⚠ Kirim Peringatan", self._send_warning),
+            ("🖼 Ganti Logo Lock", self._ganti_logo_lock),
         ]:
             ctk.CTkButton(r6, text=txt, width=100, height=38,
                           fg_color=C_BTN, hover_color=C_ACCENT2,
@@ -4917,10 +5523,188 @@ class VirtualRemoteDialog(ctk.CTkToplevel):
                       fg_color=C_BTN, font=FONT_SMALL, text_color="white",
                       command=dlg.destroy).pack(pady=(0, 10), padx=20, fill="x")
 
+    def _ganti_logo_lock(self):
+        """Ganti logo lock screen (global untuk semua kartu TV).
+
+        File disimpan sebagai logo_lock.png di folder media_promo; client TV
+        mengambilnya via TvMediaServer saat LOCK_SCREEN (waktu sewa habis).
+        """
+        app = self.winfo_toplevel()
+        ms = getattr(app, 'tv_media_server', None)
+        if not ms or not ms.running:
+            messagebox.showwarning(
+                "Logo Lock",
+                "Server media (port 8082) tidak berjalan.\n"
+                "Mulai ulang aplikasi billing lalu coba lagi.",
+                parent=self)
+            return
+        path = filedialog.askopenfilename(
+            parent=self, title="Pilih logo lock screen (PNG/JPG)",
+            filetypes=[("Gambar", "*.png *.jpg *.jpeg"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            app._simpan_logo_lock(path)
+        except Exception as e:
+            messagebox.showerror("Logo Lock", f"Gagal menyalin logo:\n{e}", parent=self)
+            return
+        # Beri tahu semua TV yang terhubung: refresh logo lockscreen sekarang.
+        try:
+            logo_url = app._tv_logo_url()
+            hub = getattr(app, 'tv_ws_hub', None)
+            if hub and logo_url:
+                n = hub.broadcast_update_logo(logo_url)
+                print(f"[TV LOGO] broadcast UPDATE_LOGO ke {n} TV")
+        except Exception as e:
+            print(f"[TV LOGO] gagal broadcast: {e}")
+        messagebox.showinfo(
+            "Logo Lock",
+            "✅ Logo lock screen berhasil diganti.\n"
+            "Berlaku untuk semua TV saat waktu sewa habis.",
+            parent=self)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  KARTU TV
 # ═══════════════════════════════════════════════════════════════════════════════
+class DialogStatusClient(ctk.CTkToplevel):
+    """Dialog status APK client TV (terpasang/belum) + install."""
+    PACKAGE = "com.rrbillingpro.tvclient"
+
+    def __init__(self, master, label_tv, ip, on_install):
+        super().__init__(master)
+        self.title(f"Status Client TV — {label_tv}")
+        self.geometry("480x310")
+        self.configure(fg_color=C_BG)
+        self.resizable(False, False)
+        self.transient(master)
+        self._ip = ip
+        self._on_install = on_install
+        self._label_tv = label_tv
+        # Hub WebSocket untuk fallback: APK bisa aktif walau ADB port 5555 mati.
+        self._hub = getattr(master.winfo_toplevel(), 'tv_ws_hub', None)
+        self._busy = False
+
+        ctk.CTkLabel(self, text=f"📺  {label_tv}   ({ip})",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(18, 6))
+        self.lbl_adb = ctk.CTkLabel(self, text="ADB: memeriksa…",
+                                    font=("Courier New", 12, "bold"),
+                                    text_color=C_YELLOW)
+        self.lbl_adb.pack(pady=2)
+        self.lbl_apk = ctk.CTkLabel(self, text="APK client: memeriksa…",
+                                    font=("Courier New", 12, "bold"),
+                                    text_color=C_YELLOW)
+        self.lbl_apk.pack(pady=2)
+        self.lbl_info = ctk.CTkLabel(self, text="",
+                                     font=FONT_SMALL, text_color=C_MUTED)
+        self.lbl_info.pack(pady=2)
+
+        self.btn_install = ctk.CTkButton(self, text="🔧 INSTALL APK", height=38,
+                                         fg_color=C_ACCENT2,
+                                         font=("Russo One", 11, "bold"),
+                                         command=self._pilih_apk)
+        self.btn_install.pack(pady=(18, 4))
+        self.btn_install.configure(state="disabled")
+        ctk.CTkButton(self, text="Tutup", height=32, fg_color=C_BTN,
+                      text_color=C_MUTED, font=("Russo One", 10, "bold"),
+                      command=self.destroy).pack(pady=4)
+        self._cek()
+
+    def _cek(self):
+        self._busy = True
+        threading.Thread(target=self._cek_thread, daemon=True).start()
+
+    def _cek_thread(self):
+        hasil = self._cek_apk()
+        self.after(0, self._tampilkan, hasil)
+
+    def _cek_apk(self):
+        konek = ADBHelper._adb_connect(self._ip)
+        if konek.get("status") != "connected":
+            # Fallback: APK client mungkin tetap aktif via WebSocket walau port
+            # ADB 5555 ditutup (biasa di Android TV yang tidak punya ADB debug).
+            if self._hub and self._hub.is_meja_connected(self._label_tv):
+                return {"adb": False, "ws": True,
+                        "pesan": konek.get("message", "Gagal konek ADB")}
+            return {"adb": False, "pesan": konek.get("message", "Gagal konek ADB")}
+        ok, out = ADBHelper.adb_shell(self._ip, "pm list packages " + self.PACKAGE)
+        if not ok:
+            return {"adb": True, "pesan": out or "Gagal menjalankan perintah ADB."}
+        terpasang = self.PACKAGE in (out or "")
+        versi = ""
+        if terpasang:
+            ok2, out2 = ADBHelper.adb_shell(self._ip,
+                                            "dumpsys package " + self.PACKAGE)
+            m = re.search(r"versionName=([0-9.]+)", out2 or "")
+            if m:
+                versi = m.group(1)
+        return {"adb": True, "terpasang": terpasang, "versi": versi}
+
+    def _tampilkan(self, hasil):
+        self._busy = False
+        if not hasil.get("adb"):
+            self.lbl_adb.configure(text="ADB: ❌ GAGAL", text_color=C_RED)
+            if hasil.get("ws"):
+                self.lbl_apk.configure(text="APK client: ✅ AKTIF (WebSocket)",
+                                       text_color=C_GREEN)
+                self.lbl_info.configure(
+                    text="Aplikasi TV terhubung via WebSocket.\n"
+                         "ADB (port 5555) tidak tersedia — install perlu "
+                         "mengaktifkan ADB debugging di TV.")
+            else:
+                self.lbl_apk.configure(text=f"Pesan: {str(hasil.get('pesan', ''))[:60]}",
+                                       text_color=C_RED)
+                self.lbl_info.configure(text="Pastikan ADB debugging di TV aktif.")
+            return
+        self.lbl_adb.configure(text="ADB: ✅ Terhubung", text_color=C_GREEN)
+        if hasil.get("terpasang"):
+            v = hasil.get("versi") or "?"
+            self.lbl_apk.configure(text=f"APK client: ✅ TERPASANG (v{v})",
+                                   text_color=C_GREEN)
+            self.btn_install.configure(state="disabled",
+                                       text="🔧 INSTALL APK (sudah terpasang)")
+        else:
+            self.lbl_apk.configure(text="APK client: ❌ BELUM TERPASANG",
+                                   text_color=C_RED)
+            self.btn_install.configure(state="normal")
+
+    def _pilih_apk(self):
+        if self._busy:
+            return
+        base = os.path.dirname(os.path.abspath(sys.argv[0]))
+        default = os.path.join(base, "android_tv_client", "app", "build",
+                               "outputs", "apk", "debug", "app-debug.apk")
+        if not os.path.isfile(default):
+            default = os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            parent=self, title="Pilih file APK client",
+            initialdir=os.path.dirname(default),
+            filetypes=[("APK file", "*.apk")])
+        if not path:
+            return
+        self._busy = True
+        self.btn_install.configure(state="disabled", text="⏳ Menginstall…")
+        self.lbl_info.configure(text="Mengirim APK via ADB… mohon tunggu.")
+        threading.Thread(target=self._install_thread, args=(path,), daemon=True).start()
+
+    def _install_thread(self, path):
+        ok, pesan = ADBHelper.adb_install(self._ip, path)
+        self.after(0, self._install_selesai, ok, pesan)
+
+    def _install_selesai(self, ok, pesan):
+        self._busy = False
+        self.btn_install.configure(text="🔧 INSTALL APK")
+        self.lbl_info.configure(text="")
+        if ok:
+            self.lbl_apk.configure(text="APK client: ✅ TERPASANG", text_color=C_GREEN)
+            messagebox.showinfo("✅ Install Berhasil",
+                                f"APK terpasang di {self._ip}\n{pesan}", parent=self)
+        else:
+            self.lbl_apk.configure(text="APK client: ❌ GAGAL DIPASANG", text_color=C_RED)
+            messagebox.showerror("❌ Install Gagal", str(pesan), parent=self)
+
+
 class KartuTV(tk.Canvas):
     def __init__(self, master, nomor, ip, port, label_tv, on_transaksi,
                  get_paket_data, get_makanan_data, get_minuman_data,
@@ -4953,10 +5737,12 @@ class KartuTV(tk.Canvas):
         self.pesanan_aktif = {}
         self.biaya_pesanan = 0
         self.paket_harga_tetap = 0
+        self.daftar_paket_sesi = []
         self.diskoni       = 0
         self.diskoni_mode  = "nominal"
         self._timer_job    = None
         self._last_transaction_item = None
+        self.paid          = True   # status pembayaran sesi (sinkron ke riwayat)
         self._warning_blink_on = False
         self._timer_paused = False
         self._timer_was_running = False
@@ -4964,11 +5750,27 @@ class KartuTV(tk.Canvas):
         self._ids = {}
         self._btn_states = {}
         self._card_w = 260
+        self._BLACK_BTNS = frozenset({
+            "vol_up", "vol_dn", "home", "remote", "apk",
+            "shop", "paket", "pause", "ip", "pindah",
+            "video", "gambar", "logo", "ganti_nama", "hapus",
+            "bayar_lunas", "bayar_belum",
+        })
 
         self._build()
         self.connected = False
         self._online_check_running = False
+        self._power_check_running = False
+        self._tv_reachable = True
+        # Auto-off TV tanpa paket (anti-kasir nakal): idle_on_seconds = akumulasi
+        # detik layar nyala tanpa sesi; idle_escalated = pernah di-auto-mati
+        # (ambang turun dari 10 menit ke 5 menit sampai paket sah dibuka).
+        self.idle_on_seconds = 0
+        self.idle_escalated = False
+        self._power_state_known = False
         self.after(3000, self._online_checker)
+        self.after(2000, self._refresh_client_badge)
+        self.after(2000, self._tv_power_checker)
  
         self.bind("<Configure>", self._on_card_resize)
 
@@ -4982,7 +5784,13 @@ class KartuTV(tk.Canvas):
     def _on_card_resize(self, event):
         if event.width > 50 and abs(event.width - self._card_w) > 5:
             self._card_w = event.width
-            self._build()
+            job = getattr(self, "_resize_job", None)
+            if job:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+            self._resize_job = self.after(200, lambda: self.winfo_exists() and self._build())
 
     def _build_inner(self):
         W = self._card_w
@@ -5003,13 +5811,18 @@ class KartuTV(tk.Canvas):
             text=display_label, font=("Russo One", 11, "bold"),
             fill="white", anchor="w", tags="tv_name")
 
+        # Badge status pembayaran (sebelah nama)
+        self._ids['paid_badge'] = self.create_text(10, y+10,
+            text="", font=("Courier New", 8, "bold"),
+            fill=C_GREEN, anchor="w", tags="paid_badge")
+
         # "Nama" button
         self._draw_canvas_btn("ganti_nama", W-126, y-2, 76, 24, "Nama",
-            C_BTN, C_ACCENT2, ("Russo One", 8, "bold"), self._buka_ganti_nama)
+            "black", "white", ("Russo One", 8, "bold"), self._buka_ganti_nama)
 
         # "✖" button
         self._draw_canvas_btn("hapus", W-46, y-2, 36, 24, "✖",
-            C_RED, C_RED, ("Russo One", 8, "bold"), self._confirm_hapus)
+            "black", "white", ("Russo One", 8, "bold"), self._confirm_hapus)
 
         y += 26
         # IP + badge
@@ -5025,6 +5838,9 @@ class KartuTV(tk.Canvas):
         self._ids['online_dot'] = self.create_text(W-30, y+6,
             text="●", font=("Courier New", 8, "bold"),
             fill=C_GREEN, anchor="e", tags="online_dot")
+        self._ids['cli_badge'] = self.create_text(W-58, y+6,
+            text="CLI✗", font=("Courier New", 8, "bold"),
+            fill=C_MUTED, anchor="e", tags="cli_badge")
         y = hdr_y + hdr_h + 4
 
         # ── Status row ──────────────────────────────────────────────────────
@@ -5055,37 +5871,74 @@ class KartuTV(tk.Canvas):
 
         # ── Button Row 1 ────────────────────────────────────────────────────
         btn_h, gap_b = 30, 4
-        n_btn, btn_cols = 5, 5
+        n_btn, btn_cols = 6, 6
         avail = W - 8 - (n_btn - 1) * gap_b
         bw = avail // btn_cols
         bx = 4
 
         r1y = y
         btn_defs1 = [
-            ("power", "\u26a1 PWR", C_RED, self._toggle_power),
-            ("vol_up", "VOL+", C_GREEN, lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=True, port=self.port))),
-            ("vol_dn", "VOL\u2212", C_YELLOW, lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=False, port=self.port))),
-            ("home", "HOME", C_ACCENT, lambda: self._adb_action(lambda: ADBHelper.home(self.ip, port=self.port))),
-            ("remote", "\U0001f579 REMOTE", C_ACCENT2, self._buka_remote),
+            ("power", "\u26a1 PWR", C_RED, C_RED, self._toggle_power),
+            ("vol_up", "VOL+", "black", "white", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=True, port=self.port))),
+            ("vol_dn", "VOL\u2212", "black", "white", lambda: self._adb_action(lambda: ADBHelper.volume(self.ip, naik=False, port=self.port))),
+            ("home", "HOME", "black", "white", lambda: self._adb_action(lambda: ADBHelper.home(self.ip, port=self.port))),
+            ("remote", "RMT", "black", "white", self._buka_remote),
+            ("apk", "APK", "black", "white", self._buka_status_client),
         ]
-        for i, (key, txt, col, cmd) in enumerate(btn_defs1):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, col, col, ("Courier New", 8, "bold"), cmd)
+        for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs1):
+            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, bg, fg, ("Courier New", 8, "bold"), cmd)
         y = r1y + btn_h + 4
 
         # ── Button Row 2 ────────────────────────────────────────────────────
         r2y = y
+        n_btn2, btn_cols2 = 6, 6
+        avail2 = W - 8 - (n_btn2 - 1) * gap_b
+        bw2 = avail2 // btn_cols2
         btn_defs2 = [
             ("selesai", "SELESAI", C_BTN, C_RED, self._klik_selesai, True),
-            ("shop", "SHOP", C_BTN, C_ACCENT, self._buka_tambah_pesanan, True),
-            ("paket", "PAKET", C_BTN, C_ACCENT2, self._pilih_paket, False),
-            ("ip", "IP", C_BTN, C_ACCENT2, self._buka_ganti_ip, False),
-            ("pindah", "Pindah TV", C_BTN, C_ACCENT2, self._klik_pindah, False),
+            ("shop", "SHOP", "black", "white", self._buka_tambah_pesanan, True),
+            ("paket", "PAKET", "black", "white", self._pilih_paket, False),
+            ("pause", "PAUSE", "black", "white", self._toggle_billing_pause, True),
+            ("ip", "IP", "black", "white", self._buka_ganti_ip, False),
+            ("pindah", "Pindah", "black", "white", self._klik_pindah, False),
         ]
         for i, (key, txt, bg, fg, cmd, disabled) in enumerate(btn_defs2):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r2y, bw, btn_h, txt, bg, fg, ("Russo One", 8, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
             if disabled:
                 self._disable_btn(key)
-        y = r2y + btn_h + 6
+        y = r2y + btn_h + 4
+
+        # ── Button Row 3 (Media promosi) ────────────────────────────────────
+        r3y = y
+        n_btn3, btn_cols3 = 3, 3
+        avail3 = W - 8 - (n_btn3 - 1) * gap_b
+        bw3 = avail3 // btn_cols3
+        btn_defs3 = [
+            ("video", "🎬 VIDEO", "black", "white", self._buka_media_video),
+            ("gambar", "🖼 GAMBAR", "black", "white", self._buka_media_gambar),
+            ("logo", "🖼 LOGO", "black", "white", self._ganti_logo_kartu),
+        ]
+        for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
+            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
+        y = r3y + btn_h + 4
+
+        # ── Button Row 4 (Status pembayaran) ────────────────────────────────
+        r4y = y
+        n_btn4, btn_cols4 = 2, 2
+        avail4 = W - 8 - (n_btn4 - 1) * gap_b
+        bw4 = avail4 // btn_cols4
+        btn_defs4 = [
+            ("bayar_lunas", "✅ SUDAH BAYAR", "black", "white", lambda: self._set_paid(True)),
+            ("bayar_belum", "⏳ BELUM BAYAR", "black", "white", lambda: self._set_paid(False)),
+        ]
+        for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs4):
+            self._draw_canvas_btn(key, bx + i*(bw4+gap_b), r4y, bw4, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
+            self._disable_btn(key)
+            # Hover tombol bayar: re-apply state aktif (jangan timpa warna state)
+            self.tag_bind(f"btn_{key}", "<Enter>", lambda e, k=key: self._update_bayar_buttons())
+            self.tag_bind(f"btn_{key}", "<Leave>", lambda e, k=key: self._update_bayar_buttons())
+        y = r4y + btn_h + 6
+        self._update_paid_badge()
 
         # Update card background height
         total_h = y
@@ -5114,6 +5967,8 @@ class KartuTV(tk.Canvas):
         return rect, txt_id
 
     def _btn_text_color(self, bg, fg):
+        if bg == "black":
+            return "white"
         if bg == C_ACCENT:
             return "black"
         if bg == C_BTN:
@@ -5123,7 +5978,9 @@ class KartuTV(tk.Canvas):
     def _btn_hover(self, key, bg):
         if self._btn_states.get(key) == "disabled":
             return
-        if bg == C_RED:
+        if bg == "black":
+            self.itemconfig(self._ids[f'btn_{key}'], fill="#333333")
+        elif bg == C_RED:
             self.itemconfig(self._ids[f'btn_{key}'], fill="#FF6666")
         elif bg == C_GREEN:
             self.itemconfig(self._ids[f'btn_{key}'], fill="#66BB6A")
@@ -5145,12 +6002,223 @@ class KartuTV(tk.Canvas):
 
     def _disable_btn(self, key):
         self._btn_states[key] = "disabled"
-        self.itemconfig(self._ids[f'btn_{key}'], fill=C_BTN, outline=C_BORDER)
+        if key in self._BLACK_BTNS:
+            self.itemconfig(self._ids[f'btn_{key}'], fill="black", outline=C_BORDER)
+        else:
+            self.itemconfig(self._ids[f'btn_{key}'], fill=C_BTN, outline=C_BORDER)
         self.itemconfig(self._ids[f'btn_{key}_txt'], fill=C_MUTED)
 
     # ── Util status sesi ─────────────────────────────────────────────────────
     def sesi_kosong(self):
         return self.paket_aktif is None
+
+    # ── Status pembayaran (sinkron ke riwayat) ───────────────────────────────
+    def _update_paid_badge(self):
+        """Update badge '● LUNAS' / '⏳ BELUM' di header, tepat di sebelah nama."""
+        if 'paid_badge' not in self._ids:
+            return
+        display_label = self.label_tv
+        if display_label.upper().startswith("TV "):
+            display_label = display_label[3:]
+        # Estimasi lebar nama (Russo One 11 bold ≈ 7.5px/char) + jarak 6px
+        name_w = len(display_label) * 7 + 6
+        if self.sesi_kosong() or self.is_bebas:
+            text, color = "", C_GREEN
+        elif self.paid:
+            text, color = "● LUNAS", C_GREEN
+        else:
+            text, color = "⏳ BELUM", "#FFCC00"
+        self.itemconfig(self._ids['paid_badge'], text=text, fill=color)
+        self.coords(self._ids['paid_badge'], 10 + name_w, self.coords(self._ids['tv_name'])[1])
+
+    def _update_bayar_buttons(self):
+        """Warna tombol SUDAH/BELUM BAYAR sesuai state aktif (lunas = hijau)."""
+        if 'btn_bayar_lunas' not in self._ids:
+            return
+        if self.paid:
+            self.itemconfig(self._ids['btn_bayar_lunas'], fill=C_GREEN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill="white")
+            self.itemconfig(self._ids['btn_bayar_belum'], fill="black", outline=C_BORDER)
+            self.itemconfig(self._ids['btn_bayar_belum_txt'], fill=C_MUTED)
+        else:
+            self.itemconfig(self._ids['btn_bayar_belum'], fill="#FFCC00", outline="#FFCC00")
+            self.itemconfig(self._ids['btn_bayar_belum_txt'], fill="black")
+            self.itemconfig(self._ids['btn_bayar_lunas'], fill="black", outline=C_BORDER)
+            self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill=C_MUTED)
+
+    def _set_paid(self, paid):
+        """Tandai sesi lunas/belum lunas, sinkronkan ke baris riwayat terkait."""
+        if self.sesi_kosong() or self.is_bebas:
+            return
+        if self._last_transaction_item is None:
+            return
+        if self.paid == paid:
+            return
+        self.paid = paid
+        self._update_paid_badge()
+        self._update_bayar_buttons()
+        app = self.winfo_toplevel()
+        if hasattr(app, '_set_transaksi_paid'):
+            app._set_transaksi_paid(self._last_transaction_item, paid)
+
+    # ── TV WebSocket Hub helpers (Overlay & Lockscreen Android TV) ──────────
+    def _hub(self):
+        app = self.winfo_toplevel()
+        return getattr(app, 'tv_ws_hub', None)
+
+    def _ws_send_start(self, sisa_detik):
+        hub = self._hub()
+        if not hub:
+            return
+        try:
+            hub.send_start_timer(self.label_tv, sisa_detik, self._total_setelah_diskon())
+        except Exception as e:
+            print(f"[TV WS HUB] send_start error {self.label_tv}: {e}")
+        # Paket sah dibuka → batalkan hitungan auto-off & kembali ke 10 menit.
+        self.idle_on_seconds = 0
+        self.idle_escalated = False
+
+    def _ws_send_total(self, total):
+        hub = self._hub()
+        if not hub:
+            return
+        try:
+            hub.send_update_total(self.label_tv, total)
+        except Exception as e:
+            print(f"[TV WS HUB] send_update_total error {self.label_tv}: {e}")
+
+    def _ws_send_sync(self):
+        hub = self._hub()
+        if not hub:
+            return
+        try:
+            hub.send_sync_timer(self.label_tv, self.sisa_waktu, self._total_setelah_diskon())
+        except Exception as e:
+            print(f"[TV WS HUB] send_sync_timer error {self.label_tv}: {e}")
+
+    def _ws_send_stop(self):
+        hub = self._hub()
+        if not hub:
+            return
+        try:
+            hub.send_stop_timer(self.label_tv)
+            hub.send_unlock_screen(self.label_tv)
+        except Exception as e:
+            print(f"[TV WS HUB] send_stop error {self.label_tv}: {e}")
+
+    def _ws_send_lock(self, pesan, detail):
+        hub = self._hub()
+        if not hub:
+            return
+        try:
+            hub.send_lock_screen(self.label_tv, pesan, detail)
+        except Exception as e:
+            print(f"[TV WS HUB] send_lock error {self.label_tv}: {e}")
+
+    # ── Auto-off TV tanpa paket aktif (anti-kasir nakal) ────────────────────
+    # Dipanggil poller aplikasi tiap 30 detik. Logika:
+    #   - layar nyala + tanpa sesi  → akumulasi detik
+    #   - ambang 10 menit (pertama) → 5 menit setelah pernah di-auto-mati
+    #   - paket sah dibuka          → reset counter & kembali ke 10 menit
+    #   - layar mati                → reset counter
+    #   - status layar tak diketahui (APK tidak terhubung) → skip
+    def _tv_idle_check(self):
+        hub = self._hub()
+        if not hub:
+            return
+        state = hub.get_screen_state(self.label_tv)
+        if state is None:
+            return
+        if not state:
+            self.idle_on_seconds = 0
+            return
+        if not self.sesi_kosong():
+            self.idle_on_seconds = 0
+            self.idle_escalated = False
+            return
+        self.idle_on_seconds += 30
+        app = self.winfo_toplevel()
+        threshold = (getattr(app, 'tv_auto_off_sec', 300)
+                     if self.idle_escalated
+                     else getattr(app, 'tv_auto_off_first_sec', 600))
+        if self.idle_on_seconds >= threshold:
+            self.idle_on_seconds = 0
+            self.idle_escalated = True
+            self._tv_sleep_now(threshold)
+
+    def _tv_sleep_now(self, grace_detik, alasan=None):
+        """Matikan TV (sleep) via atpv2 power_toggle — TANPA fallback ADB.
+        Kalau remote atpv2 belum terhubung, TV tetap menyala (tidak ada
+        adb connect/keyevent). Hasil selalu dicatat ke log kasir."""
+        app = self.winfo_toplevel()
+        user = getattr(app, "current_user", "") or ""
+        if alasan is None:
+            alasan = f"Layar nyala tanpa paket aktif selama {grace_detik // 60} menit"
+        AuditLogger.log("TV_AUTO_OFF", user, "ok", {
+            "label_tv": self.label_tv,
+            "ip": self.ip,
+            "alasan": alasan,
+            "jam": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        print(f"[TV SLEEP] {self.label_tv} ({self.ip}): {alasan}")
+
+        def runner():
+            try:
+                ok, out, _ = ADBHelper.power_toggle(self.ip, port=self.port)
+            except Exception as e:
+                ok, out = False, str(e)
+            if ok:
+                print(f"[TV SLEEP] {self.label_tv}: atpv2 power_toggle OK")
+            else:
+                print(f"[TV SLEEP] {self.label_tv}: atpv2 gagal ({str(out)[:120]}) "
+                      f"— TV tetap menyala (tanpa fallback ADB)")
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _tv_lock_media_urls(self, app):
+        """URL logo lock (global) + video promosi aktif untuk detail LOCK_SCREEN."""
+        ms = getattr(app, 'tv_media_server', None)
+        if not ms or not ms.running:
+            return "", ""
+        base = f"http://{app._get_lan_ip()}:{ms.port}/media/"
+        logo_url = app._tv_logo_url()
+        promo_url = ""
+        cur = getattr(ms, 'current_media', None) or {}
+        if cur.get("type") == "video" and cur.get("filename"):
+            promo_url = base + cur["filename"]
+        return logo_url, promo_url
+
+    def _ws_send_pause(self, paused):
+        hub = self._hub()
+        if not hub:
+            return
+        try:
+            if paused:
+                hub.send_pause_timer(self.label_tv)
+            else:
+                hub.send_resume_timer(self.label_tv, self.sisa_waktu)
+        except Exception as e:
+            print(f"[TV WS HUB] send_pause error {self.label_tv}: {e}")
+
+    def _toggle_billing_pause(self):
+        self._billing_paused = not getattr(self, '_billing_paused', False)
+        if self._billing_paused:
+            if self._timer_job:
+                self.after_cancel(self._timer_job)
+                self._timer_job = None
+            self._ws_send_pause(True)
+            self._enable_btn("pause", "black", "white")
+            self.itemconfig(self._ids['btn_pause_txt'], text="PAUSED")
+            self.itemconfig(self._ids['lbl_timer'], text="II PAUSED", fill=C_YELLOW)
+            self.itemconfig(self._ids['lbl_estimasi'], text="", fill=C_YELLOW)
+        else:
+            self._ws_send_pause(False)
+            self._enable_btn("pause", "black", "white")
+            self.itemconfig(self._ids['btn_pause_txt'], text="PAUSE")
+            if self.is_bebas:
+                self._tick_bebas()
+            elif self.sisa_waktu > 0:
+                self._tick_waktu()
 
     def _buka_ganti_port(self):
         DialogGantiPort(self.winfo_toplevel(), self.label_tv, self.ip, self.port,
@@ -5180,6 +6248,8 @@ class KartuTV(tk.Canvas):
             display_label = display_label[3:]
         self.itemconfig(self._ids['tv_name'], text=display_label)
         self.itemconfig(self._ids['ip_footer'], text=f"IP: {self.ip}")
+        self._update_paid_badge()
+        self._simpan_daftar_tv()
         AuditLogger.log(action="rename_tv", username="", status="success", details={"old": lama, "new": nama_baru})
  
     def _confirm_hapus(self):
@@ -5198,6 +6268,7 @@ class KartuTV(tk.Canvas):
         dot_id = self._ids.get('online_dot')
         if dot_id:
             self.itemconfig(dot_id, fill=C_YELLOW)
+        self._simpan_daftar_tv()
         self.after(1000, self._online_checker)
 
     def _buka_ganti_grup(self):
@@ -5240,6 +6311,14 @@ class KartuTV(tk.Canvas):
 
     def _terapkan_port_baru(self, port_baru):
         self.port = port_baru
+        self._simpan_daftar_tv()
+
+    def _simpan_daftar_tv(self):
+        """Simpan daftar kartu TV (ip/nama/port/grup) ke config agar otomatis
+        dimuat ulang saat login berikutnya (tanpa tambah manual)."""
+        app = self.winfo_toplevel()
+        if hasattr(app, "_simpan_daftar_tv"):
+            app._simpan_daftar_tv()
 
     def _cek_koneksi_adb(self):
         if getattr(self, "_cek_busy", False): return
@@ -5274,15 +6353,108 @@ class KartuTV(tk.Canvas):
     def _update_online_status(self, reachable):
         if not self.winfo_exists():
             return
-        self.connected = reachable
+        # TV dianggap online jika APK-nya terhubung WebSocket, walau port ADB
+        # 5555 ditutup (sumber akurat — status layar juga datang dari sini).
+        app = self.winfo_toplevel()
+        hub = getattr(app, 'tv_ws_hub', None)
+        ws_connected = bool(hub and hub.is_meja_connected(self.label_tv))
+        online = bool(reachable or ws_connected)
+        self.connected = online
+        self._tv_reachable = online
         dot_id = self._ids.get('online_dot')
         if dot_id:
-            self.itemconfig(dot_id, fill=C_GREEN if reachable else C_RED)
+            self.itemconfig(dot_id, fill=C_GREEN if online else C_RED)
         badge_id = self._ids.get('metode_badge')
         if badge_id:
-            badge_text = "ONLINE" if reachable else "OFFLINE"
-            badge_color = C_GREEN if reachable else C_RED
+            badge_text = "ONLINE" if online else "OFFLINE"
+            badge_color = C_GREEN if online else C_RED
             self.itemconfig(badge_id, text=badge_text, fill=badge_color)
+        if ws_connected:
+            # Status HIDUP/MATI diambil dari WebSocket APK (akurat) — tidak
+            # perlu spawn adb dumpsys tiap menit.
+            self._auto_reconnect_remote()
+            return
+        if reachable:
+            self._auto_reconnect_remote()
+            self._tv_power_checker()
+        else:
+            self._apply_tv_power_state(False)
+
+    def _auto_reconnect_remote(self):
+        """Reconnect otomatis remote atpv2 (androidtvremote2) saat TV online
+        tapi remote belum terhubung — tanpa perlu re-pairing (sertifikat
+        tersimpan per IP). Hanya jalan bila file sertifikat pairing ada."""
+        if getattr(self, "_reconnect_running", False):
+            return
+        if not ADBHelper.adb_tersedia():
+            return
+        rem = ADBHelper._get_remote(self.ip)
+        if rem and rem.is_connected():
+            return
+        certfile, _ = tv_mesin._cert_paths_for_ip(self.ip)
+        if not os.path.isfile(certfile):
+            return
+        self._reconnect_running = True
+
+        def runner():
+            try:
+                ok, _, pesan = ADBHelper.cek_dan_reconnect(self.ip, self.port)
+                print(f"[TV RECONNECT] {self.label_tv} ({self.ip}): "
+                      f"{'OK' if ok else str(pesan)[:120]}")
+            except Exception as e:
+                print(f"[TV RECONNECT] {self.label_tv}: {e}")
+            finally:
+                self._reconnect_running = False
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    # ── Cek status nyala TV sesungguhnya (HIDUP/MATI) ───────────────────────
+    def _tv_power_checker(self):
+        if getattr(self, "_power_check_running", False):
+            return
+        app = self.winfo_toplevel()
+        hub = getattr(app, 'tv_ws_hub', None)
+        if hub and hub.is_meja_connected(self.label_tv):
+            # Status layar sudah diketahui dari APK via WebSocket.
+            return
+        # TV offline → lewati (hindari spawn adb.exe tiap menit); cek lagi nanti
+        if not getattr(self, "_tv_reachable", True):
+            try:
+                self.after(60000, self._tv_power_checker)
+            except Exception:
+                pass
+            return
+        self._power_check_running = True
+        threading.Thread(target=self._tv_power_check_thread, daemon=True).start()
+
+    def _tv_power_check_thread(self):
+        try:
+            state = ADBHelper.tv_power_state(self.ip, self.port)
+        except Exception:
+            state = None
+        self._power_check_running = False
+        try:
+            self.after(0, self._apply_tv_power_state, state)
+        except Exception:
+            return
+        try:
+            self.after(60000, self._tv_power_checker)
+        except Exception:
+            pass
+
+    def _apply_tv_power_state(self, state):
+        if not self.winfo_exists():
+            return
+        if state is True:
+            self.is_on = True
+            self._power_state_known = True
+            self.itemconfig(self._ids['lbl_power'], text="\U0001f4fa HIDUP", fill=C_GREEN)
+            self.itemconfig(self._ids['btn_power'], fill="#3A0000")
+        elif state is False:
+            self.is_on = False
+            self._power_state_known = True
+            self.itemconfig(self._ids['lbl_power'], text="\U0001f4f5 MATI", fill=C_MUTED)
+            self.itemconfig(self._ids['btn_power'], fill=C_BTN)
 
     def _cek_koneksi_selesai(self, sukses, status_awal, pesan):
         self._cek_busy = False
@@ -5314,7 +6486,142 @@ class KartuTV(tk.Canvas):
     def _buka_remote(self):
         VirtualRemoteDialog(self.winfo_toplevel(), self.label_tv, self.ip, self.port)
 
+    # ── Status APK client TV (badge CLI + cek/install) ──────────────────────
+    def _buka_status_client(self):
+        DialogStatusClient(self.winfo_toplevel(), self.label_tv, self.ip,
+                           self._install_apk_client)
+
+    # ── Media promosi (video/gambar) ke client TV ───────────────────────────
+    def _get_media_server(self):
+        app = self.winfo_toplevel()
+        return getattr(app, 'tv_media_server', None)
+
+    def _pilih_media(self, kategori, filetypes, judul):
+        ms = self._get_media_server()
+        if not ms or not ms.running:
+            messagebox.showwarning("Media Server Mati",
+                                   "Server media (port 8082) tidak berjalan.\n"
+                                   "Cek konfigurasi tv_ws_enabled di rr_billing_config.json.",
+                                   parent=self.winfo_toplevel())
+            return
+        path = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(), title=judul,
+            initialdir=os.path.join(APP_BASE_DIR, "media_promo"),
+            filetypes=filetypes)
+        if not path:
+            return
+        app = self.winfo_toplevel()
+        hub = getattr(app, 'tv_ws_hub', None)
+        try:
+            filename = ms.simpan_file(path)
+            media_type = kategori
+            ms.set_current(media_type, filename)
+            url = f"http://{app._get_lan_ip()}:{ms.port}/media/{filename}"
+            if hub:
+                hub.send_show_media(self.label_tv, media_type, url)
+            messagebox.showinfo("✅ Media Terkirim",
+                                f"TV: {self.label_tv}\n{os.path.basename(path)}\n"
+                                f"({media_type})",
+                                parent=self.winfo_toplevel())
+        except Exception as e:
+            messagebox.showerror("Gagal Kirim Media", str(e),
+                                 parent=self.winfo_toplevel())
+
+    def _buka_media_video(self):
+        self._pilih_media("video", [("Video", "*.mp4 *.webm *.3gp"), ("Semua", "*.*")],
+                          "Pilih video promosi")
+
+    def _buka_media_gambar(self):
+        self._pilih_media("image", [("Gambar", "*.jpg *.jpeg *.png *.gif *.webp"),
+                                    ("Semua", "*.*")],
+                          "Pilih gambar promosi")
+
+    def _ganti_logo_kartu(self):
+        """Ganti logo lock screen dari kartu TV (global untuk semua TV).
+
+        Koneksi sama seperti tombol VIDEO/GAMBAR — tanpa ADB/port 5555: file
+        disalin ke media_promo/logo_lock.png via TvMediaServer (HTTP 8082);
+        client TV memakainya saat LOCK_SCREEN (waktu sewa habis)."""
+        app = self.winfo_toplevel()
+        ms = self._get_media_server()
+        if not ms or not ms.running:
+            messagebox.showwarning("Media Server Mati",
+                                   "Server media (port 8082) tidak berjalan.\n"
+                                   "Cek konfigurasi tv_ws_enabled di rr_billing_config.json.",
+                                   parent=app)
+            return
+        path = filedialog.askopenfilename(
+            parent=app, title="Pilih logo lock screen (PNG/JPG)",
+            initialdir=os.path.join(APP_BASE_DIR, "media_promo"),
+            filetypes=[("Gambar", "*.png *.jpg *.jpeg"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            app._simpan_logo_lock(path)
+        except Exception as e:
+            messagebox.showerror("Logo Lock", f"Gagal menyalin logo:\n{e}", parent=app)
+            return
+        # Beri tahu semua TV yang terhubung: refresh logo lockscreen sekarang.
+        try:
+            logo_url = app._tv_logo_url()
+            hub = getattr(app, 'tv_ws_hub', None)
+            if hub and logo_url:
+                n = hub.broadcast_update_logo(logo_url)
+                print(f"[TV LOGO] broadcast UPDATE_LOGO ke {n} TV")
+        except Exception as e:
+            print(f"[TV LOGO] gagal broadcast: {e}")
+        messagebox.showinfo("✅ Logo Lock",
+                            "Logo lock berhasil diganti.\n"
+                            "Berlaku untuk semua TV saat waktu sewa habis.",
+                            parent=app)
+
+    def _refresh_client_badge(self):
+        try:
+            if not self.winfo_exists():
+                return
+            app = self.winfo_toplevel()
+            hub = getattr(app, 'tv_ws_hub', None)
+            online = bool(hub and hub.is_meja_connected(self.label_tv))
+            badge_id = self._ids.get('cli_badge')
+            if badge_id:
+                self.itemconfig(badge_id,
+                                text="CLI\u2713" if online else "CLI\u2717",
+                                fill=C_GREEN if online else C_MUTED)
+            # Status HIDUP/MATI: prioritas status layar dari APK (WebSocket) —
+            # paling akurat. Fallback ADB; kalau belum ada sumber → "?" abu-abu
+            # (bukan label basi).
+            ws_state = hub.get_screen_state(self.label_tv) if hub else None
+            if ws_state is True:
+                self._apply_tv_power_state(True)
+            elif ws_state is False:
+                self._apply_tv_power_state(False)
+            elif not self._power_state_known:
+                self.itemconfig(self._ids['lbl_power'],
+                                text="\U0001f4fa ?", fill=C_MUTED)
+                self.itemconfig(self._ids['btn_power'], fill=C_BTN)
+            self.after(10000, self._refresh_client_badge)
+        except Exception:
+            pass
+
+    def _install_apk_client(self, apk_path):
+        if not apk_path or not os.path.isfile(apk_path):
+            messagebox.showerror("APK Tidak Ditemukan",
+                                 "File APK tidak ditemukan.",
+                                 parent=self.winfo_toplevel())
+            return
+        threading.Thread(target=self._install_apk_thread,
+                         args=(apk_path,), daemon=True).start()
+
+    def _install_apk_thread(self, apk_path):
+        ok, pesan = ADBHelper.adb_install(self.ip, apk_path)
+        self.after(0, lambda: messagebox.showinfo(
+            "✅ Install APK" if ok else "❌ Install Gagal",
+            f"TV: {self.label_tv}\n{pesan}",
+            parent=self.winfo_toplevel()))
+
     def _pilih_paket(self):
+        if self.is_bebas:
+            return
         DialogPaket(self.winfo_toplevel(), self.label_tv, self._on_paket_confirm,
                     self.get_paket_data(), self.get_makanan_data(), self.get_minuman_data(),
                     nama_grup=self.nama_grup)
@@ -5329,7 +6636,8 @@ class KartuTV(tk.Canvas):
         DialogTambahPesanan(self.winfo_toplevel(), self.label_tv, 
                            self._on_tambah_pesanan_confirm,
                            self.get_makanan_data(), self.get_minuman_data(),
-                           pesanan_aktif=self.pesanan_aktif.copy())
+                           pesanan_aktif=self.pesanan_aktif.copy(),
+                           paket_harga=self.paket_harga_tetap, paket_label=self.paket_aktif)
 
     def _on_tambah_pesanan_confirm(self, pesanan_baru):
         """Callback saat user confirm tambah pesanan."""
@@ -5351,6 +6659,7 @@ class KartuTV(tk.Canvas):
             self.itemconfig(self._ids['lbl_paket'], text=f"Main Bebas \U0001f579 +Pesanan {fmt_rp(total_baru)}")
         else:
             self.itemconfig(self._ids['lbl_paket'], text=f"{self.paket_aktif} | {fmt_rp(total_semua)}")
+        self._ws_send_total(total_semua if not self.is_bebas else total_baru)
 
         # Update recorded transaction row if this fixed package session already has one.
         if not self.is_bebas and getattr(self, '_last_transaction_item', None):
@@ -5360,7 +6669,7 @@ class KartuTV(tk.Canvas):
                 idx = app._tree_item_to_index.get(item_id)
                 if idx is not None and idx < len(app.riwayat_transaksi):
                     waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua)
+                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua, paid=self.paid)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     try:
@@ -5388,11 +6697,13 @@ class KartuTV(tk.Canvas):
 
         if not previous_session:
             # Sesi baru: reset pesanan dan biaya
+            self.daftar_paket_sesi = [paket_nm]
             self.pesanan_aktif = pesanan
             all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
             self.biaya_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
         else:
             # Tambah paket ke sesi aktif: pertahankan pesanan lama, merge pesanan baru (jika ada)
+            self.daftar_paket_sesi.append(paket_nm)
             for nm, qty in pesanan.items():
                 self.pesanan_aktif[nm] = qty
             if pesanan:
@@ -5419,14 +6730,17 @@ class KartuTV(tk.Canvas):
                 self.sisa_waktu  = paket_menit * 60
                 self.paket_harga_tetap = paket_harga
             self.waktu_mulai = datetime.now()
-            self.itemconfig(self._ids['lbl_paket'], text=f"{paket_nm} | {fmt_rp(self._total_setelah_diskon())}", fill=C_YELLOW)
+            self.itemconfig(self._ids['lbl_paket'], text=f"{paket_nm} | {fmt_rp(self._total_setelah_diskon())}", fill="black")
             self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT)
 
         if self._timer_job:
             self.after_cancel(self._timer_job)
 
+        self._billing_paused = False
         self._enable_btn("selesai", C_BTN, C_RED)
-        self._enable_btn("shop", C_BTN, C_ACCENT2)
+        self._enable_btn("shop", "black", "white")
+        self._enable_btn("pause", "black", "white")
+        self.itemconfig(self._ids['btn_pause_txt'], text="PAUSE")
         self._card_bg_color = "white"
         self.itemconfig(self._ids['bg'], fill="white")
         self._warning_blink_on = False
@@ -5438,10 +6752,13 @@ class KartuTV(tk.Canvas):
 
         if self.is_bebas:
             self._tick_bebas()
+            self._disable_btn("paket")
         elif self.sisa_waktu > 0:
             self._tick_waktu()
+            self._enable_btn("paket", "black", "white")
         else:
             self.itemconfig(self._ids['lbl_timer'], text="\u221e BEBAS", fill=C_GREEN)
+        self._ws_send_total(self._total_setelah_diskon())
 
         if not self.is_bebas:
             if self._last_transaction_item and previous_session:
@@ -5452,7 +6769,7 @@ class KartuTV(tk.Canvas):
                     idx = app._tree_item_to_index.get(item_id)
                     if idx is not None and idx < len(app.riwayat_transaksi):
                         waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int)
+                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
                         try:
@@ -5480,85 +6797,36 @@ class KartuTV(tk.Canvas):
         else:
             self._last_transaction_item = None
 
+        # Status pembayaran: hanya untuk paket berwaktu (bukan Main Bebas)
+        if self.is_bebas:
+            self.paid = True
+            self._disable_btn("bayar_lunas")
+            self._disable_btn("bayar_belum")
+        else:
+            if not previous_session:
+                self.paid = True   # sesi baru dimulai dalam status lunas
+            self._enable_btn("bayar_lunas", "black", "white")
+            self._enable_btn("bayar_belum", "black", "white")
+            self._update_bayar_buttons()
+        self._update_paid_badge()
+
         app = self.winfo_toplevel()
         if hasattr(app, '_refresh_dashboard_total_pesanan'):
             app._refresh_dashboard_total_pesanan()
 
+        # Kirim sinyal ke overlay Android TV (START_TIMER / RESUME update)
+        if self.is_bebas:
+            self._ws_send_start(-1)
+        else:
+            self._ws_send_start(self.sisa_waktu)
+
     # ── Timer paket berwaktu (mundur) ───────────────────────────────────────
+    # Decrement sisa_waktu kini dikelola TimerService (thread background);
+    # _tick_waktu hanya refresh tampilan. Waktu habis ditangani _timer_habis.
     def _tick_waktu(self):
         if self._timer_paused:
             return
-        if self.sisa_waktu > 0:
-            h, rem = divmod(self.sisa_waktu, 3600)
-            m, s   = divmod(rem, 60)
-            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}")
-            if self.sisa_waktu <= 120:
-                self._warning_blink_on = not self._warning_blink_on
-                if self._warning_blink_on:
-                    self.itemconfig(self._ids['bg'], fill=C_RED)
-                    self.itemconfig(self._ids['lbl_timer'], fill="white")
-                else:
-                    self.itemconfig(self._ids['bg'], fill="white")
-                    self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT2)
-            else:
-                self.itemconfig(self._ids['bg'], fill="white")
-                self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT2)
-            self.sisa_waktu -= 1
-            if not self._timer_paused:
-                self._timer_job = self.after(1000, self._tick_waktu)
-        else:
-            # WAKTU HABIS — auto power off dan selesai sesi
-            self.itemconfig(self._ids['lbl_timer'], text="WAKTU HABIS \u23f9", fill=C_RED)
-            total_akhir = self._total_setelah_diskon()
-            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
-            paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
-            if getattr(self, '_last_transaction_item', None):
-                app = self.winfo_toplevel()
-                item_id = self._last_transaction_item
-                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                    idx = app._tree_item_to_index.get(item_id)
-                    if idx is not None and idx < len(app.riwayat_transaksi):
-                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
-                        app.riwayat_transaksi[idx] = updated_row
-                        app.tree.item(item_id, values=updated_row)
-                        # update meta if present
-                        try:
-                            all_menu = {**app.menu_makanan, **app.menu_minuman}
-                            pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
-                            paket_harga = total_akhir - pesanan_total
-                            if paket_harga < 0:
-                                paket_harga = 0
-                            app.riwayat_meta[idx]['paket_harga'] = paket_harga
-                            app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
-                            app.riwayat_meta[idx]['total'] = total_akhir
-                            app.riwayat_meta[idx]['diskoni'] = self.diskoni
-                            app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
-                        except Exception:
-                            pass
-                        if hasattr(app, '_refresh_riwayat_summary'):
-                            app._refresh_riwayat_summary()
-                        if hasattr(app, '_save_riwayat'):
-                            app._save_riwayat()
-            else:
-                self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir,
-                                  diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
-
-            messagebox.showwarning(
-                "⏰ Waktu TV Habis",
-                f"TV: {self.label_tv}\n"
-                f"Paket: {paket_txt}\n"
-                f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
-                f"TOTAL: {fmt_rp(total_akhir)}",
-                parent=self.winfo_toplevel(),
-            )
-
-            # Auto power off TV
-            threading.Thread(target=lambda: self._adb_action(
-                lambda: ADBHelper.power_toggle(self.ip, port=self.port)
-            ), daemon=True).start()
-
-            self._reset_sesi()
+        self._update_timer_display()
 
     # ── Timer Main Bebas (maju, hitung estimasi biaya berjalan) ─────────────
     def _tick_bebas(self):
@@ -5567,7 +6835,7 @@ class KartuTV(tk.Canvas):
         total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds())
         h, rem = divmod(total_detik, 3600)
         m, s   = divmod(rem, 60)
-        self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill=C_YELLOW)
+        self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill="black")
 
         tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
         menit_berjalan = total_detik / 60
@@ -5575,8 +6843,9 @@ class KartuTV(tk.Canvas):
         total_berjalan = self._total_setelah_diskon(biaya_waktu_berjalan + self.biaya_pesanan)
         self.itemconfig(self._ids['lbl_estimasi'],
             text=f"Total berjalan: {fmt_rp(total_berjalan)}",
-            fill=C_YELLOW
+            fill="black"
         )
+        self._ws_send_total(total_berjalan)
 
         if not self._timer_paused:
             self._timer_job = self.after(1000, self._tick_bebas)
@@ -5589,15 +6858,16 @@ class KartuTV(tk.Canvas):
             total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds()) if self.waktu_mulai else 0
             h, rem = divmod(total_detik, 3600)
             m, s   = divmod(rem, 60)
-            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill=C_YELLOW)
+            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill="black")
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             menit_berjalan = total_detik / 60
             biaya_waktu_berjalan = tarif_menit * menit_berjalan
             total_berjalan = self._total_setelah_diskon(biaya_waktu_berjalan + self.biaya_pesanan)
             self.itemconfig(self._ids['lbl_estimasi'],
                 text=f"Total berjalan: {fmt_rp(total_berjalan)}",
-                fill=C_YELLOW
+                fill="black"
             )
+            self._ws_send_total(total_berjalan)
         else:
             h, rem = divmod(self.sisa_waktu, 3600)
             m, s   = divmod(rem, 60)
@@ -5613,6 +6883,7 @@ class KartuTV(tk.Canvas):
             else:
                 self.itemconfig(self._ids['bg'], fill="white")
                 self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT2)
+            self._ws_send_sync()
 
     # ── Timer habis handler (called from TimerService) ──────────────────────
     def _timer_habis(self):
@@ -5629,7 +6900,7 @@ class KartuTV(tk.Canvas):
                 idx = app._tree_item_to_index.get(item_id)
                 if idx is not None and idx < len(app.riwayat_transaksi):
                     waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir)
+                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     try:
@@ -5652,6 +6923,37 @@ class KartuTV(tk.Canvas):
         else:
             self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir,
                               diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
+        # Kunci layar TV client (Android): tampilkan Lockscreen fullscreen
+        # dengan rincian pesanan lengkap (Sewa / Makanan / Minuman / Total).
+        # Dikirim SEGERA saat waktu habis (sebelum dialog blokir) supaya TV
+        # langsung menampilkan semua detail pesanan.
+        daftar_sewa = " + ".join(self.daftar_paket_sesi) or (self.paket_aktif or "-")
+        app_menu = self.winfo_toplevel()
+        menu_makanan = getattr(app_menu, 'menu_makanan', {}) or {}
+        menu_minuman = getattr(app_menu, 'menu_minuman', {}) or {}
+        makanan = [
+            {"item": f"{qty}x {nm}", "harga": fmt_rp(menu_makanan.get(nm, 0) * qty)}
+            for nm, qty in self.pesanan_aktif.items() if nm in menu_makanan
+        ]
+        minuman = [
+            {"item": f"{qty}x {nm}", "harga": fmt_rp(menu_minuman.get(nm, 0) * qty)}
+            for nm, qty in self.pesanan_aktif.items() if nm in menu_minuman
+        ]
+        logo_url, promo_url = self._tv_lock_media_urls(app_menu)
+        print(f"[TV TIMER] {self.label_tv}: WAKTU HABIS -> kirim LOCK_SCREEN "
+              f"logo={logo_url!r} promo={promo_url!r}")
+        self._ws_send_lock("WAKTU SEWA HABIS", {
+            "meja": self.label_tv,
+            "sewa": daftar_sewa,
+            "sewa_harga": fmt_rp(self.paket_harga_tetap),
+            "makanan": makanan,
+            "minuman": minuman,
+            "fnb": fmt_rp(self.biaya_pesanan),
+            "total": fmt_rp(total_akhir),
+            "logo_url": logo_url,
+            "promo_url": promo_url,
+        })
+
         messagebox.showwarning(
             "\u23f0 Waktu TV Habis",
             f"TV: {self.label_tv}\n"
@@ -5660,9 +6962,18 @@ class KartuTV(tk.Canvas):
             f"TOTAL: {fmt_rp(total_akhir)}",
             parent=self.winfo_toplevel(),
         )
-        threading.Thread(target=lambda: self._adb_action(
-            lambda: ADBHelper.power_toggle(self.ip, port=self.port)
-        ), daemon=True).start()
+
+        # Buka kunci TV setelah kasir konfirmasi (sama seperti tombol SELESAI):
+        # lockscreen "WAKTU SEWA HABIS" ditutup. Saat TV dibangunkan nanti hanya
+        # promo diputar 1x lalu masuk ke port terakhir — tanpa lockscreen.
+        # (Kalau kasir belum klik OK, TV tetap terkunci.)
+        print(f"[TV TIMER] {self.label_tv}: dialog kasir OK -> UNLOCK + sleep 2dtk")
+        self._ws_send_stop()
+
+        # TV masuk mode sleep 2 detik SETELAH unlock — jeda supaya perintah
+        # UNLOCK_SCREEN pasti sampai ke TV sebelum TV tidur.
+        self._tv_sleep_now(2, alasan="Waktu habis - kasir klik OK (sleep 2 dtk)")
+
         self._reset_sesi()
 
     # ── Pause/Resume timer untuk virtual scroll ────────────────────────────
@@ -5742,11 +7053,13 @@ class KartuTV(tk.Canvas):
         self.itemconfig(self._ids['lbl_timer'], text="SELESAI \u23f9", fill=C_MUTED)
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         
-        # AUTO POWER OFF TV
-        threading.Thread(target=lambda: self._adb_action(
-            lambda: ADBHelper.power_toggle(self.ip, port=self.port)
-        ), daemon=True).start()
-        
+        # Sembunyikan overlay & tutup lock screen di TV client (unlock dulu,
+        # biar lockscreen tertutup sebelum TV masuk mode sleep).
+        self._ws_send_stop()
+
+        # TV masuk mode sleep SETELAH kasir klik OK/SELESAI
+        self._tv_sleep_now(2, alasan="Kasir klik SELESAI (sleep 2 dtk)")
+
         self._reset_sesi()
 
     def _reset_sesi(self):
@@ -5761,8 +7074,11 @@ class KartuTV(tk.Canvas):
         self.pesanan_aktif = {}
         self.biaya_pesanan = 0
         self.paket_harga_tetap = 0
+        self.daftar_paket_sesi = []
         self.diskoni       = 0
         self.diskoni_mode  = "nominal"
+        self._billing_paused = False
+        self.paid          = True
         self.itemconfig(self._ids['lbl_paket'], text="\u2014", fill=C_MUTED)
         self.itemconfig(self._ids['lbl_timer'], text="00:00:00", fill=C_MUTED)
         self.itemconfig(self._ids['bg'], fill=C_CARD)
@@ -5770,6 +7086,13 @@ class KartuTV(tk.Canvas):
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         self._disable_btn("selesai")
         self._disable_btn("shop")
+        self._disable_btn("bayar_lunas")
+        self._disable_btn("bayar_belum")
+        self._enable_btn("paket", "black", "white")
+        if "pause" in self._ids:
+            self._disable_btn("pause")
+            self.itemconfig(self._ids['btn_pause_txt'], text="PAUSE")
+        self._update_paid_badge()
         app = self.winfo_toplevel()
         if hasattr(app, '_refresh_dashboard_total_pesanan'):
             app._refresh_dashboard_total_pesanan()
@@ -5832,6 +7155,7 @@ class KartuTV(tk.Canvas):
         target.paket_harga_tetap = self.paket_harga_tetap
         target.diskoni       = self.diskoni
         target.diskoni_mode  = self.diskoni_mode
+        target.paid          = self.paid
 
         if self.is_bebas:
             target.menit_dipakai_awal = self._total_menit_terpakai()
@@ -5844,19 +7168,29 @@ class KartuTV(tk.Canvas):
             target.sisa_waktu  = self.sisa_waktu
             target.waktu_mulai = datetime.now()
             harga_tampil = self._total_setelah_diskon()
-            target.itemconfig(target._ids['lbl_paket'], text=f"{self.paket_aktif} | {fmt_rp(harga_tampil)}", fill=C_YELLOW)
+            target.itemconfig(target._ids['lbl_paket'], text=f"{self.paket_aktif} | {fmt_rp(harga_tampil)}", fill="black")
             target.itemconfig(target._ids['lbl_timer'], fill=C_ACCENT)
 
         if target._timer_job:
             target.after_cancel(target._timer_job)
         if target.is_bebas:
             target._tick_bebas()
+            target._disable_btn("paket")
         elif target.sisa_waktu > 0:
             target._tick_waktu()
+            target._enable_btn("paket", "black", "white")
         else:
             target.itemconfig(target._ids['lbl_timer'], text="\u221e BEBAS", fill=C_GREEN)
         target._enable_btn("selesai", C_BTN, C_RED)
-        target._enable_btn("shop", C_BTN, C_ACCENT2)
+        target._enable_btn("shop", "black", "white")
+        if target.is_bebas:
+            target._disable_btn("bayar_lunas")
+            target._disable_btn("bayar_belum")
+        else:
+            target._enable_btn("bayar_lunas", "black", "white")
+            target._enable_btn("bayar_belum", "black", "white")
+            target._update_bayar_buttons()
+        target._update_paid_badge()
 
         # ── Kosongkan TV asal ────────────────────────────────────────────────
         self._reset_sesi()
@@ -5902,6 +7236,7 @@ class KartuWarnet(tk.Canvas):
         self._timer_paused = False
         self._timer_was_running = False
         self._last_transaction_item = None
+        self.paid             = True   # status pembayaran sesi (sinkron ke riwayat)
         self.is_on            = False
         self._warning_blink_on = False
         self._client_id       = None
@@ -5926,7 +7261,13 @@ class KartuWarnet(tk.Canvas):
     def _on_card_resize(self, event):
         if event.width > 50 and abs(event.width - self._card_w) > 5:
             self._card_w = event.width
-            self._build()
+            job = getattr(self, "_resize_job", None)
+            if job:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+            self._resize_job = self.after(200, lambda: self.winfo_exists() and self._build())
 
     def _build_inner(self):
         W = self._card_w
@@ -5939,6 +7280,11 @@ class KartuWarnet(tk.Canvas):
         self._ids['lbl_kursi'] = self.create_text(10, hdr_y+12,
             text=self.label_kursi, font=("Russo One", 11, "bold"),
             fill="white", anchor="w", tags="lbl_kursi")
+
+        # Badge status pembayaran (sebelah nama)
+        self._ids['paid_badge'] = self.create_text(10, hdr_y+12,
+            text="", font=("Courier New", 8, "bold"),
+            fill=C_GREEN, anchor="w", tags="paid_badge")
 
         # PC status text
         pc_connected = False
@@ -6013,7 +7359,24 @@ class KartuWarnet(tk.Canvas):
             self._draw_canvas_btn(key, bx + i*(bw+gap_b), r2y, bw, btn_h, txt, bg, fg, ("Russo One", 8, "bold"), cmd)
             if disabled:
                 self._disable_btn(key)
-        y = r2y + btn_h + 6
+        y = r2y + btn_h + 4
+
+        # Button Row 3 (Status pembayaran)
+        r3y = y
+        n_btn3, btn_cols3 = 2, 2
+        avail3 = W - 8 - (n_btn3 - 1) * gap_b
+        bw3 = avail3 // btn_cols3
+        btn_defs3 = [
+            ("bayar_lunas", "✅ SUDAH BAYAR", "black", "white", lambda: self._set_paid(True)),
+            ("bayar_belum", "⏳ BELUM BAYAR", "black", "white", lambda: self._set_paid(False)),
+        ]
+        for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
+            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
+            self._disable_btn(key)
+            self.tag_bind(f"btn_{key}", "<Enter>", lambda e, k=key: self._update_bayar_buttons())
+            self.tag_bind(f"btn_{key}", "<Leave>", lambda e, k=key: self._update_bayar_buttons())
+        y = r3y + btn_h + 6
+        self._update_paid_badge()
 
         total_h = y
         self._ids['_card_h'] = total_h
@@ -6077,6 +7440,51 @@ class KartuWarnet(tk.Canvas):
     def sesi_kosong(self):
         return self.paket_aktif is None
 
+    # ── Status pembayaran (sinkron ke riwayat) ───────────────────────────────
+    def _update_paid_badge(self):
+        """Update badge '● LUNAS' / '⏳ BELUM' di header, tepat di sebelah nama."""
+        if 'paid_badge' not in self._ids:
+            return
+        name_w = len(self.label_kursi) * 7 + 6
+        if self.sesi_kosong() or self.is_bebas:
+            text, color = "", C_GREEN
+        elif self.paid:
+            text, color = "● LUNAS", C_GREEN
+        else:
+            text, color = "⏳ BELUM", "#FFCC00"
+        self.itemconfig(self._ids['paid_badge'], text=text, fill=color)
+        self.coords(self._ids['paid_badge'], 10 + name_w, self.coords(self._ids['lbl_kursi'])[1])
+
+    def _update_bayar_buttons(self):
+        """Warna tombol SUDAH/BELUM BAYAR sesuai state aktif (lunas = hijau)."""
+        if 'btn_bayar_lunas' not in self._ids:
+            return
+        if self.paid:
+            self.itemconfig(self._ids['btn_bayar_lunas'], fill=C_GREEN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill="white")
+            self.itemconfig(self._ids['btn_bayar_belum'], fill="black", outline=C_BORDER)
+            self.itemconfig(self._ids['btn_bayar_belum_txt'], fill=C_MUTED)
+        else:
+            self.itemconfig(self._ids['btn_bayar_belum'], fill="#FFCC00", outline="#FFCC00")
+            self.itemconfig(self._ids['btn_bayar_belum_txt'], fill="black")
+            self.itemconfig(self._ids['btn_bayar_lunas'], fill="black", outline=C_BORDER)
+            self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill=C_MUTED)
+
+    def _set_paid(self, paid):
+        """Tandai sesi lunas/belum lunas, sinkronkan ke baris riwayat terkait."""
+        if self.sesi_kosong() or self.is_bebas:
+            return
+        if self._last_transaction_item is None:
+            return
+        if self.paid == paid:
+            return
+        self.paid = paid
+        self._update_paid_badge()
+        self._update_bayar_buttons()
+        app = self.winfo_toplevel()
+        if hasattr(app, '_set_transaksi_paid'):
+            app._set_transaksi_paid(self._last_transaction_item, paid)
+
     def _update_pc_status(self):
         app = self.winfo_toplevel()
         connected = False
@@ -6095,7 +7503,7 @@ class KartuWarnet(tk.Canvas):
         if not self.winfo_exists():
             return
         self._update_pc_status()
-        self.after(5000, self._periodic_pc_status)
+        self.after(10000, self._periodic_pc_status)
 
     def _buka_ganti_grup(self):
         daftar = self.get_daftar_grup() or []
@@ -6157,23 +7565,34 @@ class KartuWarnet(tk.Canvas):
             self.itemconfig(self._ids['btn_power'], fill="#3A0000")
             self.itemconfig(self._ids['btn_status'], fill=C_GREEN, outline=C_GREEN)
             self.itemconfig(self._ids['btn_status_txt'], text="ON", fill=C_GREEN)
-            if hasattr(app, '_run_warnet_socket_command'):
-                threading.Thread(
-                    target=lambda: app._run_warnet_socket_command(
-                        app.socket_warnet_config.get('on_start_command', 'START {kursi}'),
-                        self.label_kursi),
-                    daemon=True).start()
+            self._send_lock_command(app, "UNLOCK", "manual_on",
+                                    f"PC {self.label_kursi} dinyalakan admin.")
         else:
             self.itemconfig(self._ids['lbl_power'], text="\u25cf OFF", fill=C_MUTED)
             self.itemconfig(self._ids['btn_power'], fill=C_BTN)
             self.itemconfig(self._ids['btn_status'], fill=C_BTN, outline=C_BORDER)
             self.itemconfig(self._ids['btn_status_txt'], text="OFF", fill=C_MUTED)
-            if hasattr(app, '_run_warnet_socket_command'):
-                threading.Thread(
-                    target=lambda: app._run_warnet_socket_command(
-                        app.socket_warnet_config.get('on_finish_command', 'STOP {kursi}'),
-                        self.label_kursi),
-                    daemon=True).start()
+            self._send_lock_command(app, "LOCK", "manual_off",
+                                    f"PC {self.label_kursi} dimatikan admin.")
+
+    def _send_lock_command(self, app, cmd, reason, message):
+        if not (hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None)):
+            if not getattr(self, '_pc_id', None):
+                messagebox.showinfo(
+                    "Client Belum Terhubung",
+                    f"{self.label_kursi} belum terhubung ke client PC.\n"
+                    "Hubungkan client lalu ulangi.", parent=self.winfo_toplevel())
+            return
+        server = app.warnet_server
+        ok = server.queue_pending_command(self._pc_id, cmd, reason=reason, message=message)
+        with server.sessions_lock:
+            active = any(s.get("client_id") == getattr(self, '_client_id', None)
+                         for s in list(server.sessions.values()))
+        if not active:
+            messagebox.showwarning(
+                "Client Offline",
+                f"{self.label_kursi} tidak terhubung ke server.\n"
+                "Perintah akan dikirim saat client kembali terhubung.", parent=self.winfo_toplevel())
 
     def _dummy_action(self, action):
         messagebox.showinfo("Info", f"{action} tidak tersedia untuk dashboard warnet.", parent=self)
@@ -6195,7 +7614,8 @@ class KartuWarnet(tk.Canvas):
         DialogTambahPesanan(self.winfo_toplevel(), self.label_kursi,
                             self._on_tambah_pesanan_confirm,
                             self.get_makanan_data(), self.get_minuman_data(),
-                            pesanan_aktif=self.pesanan_aktif.copy())
+                            pesanan_aktif=self.pesanan_aktif.copy(),
+                            paket_harga=self.paket_harga_tetap, paket_label=self.paket_aktif)
 
     def _on_tambah_pesanan_confirm(self, pesanan_baru):
         all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
@@ -6218,7 +7638,7 @@ class KartuWarnet(tk.Canvas):
                 idx = app._tree_item_to_index.get(item_id)
                 if idx is not None and idx < len(app.riwayat_transaksi):
                     waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int)
+                    updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     try:
@@ -6317,7 +7737,7 @@ class KartuWarnet(tk.Canvas):
                     idx = app._tree_item_to_index.get(item_id)
                     if idx is not None and idx < len(app.riwayat_transaksi):
                         waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int)
+                        updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
                         app.riwayat_transaksi[idx] = updated_row
                         app.tree.item(item_id, values=updated_row)
                         try:
@@ -6346,6 +7766,19 @@ class KartuWarnet(tk.Canvas):
         else:
             self._last_transaction_item = None
 
+        # Status pembayaran: hanya untuk paket berwaktu (bukan Main Bebas)
+        if self.is_bebas:
+            self.paid = True
+            self._disable_btn("bayar_lunas")
+            self._disable_btn("bayar_belum")
+        else:
+            if not previous_session:
+                self.paid = True   # sesi baru dimulai dalam status lunas
+            self._enable_btn("bayar_lunas", "black", "white")
+            self._enable_btn("bayar_belum", "black", "white")
+            self._update_bayar_buttons()
+        self._update_paid_badge()
+
         app = self.winfo_toplevel()
         if hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None):
             app.warnet_server.queue_pending_command(
@@ -6353,89 +7786,13 @@ class KartuWarnet(tk.Canvas):
                 reason="sesi_baru",
                 message=f"Sesi baru dimulai untuk {self.label_kursi}"
             )
-        if hasattr(app, '_run_warnet_socket_command'):
-            threading.Thread(
-                target=lambda: app._run_warnet_socket_command(
-                    app.socket_warnet_config.get('on_start_command', 'START {kursi}'),
-                    self.label_kursi),
-                daemon=True).start()
         if hasattr(app, '_refresh_warnet_footer'):
             app._refresh_warnet_footer()
 
     def _tick_waktu(self):
         if self._timer_paused:
             return
-        if self.sisa_waktu > 0:
-            h, rem = divmod(self.sisa_waktu, 3600)
-            m, s = divmod(rem, 60)
-            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}")
-            if self.sisa_waktu <= 120:
-                self._warning_blink_on = not self._warning_blink_on
-                if self._warning_blink_on:
-                    self.itemconfig(self._ids['bg'], fill=C_RED)
-                    self.itemconfig(self._ids['lbl_timer'], fill="white")
-                else:
-                    self.itemconfig(self._ids['bg'], fill="white")
-                    self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT2)
-            else:
-                self.itemconfig(self._ids['bg'], fill="white")
-                self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT2)
-            self.sisa_waktu -= 1
-            if not self._timer_paused:
-                self._timer_job = self.after(1000, self._tick_waktu)
-        else:
-            self.itemconfig(self._ids['lbl_timer'], text="WAKTU HABIS", fill=C_RED)
-            total_akhir = self._total_setelah_diskon()
-            pesanan_txt = ", ".join(f"{nm}\u00d7{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
-            paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
-            if getattr(self, '_last_transaction_item', None):
-                app = self.winfo_toplevel()
-                item_id = self._last_transaction_item
-                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                    idx = app._tree_item_to_index.get(item_id)
-                    if idx is not None and idx < len(app.riwayat_transaksi):
-                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_akhir)
-                        app.riwayat_transaksi[idx] = updated_row
-                        app.tree.item(item_id, values=updated_row)
-                        try:
-                            all_menu = {**app.menu_makanan, **app.menu_minuman}
-                            pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
-                            paket_harga = total_akhir - pesanan_total
-                            if paket_harga < 0:
-                                paket_harga = 0
-                            if idx < len(app.riwayat_meta):
-                                app.riwayat_meta[idx]['paket_harga'] = paket_harga
-                                app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
-                                app.riwayat_meta[idx]['total'] = total_akhir
-                                app.riwayat_meta[idx]['diskoni'] = self.diskoni
-                                app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
-                        except Exception:
-                            pass
-                        if hasattr(app, '_refresh_riwayat_summary'):
-                            app._refresh_riwayat_summary()
-                        if hasattr(app, '_save_riwayat'):
-                            app._save_riwayat()
-            else:
-                self.on_transaksi(self.label_kursi, self.paket_aktif or '-', self.pesanan_aktif, total_akhir, source='warnet',
-                                  diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
-            app = self.winfo_toplevel()
-            if hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None):
-                app.warnet_server.queue_pending_command(
-                    self._pc_id, "LOCK",
-                    reason="waktu_habis",
-                    time_left=0,
-                    message=f"Waktu PC {self.label_kursi} telah habis."
-                )
-            messagebox.showwarning(
-                "Waktu PC Habis",
-                f"PC: {self.label_kursi}\n"
-                f"Paket: {paket_txt}\n"
-                f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
-                f"TOTAL: {fmt_rp(total_akhir)}",
-                parent=self.winfo_toplevel(),
-            )
-            self._reset_sesi()
+        self._update_timer_display()
 
     def _tick_bebas(self):
         if self._timer_paused or not self.is_bebas or self.waktu_mulai is None:
@@ -6501,7 +7858,7 @@ class KartuWarnet(tk.Canvas):
                 idx = app._tree_item_to_index.get(item_id)
                 if idx is not None and idx < len(app.riwayat_transaksi):
                     waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_akhir)
+                    updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
                     app.riwayat_transaksi[idx] = updated_row
                     app.tree.item(item_id, values=updated_row)
                     try:
@@ -6619,12 +7976,6 @@ class KartuWarnet(tk.Canvas):
                 reason="selesai_manual",
                 message=f"Sesi {self.label_kursi} dihentikan admin."
             )
-        if hasattr(app, '_run_warnet_socket_command'):
-            threading.Thread(
-                target=lambda: app._run_warnet_socket_command(
-                    app.socket_warnet_config.get('on_finish_command', 'STOP {kursi}'),
-                    self.label_kursi),
-                daemon=True).start()
         self._reset_sesi()
 
     def _reset_sesi(self):
@@ -6641,6 +7992,7 @@ class KartuWarnet(tk.Canvas):
         self.paket_harga_tetap = 0
         self.diskoni           = 0
         self.diskoni_mode      = "nominal"
+        self.paid              = True
         self.itemconfig(self._ids['lbl_paket'], text="\u2014", fill=C_MUTED)
         self.itemconfig(self._ids['lbl_timer'], text="00:00:00", fill=C_MUTED)
         self.itemconfig(self._ids['bg'], fill=C_CARD)
@@ -6648,7 +8000,10 @@ class KartuWarnet(tk.Canvas):
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         self._disable_btn("selesai")
         self._disable_btn("shop")
+        self._disable_btn("bayar_lunas")
+        self._disable_btn("bayar_belum")
         self.itemconfig(self._ids['btn_shop_txt'], text="SHOP")
+        self._update_paid_badge()
         app = self.winfo_toplevel()
         if hasattr(app, '_refresh_warnet_footer'):
             app._refresh_warnet_footer()
@@ -6710,6 +8065,7 @@ class KartuWarnet(tk.Canvas):
         target.diskoni = self.diskoni
         target.diskoni_mode = self.diskoni_mode
         target._last_transaction_item = self._last_transaction_item
+        target.paid = self.paid
 
         if self.is_bebas:
             target.menit_dipakai_awal = self._total_menit_terpakai()
@@ -6728,6 +8084,14 @@ class KartuWarnet(tk.Canvas):
         target._enable_btn("selesai", C_BTN, C_RED)
         target._enable_btn("shop", C_BTN, C_ACCENT2)
         target.itemconfig(target._ids['btn_shop_txt'], text="SHOP")
+        if target.is_bebas:
+            target._disable_btn("bayar_lunas")
+            target._disable_btn("bayar_belum")
+        else:
+            target._enable_btn("bayar_lunas", "black", "white")
+            target._enable_btn("bayar_belum", "black", "white")
+            target._update_bayar_buttons()
+        target._update_paid_badge()
 
         if target._timer_job:
             target.after_cancel(target._timer_job)
@@ -6764,6 +8128,9 @@ class AutoRentApp(ctk.CTk):
         self.riwayat_transaksi = []
         self.riwayat_meta = []  # parallel metadata: dicts with keys: source('tv'|'warnet'), pesanan_total(int), total(int)
         self._tree_item_to_index = {}
+        self._riwayat_filter_tanggal = None  # "YYYY-MM-DD" atau None = semua tanggal
+        self._riwayat_filter_kasir = "SEMUA"  # username kasir atau "SEMUA"
+        self._pending_tx_uploads = []  # antrian transaksi menunggu upload ke Firestore
         self._tambah_btn_enabled = True
         self._tambah_warnet_btn_enabled = True
         self._semua_kartu_tv  = []   # daftar semua KartuTV yang sedang ada di Dashboard
@@ -6774,7 +8141,6 @@ class AutoRentApp(ctk.CTk):
         self.grup_tarif   = self._migrasi_grup_tarif(cfg.get("grup_tarif"), cfg.get("paket_main"))
         self.menu_makanan = cfg.get("menu_makanan",  dict(DEFAULT_MENU_MAKANAN))
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
-        self.socket_warnet_config = cfg.get("socket_warnet", {})
         self.current_tab  = None
         self._bg_image_path = cfg.get("app_bg_image", "")
 
@@ -6783,8 +8149,53 @@ class AutoRentApp(ctk.CTk):
         self.warnet_server = WarnetSocketServer(app=self, ws_port=ws_port)
         self.warnet_server.start()
 
+        # ── Start TV WebSocket Hub (Overlay & Lockscreen Android TV) ────────────
+        self.tv_overlay_mode = cfg.get("tv_overlay_mode", "always") or "always"
+        try:
+            self.tv_overlay_last_minutes = int(cfg.get("tv_overlay_last_minutes", 5) or 5)
+        except Exception:
+            self.tv_overlay_last_minutes = 5
+        self.tv_ws_hub = None
+        self.tv_test_api = None
+        self.tv_media_server = None
+        if cfg.get("tv_ws_enabled", True):
+            try:
+                self.tv_ws_hub = TvWsHub(
+                    app=self,
+                    port=cfg.get("warnet_tv_ws_port", 8080),
+                    get_nama_rental=self._get_nama_rental_dinamis,
+                    state_extra=self._media_state_extra,
+                )
+                self.tv_ws_hub.start()
+                self.tv_test_api = TvTestApi(self.tv_ws_hub, port=cfg.get("warnet_tv_api_port", 8081))
+                self.tv_test_api.start()
+                self.tv_media_server = TvMediaServer(
+                    media_dir=os.path.join(APP_BASE_DIR, "media_promo"),
+                    port=cfg.get("warnet_media_port", 8082),
+                )
+                self.tv_media_server.start()
+            except Exception as e:
+                print(f"[TV WS HUB] Gagal start: {e}")
+                self.tv_ws_hub = None
+                self.tv_test_api = None
+                self.tv_media_server = None
+
         self._timer_service = TimerService()
         self._timer_service.start(self)
+
+        # ── Auto-off TV tanpa paket aktif (anti-kasir nakal) ─────────────────
+        # Ambang: 10 menit pertama, 5 menit setelah pernah di-auto-mati (reset
+        # ke 10 menit saat paket sah dibuka). 0/nonaktif lewat tv_auto_off_enabled.
+        self.tv_auto_off_enabled = bool(cfg.get("tv_auto_off_enabled", True))
+        try:
+            self.tv_auto_off_first_sec = int(cfg.get("tv_auto_off_first_minutes", 10) or 10) * 60
+        except Exception:
+            self.tv_auto_off_first_sec = 600
+        try:
+            self.tv_auto_off_sec = int(cfg.get("tv_auto_off_minutes", 5) or 5) * 60
+        except Exception:
+            self.tv_auto_off_sec = 300
+        self.after(30000, self._tv_idle_guard)
 
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
@@ -6796,8 +8207,26 @@ class AutoRentApp(ctk.CTk):
         ).start()
 
     def _on_app_close(self):
+        self._stop_session_poller()
+        self._stop_idle_watcher()
+        self._clear_session_cloud_quick()
         if self._timer_service:
             self._timer_service.stop()
+        if getattr(self, 'tv_test_api', None):
+            try:
+                self.tv_test_api.stop()
+            except Exception:
+                pass
+        if getattr(self, 'tv_ws_hub', None):
+            try:
+                self.tv_ws_hub.stop()
+            except Exception:
+                pass
+        if getattr(self, 'tv_media_server', None):
+            try:
+                self.tv_media_server.stop()
+            except Exception:
+                pass
         self.warnet_server.stop()
         try:
             loop = _WSLoopThread.get_loop()
@@ -6806,6 +8235,91 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
         self.destroy()
+
+    def _get_nama_rental_dinamis(self) -> str:
+        """Nama rental dari profil user aktif untuk dikirim ke overlay TV."""
+        try:
+            cfg = ConfigManager.load()
+            uname = getattr(self, 'current_user', None) or ""
+            profil = cfg.get("profil_rental", {})
+            if uname and isinstance(profil.get(uname), dict):
+                nama = profil[uname].get("nama_rental")
+                if nama:
+                    return str(nama)
+        except Exception:
+            pass
+        return "RR Billing Pro"
+
+    def _get_lan_ip(self) -> str:
+        """IP LAN mesin kasir (interface default route) untuk URL media."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+            if ip and ip != "0.0.0.0":
+                return ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
+    def _tv_logo_url(self) -> str:
+        """URL logo lock dengan cache-buster (mtime file) — URL berubah setiap
+        file diganti supaya client selalu mengunduh versi terbaru."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            return ""
+        path = os.path.join(ms.media_dir, "logo_lock.png")
+        if not os.path.isfile(path):
+            return ""
+        base = f"http://{self._get_lan_ip()}:{ms.port}/media/"
+        try:
+            versi = int(os.path.getmtime(path))
+        except Exception:
+            versi = 0
+        return f"{base}logo_lock.png?v={versi}"
+
+    def _simpan_logo_lock(self, path) -> str:
+        """Simpan logo lock sebagai PNG ASLI (di-normalisasi) di media_promo.
+
+        Upload boleh PNG/JPG; tanpa normalisasi file JPG yang disalin sebagai
+        logo_lock.png bisa gagal tampil di client TV (konten JPEG dengan
+        Content-Type PNG). Return path dest; raise Exception bila gagal."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            raise RuntimeError("Server media (port 8082) tidak berjalan.")
+        dest = os.path.join(ms.media_dir, "logo_lock.png")
+        try:
+            from PIL import Image
+            img = Image.open(path)
+            img.load()
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            # Batasi ukuran agar client TV (BitmapFactory) bisa decode tanpa
+            # OOM — maks 1920x1080 (Full HD), aspek dipertahankan.
+            max_w, max_h = 1920, 1080
+            if img.width > max_w or img.height > max_h:
+                img.thumbnail((max_w, max_h), Image.LANCZOS)
+            img.save(dest, "PNG")
+        except Exception:
+            # PIL gagal (file korup/dll) — fallback salin mentah.
+            import shutil
+            shutil.copyfile(path, dest)
+        return dest
+
+    def _media_state_extra(self, meja_id: str) -> list:
+        """Kirim ulang perintah SHOW_MEDIA saat client reconnect (resync media)."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            return []
+        cur = getattr(ms, 'current_media', None)
+        if not cur or not cur.get("filename"):
+            return []
+        url = f"http://{self._get_lan_ip()}:{ms.port}/media/{cur['filename']}"
+        return [{"action": "SHOW_MEDIA", "meja_id": meja_id,
+                 "type": cur.get("type", "video"), "url": url}]
 
     def _lakukan_aktivasi(self):
         kode = self.entry_kode.get().strip()
@@ -6894,7 +8408,7 @@ class AutoRentApp(ctk.CTk):
                         if doc_id:
                             fc.revoke_license(doc_id, reason=alasan)
                 # Also write licenseStatus to user doc
-                fc.write_license_status(uname if uname else self.current_user, {
+                fc.write_license_status(self.current_user if self.current_user else "", {
                     "status": "revoked",
                     "pesan": "Lisensi dicabut oleh pengguna.",
                     "expiresAt": "",
@@ -6923,7 +8437,7 @@ class AutoRentApp(ctk.CTk):
             _LOGGER.exception("Revoke error: %s", e)
             if dlg:
                 self.after(0, dlg.destroy)
-            self.after(0, lambda: messagebox.showerror("Error", f"Gagal revoke: {e}"))
+            self.after(0, lambda e=e: messagebox.showerror("Error", f"Gagal revoke: {e}"))
 
     def _sync_aktivasi_ke_cloud(self, kode: str):
         """Sync aktivasi ke Firestore: update license doc + write licenseStatus ke user doc."""
@@ -6954,6 +8468,9 @@ class AutoRentApp(ctk.CTk):
             max_tv = record.get("maxTv", 0) or 0
             if max_tv <= 0:
                 max_tv = lic_local.get("promo_add_tv", 0) or 0
+            if max_tv <= 0:
+                ed = lic_local.get("edition", "")
+                max_tv = {"BULANAN": 5, "3BULAN": 10, "TAHUNAN": 15, "LIFETIME": 999999}.get(ed, 0)
             if max_tv <= 0:
                 pkg_name = record.get("package", "BULANAN").upper()
                 pkg_max_tv = {"BULANAN": 5, "3BULAN": 10, "TAHUNAN": 15, "LIFETIME": 999999}
@@ -6998,6 +8515,256 @@ class AutoRentApp(ctk.CTk):
                 pass
             self._license_poller = None
 
+    # ── SINGLE SESSION (1 AKUN = 1 PC) ─────────────────────────────────
+    @staticmethod
+    def _get_device_id():
+        """Device ID persisten per PC (UUID di config; dibuat otomatis sekali)."""
+        cfg = ConfigManager.load()
+        dev = str(cfg.get("device_id") or "").strip()
+        if not dev:
+            dev = uuid.uuid4().hex[:12].upper()
+            cfg["device_id"] = dev
+            ConfigManager.save(cfg)
+        return dev
+
+    @staticmethod
+    def _get_pc_name():
+        try:
+            return socket.gethostname() or "PC"
+        except Exception:
+            return "PC"
+
+    def _session_payload(self, login_at=None):
+        return {
+            "deviceId": self._get_device_id(),
+            "pcName": self._get_pc_name(),
+            "lastSeen": int(time.time() * 1000),
+            "loginAt": int(login_at or getattr(self, "_session_login_at", 0) or time.time() * 1000),
+        }
+
+    def _register_session(self):
+        uname = getattr(self, "current_user", None) or ""
+        if not uname:
+            return
+        try:
+            if not getattr(self, "_session_login_at", None):
+                self._session_login_at = int(time.time() * 1000)
+            fc = FirestoreClient()
+            fc.set_user_doc(uname, {"activeSession": self._session_payload()}, merge=True)
+        except Exception as e:
+            _LOGGER.warning("Session register error: %s", e)
+
+    def _clear_session_cloud(self):
+        """Hapus field activeSession (best-effort) supaya akun bisa dipakai PC lain."""
+        uname = getattr(self, "current_user", None) or ""
+        if not uname:
+            return
+        try:
+            fc = FirestoreClient()
+            fc.set_user_doc(uname, {"activeSession": None}, merge=True)
+        except Exception:
+            pass
+
+    def _clear_session_cloud_quick(self):
+        """Clear sesi di background dengan batas waktu 2 dtk (jangan blokir UI)."""
+        t = threading.Thread(target=self._clear_session_cloud, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+
+    def _conflicting_session_pc(self):
+        """Kembalikan dict sesi PC lain yang masih aktif (grace 90 dtk), atau None."""
+        uname = getattr(self, "current_user", None) or ""
+        if not uname:
+            return None
+        try:
+            fc = FirestoreClient()
+            doc = fc.get_user_doc(uname) or {}
+            s = doc.get("activeSession") or {}
+            dev = str(s.get("deviceId") or "")
+            last = 0
+            try:
+                last = int(s.get("lastSeen") or 0)
+            except Exception:
+                pass
+            if dev and dev != self._get_device_id() and (time.time() * 1000 - last) < 90000:
+                return {
+                    "pcName": str(s.get("pcName") or "PC lain"),
+                    "deviceId": dev,
+                    "loginAt": int(s.get("loginAt") or 0),
+                }
+        except Exception:
+            pass
+        return None
+
+    def _start_session_poller(self):
+        """Heartbeat 15 dtk di thread + deteksi sesi lain (tanpa beban di thread UI)."""
+        self._stop_session_poller()
+        self._session_poller_stop = False
+        self._session_poller_id = getattr(self, "_session_poller_id", 0) + 1
+        self._session_conflict_answered = False
+        self._session_conflict_confirmed = False
+        poller_id = self._session_poller_id
+
+        def _run():
+            while True:
+                if getattr(self, "_session_poller_stop", True):
+                    return
+                if getattr(self, "_session_poller_id", 0) != poller_id:
+                    return
+                try:
+                    konflik = self._conflicting_session_pc()
+                    aksi = self._session_conflict_action(konflik)
+                    if aksi == "kick":
+                        # Saya PC lama, sesi diambil PC lain → kick otomatis
+                        self.after(0, lambda k=konflik: self._force_logout_remote(
+                            f"akun ini dipakai di PC lain ({k.get('pcName', 'PC lain')})"))
+                        return
+                    elif aksi == "ask":
+                        # Saya PC yang baru login → minta konfirmasi sekali
+                        self.after(0, lambda k=konflik: self._on_session_login_check(k))
+                    elif aksi == "register":
+                        self._register_session()
+                except Exception as e:
+                    _LOGGER.warning("Session tick error: %s", e)
+                time.sleep(15)
+
+        self._session_poller_thread = threading.Thread(
+            target=_run, daemon=True, name="SessionPoller")
+        self._session_poller_thread.start()
+
+    def _stop_session_poller(self):
+        self._session_poller_stop = True
+        self._session_poller_thread = None
+
+    def _session_conflict_action(self, konflik):
+        """Aksi saat ada konflik sesi: 'kick' (saya PC lama → logout otomatis),
+        'ask' (saya PC baru → minta konfirmasi), 'register' (tidak konflik / sudah disetujui),
+        'wait' (konflik ada tapi belum diputuskan user)."""
+        if not konflik:
+            return "register"
+        mine = int(getattr(self, "_session_login_at", 0) or 0)
+        theirs = int(konflik.get("loginAt") or 0)
+        if theirs > mine:
+            return "kick"
+        if not getattr(self, "_session_conflict_answered", False):
+            return "ask"
+        return "register" if getattr(self, "_session_conflict_confirmed", False) else "wait"
+
+    def _on_session_login_check(self, konflik):
+        """UI thread: konfirmasi saat login di PC2 dan ada sesi aktif di PC lain."""
+        if getattr(self, "_session_conflict_answered", False):
+            return
+        self._session_conflict_answered = True
+        pc_lain = (konflik or {}).get("pcName") or "PC lain"
+        try:
+            lanjut = messagebox.askyesno(
+                "🔒 AKUN SUDAH LOGIN DI PC LAIN",
+                f"Akun '{self.current_user}' sedang aktif di PC: {pc_lain}.\n\n"
+                "Jika kamu lanjutkan, PC tersebut akan otomatis logout.\n\n"
+                "Lanjutkan login di PC ini?")
+        except Exception:
+            lanjut = True
+        if not lanjut:
+            self._show_login()
+            return
+        self._session_conflict_confirmed = True
+
+    def _load_promo_bg(self):
+        """Fetch promo settings di thread (jangan blokir thread UI saat login)."""
+        try:
+            data = FirestoreClient().fetch_promo_settings()
+            if data is not None:
+                self._promo_data = data
+        except Exception:
+            pass
+
+    def _force_logout_remote(self, reason):
+        """Logout otomatis karena sesi diambil PC lain (harus dipanggil di thread UI)."""
+        self._stop_session_poller()
+        self._stop_idle_watcher()
+        try:
+            threading.Thread(target=self._clear_session_cloud, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            messagebox.showwarning("🔒 DIPINDAHKAN",
+                                   f"Kamu telah logout otomatis karena {reason}.\n"
+                                   "Sesi lama otomatis berakhir.")
+        except Exception:
+            pass
+        self._show_login()
+
+    # ── AUTO-LOCK SAAT IDLE ────────────────────────────────────────────
+    def _start_idle_watcher(self):
+        """Kunci otomatis ke halaman login setelah X menit tanpa aktivitas
+        (idle_lock_minutes di config; 0/nonaktif = default).
+        Handler hanya mencatat waktu (tanpa after-churn); satu poller 5 dtk yang cek selisihnya."""
+        self._stop_idle_watcher()
+        try:
+            cfg = ConfigManager.load()
+            minutes = int(cfg.get("idle_lock_minutes", 0) or 0)
+        except Exception:
+            minutes = 0
+        if minutes <= 0:
+            return  # fitur dinonaktifkan (default)
+        self._idle_timeout_ms = minutes * 60000
+        self._idle_last_evt = time.time()
+        self._idle_stop = False
+
+        def _mark(_evt=None):
+            self._idle_last_evt = time.time()
+
+        def _tick():
+            if getattr(self, "_idle_stop", True):
+                return
+            if time.time() - self._idle_last_evt > self._idle_timeout_ms / 1000:
+                try:
+                    self.after(0, self._auto_lock)
+                except Exception:
+                    pass
+                return
+            try:
+                self._idle_after = self.after(5000, _tick)
+            except Exception:
+                pass
+
+        self._idle_mark = _mark
+        self.bind_all("<Key>", _mark, add="+")
+        self.bind_all("<Button-1>", _mark, add="+")
+        self._idle_after = self.after(5000, _tick)
+
+    def _stop_idle_watcher(self):
+        self._idle_stop = True
+        if getattr(self, "_idle_after", None):
+            try:
+                self.after_cancel(self._idle_after)
+            except Exception:
+                pass
+            self._idle_after = None
+        try:
+            self.unbind_all("<Key>")
+            self.unbind_all("<Button-1>")
+        except Exception:
+            pass
+
+    def _auto_lock(self):
+        if (getattr(self, "current_user", None) or "") == "":
+            return
+        self._stop_idle_watcher()
+        self._stop_session_poller()
+        try:
+            threading.Thread(target=self._clear_session_cloud, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            menit = max(1, self._idle_timeout_ms // 60000)
+            messagebox.showinfo("🔒 Terkunci Otomatis",
+                                f"Aplikasi terkunci karena tidak ada aktivitas selama {menit} menit.\n"
+                                "Silakan login kembali.")
+        except Exception:
+            pass
+        self._show_login()
+
     def _on_cloud_license_update(self, ls: Optional[dict]):
         """Callback ketika cloud license status berubah."""
         if not ls:
@@ -7025,7 +8792,7 @@ class AutoRentApp(ctk.CTk):
                     existing["firebase_sync"] = True
                     existing["binding_mode"] = "username"
                     existing["username"] = self.current_user
-                    if "edition" not in existing:
+                    if not existing.get("kode_aktivasi") or "edition" not in existing:
                         mtv = ls.get("maxTv", 5)
                         if mtv >= 999999:
                             existing["edition"] = "LIFETIME"
@@ -7123,6 +8890,12 @@ class AutoRentApp(ctk.CTk):
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
         self._stop_license_poller()
+        self._stop_session_poller()
+        self._stop_idle_watcher()
+        try:
+            threading.Thread(target=self._clear_session_cloud, daemon=True).start()
+        except Exception:
+            pass
         self._promo_data = None
         self.geometry("620x900")
         self.resizable(False, False)
@@ -7140,6 +8913,7 @@ class AutoRentApp(ctk.CTk):
         for w in self.winfo_children():
             w.destroy()
         self._build_layout()
+        self._muat_daftar_tv()
         TimerService.restore_timer_state(self)
         self._load_riwayat()
         self._cek_adb_global_saat_start()
@@ -7176,16 +8950,52 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
 
-        # Fetch promo settings once after login
+        # Fetch promo settings once after login (di thread, jangan blokir UI)
         try:
-            fc = FirestoreClient()
-            self._promo_data = fc.fetch_promo_settings()
+            threading.Thread(target=self._load_promo_bg, daemon=True).start()
         except Exception:
             pass
 
         # Start license poller untuk pantau perubahan dari cloud
         try:
             self._start_license_poller()
+        except Exception:
+            pass
+
+        # Sinkronkan seluruh riwayat lokal ke cloud (idempoten, dedupe by id),
+        # lalu retry tiap 30 detik jika ada antrian yang gagal.
+        try:
+            self._pending_tx_uploads = [
+                t for t in (
+                    self._build_tx_cloud(r, m)
+                    for r, m in zip(self.riwayat_transaksi, self.riwayat_meta)
+                ) if t
+            ]
+            threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+            self._schedule_cloud_retry()
+        except Exception:
+            pass
+
+        # Single-session: daftarkan sesi di cloud + pantau jika dipakai PC lain
+        try:
+            self._session_login_at = int(time.time() * 1000)
+            self._start_session_poller()
+        except Exception as e:
+            _LOGGER.warning("Session start error: %s", e)
+
+        # Auto-import riwayat cloud saat login (admin; dedupe by id, tanpa popup)
+        if (self.current_role or "") == "admin":
+            try:
+                threading.Thread(
+                    target=self._import_riwayat_from_cloud,
+                    kwargs={"silent": True},
+                    daemon=True).start()
+            except Exception:
+                pass
+
+        # Auto-lock saat idle (kunci ke login setelah 10 menit tidak aktif)
+        try:
+            self._start_idle_watcher()
         except Exception:
             pass
 
@@ -7208,15 +9018,16 @@ class AutoRentApp(ctk.CTk):
                 pass
 
         def _save_edition_from_max_tv(lic: dict, max_tv: int):
-            if "edition" not in lic:
-                if max_tv >= 999999:
-                    lic["edition"] = "LIFETIME"
-                elif max_tv >= 15:
-                    lic["edition"] = "TAHUNAN"
-                elif max_tv >= 10:
-                    lic["edition"] = "3BULAN"
-                else:
-                    lic["edition"] = "BULANAN"
+            if lic.get("kode_aktivasi") and "edition" in lic:
+                return
+            if max_tv >= 999999:
+                lic["edition"] = "LIFETIME"
+            elif max_tv >= 15:
+                lic["edition"] = "TAHUNAN"
+            elif max_tv >= 10:
+                lic["edition"] = "3BULAN"
+            else:
+                lic["edition"] = "BULANAN"
 
         def _write_cloud_license(expires_at: str, kode_aktivasi: str = "", max_tv: int = 5, promo_add_tv: int = 0):
             import pathlib as _pl
@@ -7305,7 +9116,7 @@ class AutoRentApp(ctk.CTk):
                 "Koneksi ke TV tidak akan berfungsi tanpa package ini."))
 
     def _cek_lisensi_saat_start(self):
-        status = LicenseManager.get_status(current_user=self.current_user or "")
+        status = LicenseManager.get_status(current_user=self._resolve_license_user())
         if status["status"] == "active":
             # Re-enable semua tab
             for tab_key, btn in self.nav_btns.items():
@@ -7352,8 +9163,9 @@ class AutoRentApp(ctk.CTk):
         self._setup_aktivasi()
         self._setup_profil()
         self._setup_log_aplikasi()
-        # Admin-only users management tab - DISABLED
-        # self._setup_users()
+        # Admin-only kasir management tab (APTV2-style)
+        if self.current_role == "admin":
+            self._setup_users()
         self._show_tab("dashboard")
 
     def _build_sidebar(self):
@@ -7383,7 +9195,7 @@ class AutoRentApp(ctk.CTk):
                      font=("Russo One", 11, "bold"),
                      text_color=C_ACCENT2).pack()
 
-        status = LicenseManager.get_status(current_user=self.current_user or "")
+        status = LicenseManager.get_status(current_user=self._resolve_license_user())
         lic_color = C_GREEN if status["status"] == "active" else C_YELLOW if status["status"] == "trial" else C_RED
         self.lbl_sidebar_license_status = ctk.CTkLabel(self.sidebar, text=status["pesan"],
                                                        font=("Courier New", 10), text_color=lic_color,
@@ -7396,16 +9208,28 @@ class AutoRentApp(ctk.CTk):
         sep = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
         sep.pack(fill="x", padx=10, pady=4)
 
-        nav_items = [
-            ("📺", "Dashboard TV",    "dashboard"),
-            ("🖥️", "Dashboard Warnet", "warnet"),
-            ("💰", "Kontrol Harga",   "harga"),
-            ("📜", "Riwayat",         "riwayat"),
-            ("🔗", "Panduan Koneksi",  "wifi"),
-            ("🔓", "Aktivasi",        "aktivasi"),
-            ("👤", "Profil",          "profil"),
-            ("📋", "Log Aplikasi",    "log_aplikasi"),
-        ]
+        # Kasir (sub-akun admin): hanya tab yang aman — Dashboard TV, Warnet,
+        # Histori Aktivasi (read-only) & Riwayat. Admin melihat semua menu.
+        is_admin = (self.current_role or "kasir") == "admin"
+        if is_admin:
+            nav_items = [
+                ("📺", "Dashboard TV",    "dashboard"),
+                ("🖥️", "Dashboard Warnet", "warnet"),
+                ("📜", "Riwayat",         "riwayat"),
+                ("💰", "Kontrol Harga",   "harga"),
+                ("🔗", "Panduan Koneksi",  "wifi"),
+                ("🔓", "Aktivasi",        "aktivasi"),
+                ("👤", "Profil",          "profil"),
+                ("📋", "Log Aplikasi",    "log_aplikasi"),
+                ("👥", "Manajemen Kasir", "users"),
+            ]
+        else:
+            nav_items = [
+                ("📺", "Dashboard TV",    "dashboard"),
+                ("🖥️", "Dashboard Warnet", "warnet"),
+                ("📋", "Histori Aktivasi", "aktivasi"),
+                ("📜", "Riwayat",         "riwayat"),
+            ]
         self.nav_btns = {}
         for ico, label, key in nav_items:
             row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -7469,27 +9293,47 @@ class AutoRentApp(ctk.CTk):
 
     def _on_check_update(self):
         """Triggered by UI button. Reads manifest URL from config and runs check in background."""
-        manifest = ConfigManager.get('update_manifest_url')
-        if not manifest or manifest.strip() == "":
+        manifest = ConfigManager.get('update_manifest_url') or ""
+        if not manifest.strip():
             messagebox.showinfo("Cek Pembaruan", 
                 "Fitur pembaruan belum dikonfigurasi.\n\n"
                 "Untuk mengaktifkan:\n"
                 "1. Upload manifest.json ke GitHub release\n"
-                "2. Setel 'update_manifest_url' di config.json")
+                "2. Setel 'update_manifest_url' di config.json\n\n"
+                "Atau klik 'Download & Install' di sidebar untuk memasukkan URL manifest.")
             return
         # Run in thread to avoid blocking UI
-        threading.Thread(target=self._check_update_thread, args=(manifest,), daemon=True).start()
+        threading.Thread(target=self._check_update_thread, args=(manifest.strip(),), daemon=True).start()
+
+    def _detect_update(self):
+        """Ambil manifest + verifikasi tanda tangan + bandingkan versi (TANPA mengunduh).
+
+        Return dict manifest jika ada pembaruan, None jika sudah terbaru,
+        raise ValueError jika manifest tidak valid / signature salah.
+        """
+        from scripts import check_update
+        manifest = ConfigManager.get('update_manifest_url') or ""
+        if not manifest.strip():
+            return None
+        mf = check_update.fetch_manifest(manifest.strip())
+        if not check_update.verify_manifest(mf, ConfigManager.get('update_pubkey_path') or None):
+            raise ValueError('Signature manifest tidak valid')
+        if str(mf.get('version', '')).strip() == str(APP_VERSION).strip():
+            return None
+        return mf
 
     def _check_update_thread(self, manifest_url: str):
         try:
-            from scripts import check_update
-            pubkey = ConfigManager.get('update_pubkey_path') or os.path.join(os.path.dirname(__file__), 'update_pubkey.pem')
-            app_exe = os.path.abspath(__file__)
-            res = check_update.check_for_update(manifest_url, pubkey, current_version=APP_VERSION, app_exe_path=app_exe)
-            # res is a user-friendly message
+            mf = self._detect_update()
+            if mf is None:
+                res = f"Versi terbaru terpasang ({APP_VERSION})."
+            else:
+                res = (f"Pembaruan tersedia: v{mf.get('version')} "
+                       f"(versi Anda: v{APP_VERSION})\n\n"
+                       "Klik 'Download & Install' di sidebar untuk mengunduh dan memasangnya.")
             self.after(0, lambda: messagebox.showinfo("Cek Pembaruan", res))
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Cek Pembaruan - Error", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Cek Pembaruan - Error", str(e)))
     
     def _on_git_update(self):
         """Check and update via Git, run in background thread."""
@@ -7556,17 +9400,29 @@ class AutoRentApp(ctk.CTk):
             self.after(2000, lambda: self._do_restart())
             
         except ImportError as e:
-            self.after(0, lambda: messagebox.showerror(
+            self.after(0, lambda e=e: messagebox.showerror(
                 "❌ Module Error",
                 f"Git updater module tidak ditemukan:\n{e}\n\n"
                 "Pastikan scripts/git_updater.py ada."
             ))
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("❌ Error", f"Update error:\n{str(e)}"))
+            self.after(0, lambda e=e: messagebox.showerror("❌ Error", f"Update error:\n{str(e)}"))
 
     def _show_tab(self, key):
-        status = LicenseManager.get_status(current_user=self.current_user or "")
+        role = self.current_role or "kasir"
+        kasir_allowed = {"dashboard", "warnet", "aktivasi", "riwayat"}
+        if role != "admin" and key not in kasir_allowed:
+            messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat mengakses fitur ini.")
+            return
+        if key == "riwayat" and role == "admin":
+            self.after_idle(self._refresh_kasir_filter_options)
+        status = LicenseManager.get_status(current_user=self._resolve_license_user())
         if status["status"] == "expired" and key != "aktivasi":
+            if role != "admin":
+                messagebox.showwarning(
+                    "⚠ AKSES TERBATAS",
+                    "Lisensi telah habis. Silakan hubungi admin untuk memperpanjang lisensi.")
+                return
             messagebox.showwarning(
                 "⚠ AKSES TERBATAS",
                 "Lisensi Anda telah habis. Silakan aktifkan lisensi untuk mengakses fitur lain.")
@@ -7645,15 +9501,233 @@ class AutoRentApp(ctk.CTk):
     def get_minuman_data(self): return dict(self.menu_minuman)
     def get_semua_kartu(self):  return list(self._semua_kartu_tv)
 
+    def _tv_idle_guard(self):
+        """Poller auto-mati TV yang menyala tanpa paket aktif (anti-kasir nakal).
+
+        Bekerja hanya jika tv_auto_off_enabled = true; status layar diambil
+        dari WebSocket APK (sumber akurat), bukan ADB."""
+        try:
+            if getattr(self, "tv_auto_off_enabled", False):
+                for kartu in list(getattr(self, "_semua_kartu_tv", [])):
+                    try:
+                        kartu._tv_idle_check()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self.after(30000, self._tv_idle_guard)
+        except Exception:
+            pass
+
     def _refresh_dashboard_total_pesanan(self):
         total = sum(getattr(kartu, 'biaya_pesanan', 0) for kartu in self._semua_kartu_tv)
         if hasattr(self, 'lbl_dashboard_total_pesanan'):
             self.lbl_dashboard_total_pesanan.configure(text=f"Total Pesanan: {fmt_rp(total)}")
 
+    # ── Filter Riwayat (tanggal & kasir) ──────────────────────────────────────
+    def _riwayat_kasir_choices(self):
+        if (self.current_role or "") == "admin":
+            choices = ["SEMUA"]
+            users = ConfigManager.get("users", {}) or {}
+            if isinstance(users, dict):
+                for uname, u in users.items():
+                    if isinstance(u, dict) and u.get("role", "kasir") == "kasir":
+                        choices.append(uname)
+            return choices or ["SEMUA"]
+        return [self.current_user or "SEMUA"]
+
+    def _row_matches_filter(self, row):
+        if not row:
+            return False
+        if getattr(self, "_riwayat_filter_range", None):
+            waktu = str(row[0] if len(row) > 0 else "")
+            hari = waktu[:10]
+            if not hari or not (self._riwayat_filter_range[0] <= hari <= self._riwayat_filter_range[1]):
+                return False
+        elif self._riwayat_filter_tanggal:
+            waktu = str(row[0] if len(row) > 0 else "")
+            if not waktu.startswith(self._riwayat_filter_tanggal):
+                return False
+        kasir_filter = self._riwayat_filter_kasir or "SEMUA"
+        if kasir_filter != "SEMUA":
+            kasir = row[1] if len(row) > 1 else ""
+            if kasir != kasir_filter:
+                return False
+        cari = (getattr(self, "_riwayat_filter_cari", "") or "").strip().lower()
+        if cari:
+            hay = " ".join(str(c or "") for c in row[:6]).lower()
+            if cari not in hay:
+                return False
+        return True
+
+    def _riwayat_filter_indices(self):
+        out = []
+        status_f = getattr(self, "_riwayat_filter_status", "SEMUA") or "SEMUA"
+        for i, r in enumerate(self.riwayat_transaksi):
+            if not self._row_matches_filter(r):
+                continue
+            if status_f != "SEMUA":
+                paid = self.riwayat_meta[i].get('paid', True) if i < len(self.riwayat_meta) else True
+                if (status_f == "LUNAS") != paid:
+                    continue
+            out.append(i)
+        return out
+
+    def _render_riwayat_tree(self):
+        if not hasattr(self, "tree"):
+            return
+        self._tree_item_to_index = {}
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for idx in reversed(self._riwayat_filter_indices()):
+            row = self.riwayat_transaksi[idx]
+            paid = self.riwayat_meta[idx].get('paid', True) if idx < len(self.riwayat_meta) else True
+            tag = "paid" if paid else "unpaid"
+            item_id = self.tree.insert("", 0, values=row, tags=(tag,))
+            self._tree_item_to_index[item_id] = idx
+        self._refresh_riwayat_summary()
+
+    def _set_filter_tanggal(self, mode):
+        self._riwayat_filter_range = None
+        if mode is None:
+            self._riwayat_filter_tanggal = None
+            self.lbl_filter_tanggal.configure(text="Semua Tanggal")
+        elif mode == "7_hari":
+            self._riwayat_filter_tanggal = None
+            awal = datetime.now() - timedelta(days=6)
+            akhir = datetime.now()
+            self._riwayat_filter_range = (awal.strftime("%Y-%m-%d"), akhir.strftime("%Y-%m-%d"))
+            self.lbl_filter_tanggal.configure(
+                text=f"7 Hari Terakhir ({self._riwayat_filter_range[0]} → {self._riwayat_filter_range[1]})")
+        elif mode == "bulan_ini":
+            self._riwayat_filter_tanggal = None
+            now = datetime.now()
+            awal = now.replace(day=1)
+            self._riwayat_filter_range = (awal.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
+            self.lbl_filter_tanggal.configure(text=f"Bulan Ini ({awal.strftime('%b %Y')})")
+        elif mode == "hari_ini":
+            self._riwayat_filter_tanggal = datetime.now().strftime("%Y-%m-%d")
+            self.lbl_filter_tanggal.configure(
+                text=f"Hari Ini ({self._riwayat_filter_tanggal})")
+        elif mode == "kemarin":
+            kemarin = datetime.now() - timedelta(days=1)
+            self._riwayat_filter_tanggal = kemarin.strftime("%Y-%m-%d")
+            self.lbl_filter_tanggal.configure(
+                text=f"Kemarin ({self._riwayat_filter_tanggal})")
+        else:
+            self._riwayat_filter_tanggal = mode
+            try:
+                tgl = datetime.strptime(mode, "%Y-%m-%d")
+                self.lbl_filter_tanggal.configure(text=tgl.strftime("%d %b %Y"))
+            except Exception:
+                self.lbl_filter_tanggal.configure(text=mode)
+        self._render_riwayat_tree()
+
+    def _on_cari_ketik(self, _evt=None):
+        """Debounce pencarian riwayat: rebuild tree hanya setelah berhenti mengetik 300 ms."""
+        job = getattr(self, "_cari_debounce_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._cari_debounce_job = self.after(300, self._apply_riwayat_filter)
+
+    def _apply_riwayat_filter(self):
+        if hasattr(self, "opt_filter_kasir"):
+            self._riwayat_filter_kasir = self.opt_filter_kasir.get()
+        if hasattr(self, "opt_filter_status"):
+            self._riwayat_filter_status = self.opt_filter_status.get()
+        if hasattr(self, "ent_filter_cari"):
+            self._riwayat_filter_cari = self.ent_filter_cari.get()
+        self._render_riwayat_tree()
+
+    def _refresh_kasir_filter_options(self):
+        if (self.current_role or "") != "admin":
+            return
+        if not hasattr(self, "opt_filter_kasir"):
+            return
+        choices = self._riwayat_kasir_choices()
+        self.opt_filter_kasir.configure(values=choices)
+        if (self._riwayat_filter_kasir or "SEMUA") not in choices:
+            self._riwayat_filter_kasir = "SEMUA"
+            self.opt_filter_kasir.set("SEMUA")
+            self._render_riwayat_tree()
+
+    def _pilih_tanggal_kalender(self, dlg, tgl_str):
+        self._riwayat_filter_tanggal = tgl_str
+        try:
+            tgl = datetime.strptime(tgl_str, "%Y-%m-%d")
+            self.lbl_filter_tanggal.configure(text=tgl.strftime("%d %b %Y"))
+        except Exception:
+            self.lbl_filter_tanggal.configure(text=tgl_str)
+        dlg.destroy()
+        self._render_riwayat_tree()
+
+    def _buka_kalender(self):
+        """Kalender sederhana untuk cek riwayat per hari (tanpa dependensi baru)."""
+        import calendar as _cal
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("📅 Pilih Tanggal")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        now = datetime.now()
+        bulan = now.month
+        tahun = now.year
+
+        hdr_f = ctk.CTkFrame(dlg, fg_color="transparent")
+        hdr_f.pack(pady=(10, 4))
+        lbl_periode = ctk.CTkLabel(hdr_f, text="", font=("Russo One", 13, "bold"),
+                                   text_color=C_ACCENT)
+        grid_f = ctk.CTkFrame(dlg, fg_color=C_PANEL, corner_radius=10)
+        grid_f.pack(padx=12, pady=(0, 8))
+
+        def _render():
+            lbl_periode.configure(text=f"{_cal.month_name[bulan]} {tahun}")
+            for w in grid_f.winfo_children():
+                w.destroy()
+            for i, nama in enumerate(["Sn", "Sl", "Rb", "Km", "Jm", "Sb", "Mg"]):
+                ctk.CTkLabel(grid_f, text=nama, font=FONT_SMALL, text_color=C_MUTED,
+                             width=38).grid(row=0, column=i, padx=1, pady=1)
+            for r, week in enumerate(_cal.monthcalendar(tahun, bulan), 1):
+                for c, day in enumerate(week):
+                    if day == 0:
+                        continue
+                    tgl_str = f"{tahun}-{bulan:02d}-{day:02d}"
+                    is_today = (day == now.day and bulan == now.month and tahun == now.year)
+                    ctk.CTkButton(grid_f, text=str(day), width=38, height=32,
+                                  fg_color=C_ACCENT2 if is_today else C_BTN,
+                                  hover_color=C_ACCENT,
+                                  font=("Consolas", 11, "bold") if is_today else ("Consolas", 11),
+                                  text_color="white" if is_today else C_TEXT,
+                                  command=lambda t=tgl_str: self._pilih_tanggal_kalender(dlg, t)
+                                  ).grid(row=r, column=c, padx=1, pady=1)
+
+        def _geser(delta):
+            nonlocal bulan, tahun
+            bulan += delta
+            if bulan < 1:
+                bulan, tahun = 12, tahun - 1
+            elif bulan > 12:
+                bulan, tahun = 1, tahun + 1
+            _render()
+
+        ctk.CTkButton(hdr_f, text="‹", width=34, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 14, "bold"),
+                      text_color=C_TEXT, command=lambda: _geser(-1)).pack(side="left", padx=(0, 6))
+        lbl_periode.pack(side="left", padx=8)
+        ctk.CTkButton(hdr_f, text="›", width=34, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 14, "bold"),
+                      text_color=C_TEXT, command=lambda: _geser(1)).pack(side="left", padx=(6, 0))
+        _render()
+
     def _refresh_riwayat_summary(self):
-        # Filter hanya entry milik user saat ini
-        uname = self.current_user or ""
-        user_indices = [i for i, r in enumerate(self.riwayat_transaksi) if uname and len(r) > 1 and r[1] == uname]
+        # Ringkasan mengikuti filter aktif (tanggal + kasir), bukan hanya user sendiri
+        user_indices = self._riwayat_filter_indices()
         user_metas = [self.riwayat_meta[i] for i in user_indices if i < len(self.riwayat_meta)]
 
         def paket_only(m):
@@ -7676,6 +9750,135 @@ class AutoRentApp(ctk.CTk):
             status_text = f"  |  ✅ Lunas: {paid_count}  |  ⏳ Belum: {unpaid_count}"
             self.lbl_rekap_footer.configure(text=summary_text + status_text)
 
+    # ── Lisensi sub-akun kasir ────────────────────────────────────────────────
+    def _resolve_license_user(self):
+        """Kasir adalah sub-akun admin utama: lisensi mengikuti admin (APTV2).
+        Admin menggunakan usernamenya sendiri."""
+        if (self.current_role or "") != "kasir":
+            return self.current_user or ""
+        try:
+            users = ConfigManager.get("users", {}) or {}
+            u = users.get(self.current_user) or {}
+            if isinstance(u, dict):
+                return u.get("admin_utama") or self.current_user or ""
+            return self.current_user or ""
+        except Exception:
+            return self.current_user or ""
+
+    def _cloud_upload_target(self):
+        """Target doc Firestore untuk upload transaksi: admin utama untuk kasir,
+        username sendiri untuk admin."""
+        return self._resolve_license_user()
+
+    @staticmethod
+    def _now_iso_utc():
+        # Format sama dengan Android: yyyy-MM-dd'T'HH:mm:ss'Z' (waktu lokal, huruf Z literal)
+        return datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _build_tx_cloud(self, row, meta):
+        """Konversi baris riwayat lokal -> dict transaksi Firestore (kompatibel APTV2:
+        billingps_users/{user}.transaksiList). Kembalikan None jika meta belum punya cloud_id."""
+        try:
+            if not isinstance(meta, dict):
+                return None
+            cloud_id = meta.get("cloud_id") or ""
+            if not cloud_id:
+                return None
+            waktu_str = str(row[0] if len(row) > 0 else "") or ""
+            if len(waktu_str) >= 16:
+                waktu_iso = waktu_str[:16].replace(" ", "T") + ":00Z"
+            else:
+                waktu_iso = self._now_iso_utc()
+            total = int(meta.get("total", 0))
+            paket_harga = int(meta.get("paket_harga", 0) or 0)
+            if paket_harga <= 0:
+                paket_harga = max(0, total - int(meta.get("pesanan_total", 0) or 0))
+            pesanan_raw = meta.get("pesanan") or {}
+            pesanan = {}
+            if isinstance(pesanan_raw, dict):
+                for k, v in pesanan_raw.items():
+                    try:
+                        pesanan[str(k)] = int(v)
+                    except Exception:
+                        pesanan[str(k)] = 0
+            all_menu = {**self.menu_makanan, **self.menu_minuman}
+            pesananHarga = {}
+            for nm, qty in pesanan.items():
+                try:
+                    pesananHarga[nm] = int(all_menu.get(nm, 0)) * qty
+                except Exception:
+                    pesananHarga[nm] = 0
+            return {
+                "id": cloud_id,
+                "waktu": waktu_iso,
+                "kasir": str(row[1] if len(row) > 1 else "") or (self.current_user or ""),
+                "kota": str(row[2] if len(row) > 2 else "") or "",
+                "paket": str(meta.get("paket_raw") or ""),
+                "total": total,
+                "pesanan": pesanan,
+                "paketHarga": paket_harga,
+                "pesananHarga": pesananHarga,
+                "tvJenisPs": "TV" if meta.get("source") == "tv" else "PC",
+            }
+        except Exception:
+            return None
+
+    def _backfill_cloud_ids(self):
+        """Berikan cloud_id stabil ke baris riwayat lama (tanpa cloud_id) agar bisa
+        diupload ke Firestore tanpa duplikat. Id dihasilkan deterministik dari isi baris."""
+        import hashlib
+        changed = False
+        for i, meta in enumerate(self.riwayat_meta):
+            if not isinstance(meta, dict):
+                continue
+            if meta.get("cloud_id"):
+                continue
+            try:
+                row = self.riwayat_transaksi[i]
+                stable = hashlib.md5(f"{tuple(row)}".encode("utf-8")).hexdigest()[:12]
+                meta["cloud_id"] = f"tx_{stable}"
+                meta.setdefault("paket_raw", "")
+                meta.setdefault("pesanan", {})
+                changed = True
+            except Exception:
+                continue
+        if changed:
+            self._save_riwayat()
+
+    def _flush_cloud_uploads(self):
+        """Upload antrian transaksi ke billingps_users/{target}.transaksiList.
+        Dipanggil dari thread background; idempoten via id transaksi."""
+        try:
+            if not self._pending_tx_uploads:
+                return
+            target = self._cloud_upload_target()
+            if not target:
+                self._pending_tx_uploads.clear()
+                return
+            pending = list(self._pending_tx_uploads)
+            fc = FirestoreClient()
+            ok = fc.push_transactions(target, pending)
+            if ok:
+                sent_ids = {t.get("id") for t in pending}
+                self._pending_tx_uploads = [
+                    t for t in self._pending_tx_uploads if t.get("id") not in sent_ids]
+        except Exception as e:
+            _LOGGER.warning("Gagal upload transaksi ke cloud: %s", e)
+
+    def _schedule_cloud_retry(self):
+        try:
+            self._cloud_retry_job = self.after(30000, self._cloud_retry_tick)
+        except Exception:
+            pass
+
+    def _cloud_retry_tick(self):
+        try:
+            if self._pending_tx_uploads:
+                threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+        except Exception:
+            pass
+        self._schedule_cloud_retry()
+
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 1: Dashboard
     # ══════════════════════════════════════════════════════════════════════════
@@ -7696,16 +9899,12 @@ class AutoRentApp(ctk.CTk):
                                              font=("Russo One", 10, "bold"),
                                              command=self._buka_dialog_tambah_warnet)
         self.btn_tambah_warnet.pack(side="right", padx=8, pady=10)
-        self.btn_socket_warnet = ctk.CTkButton(hdr, text="⚙ Config Client", width=145, height=34,
-                                               fg_color=C_BTN, hover_color=C_ACCENT2,
-                                               border_width=1, border_color=C_ACCENT2,
-                                               font=("Russo One", 10, "bold"),
-                                               text_color=C_ACCENT2,
-                                               command=self._open_socket_warnet_config)
-        self.btn_socket_warnet.pack(side="right", padx=8, pady=10)
+        if (self.current_role or "kasir") != "admin":
+            self.btn_tambah_warnet.pack_forget()
         self.btn_deploy_client = ctk.CTkButton(hdr, text="🚀 Deploy Client", width=145, height=34,
                                                 fg_color=C_GREEN, hover_color="#2F7A2F",
                                                 font=("Russo One", 10, "bold"),
+                                                text_color="#000000",
                                                 command=self._open_deploy_client_dialog)
         self.btn_deploy_client.pack(side="right", padx=8, pady=10)
         self.btn_warnet_admin_code = ctk.CTkButton(
@@ -7722,7 +9921,7 @@ class AutoRentApp(ctk.CTk):
             command=self._open_warnet_admin_code_generator,
         )
         self.btn_warnet_admin_code.pack(side="right", padx=10, pady=10)
-        self._refresh_warnet_socket_status()
+        self._schedule_warnet_status_refresh()
  
         self.scroll_warnet = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         self.scroll_warnet.pack(fill="both", expand=True, padx=6, pady=6)
@@ -7835,13 +10034,19 @@ class AutoRentApp(ctk.CTk):
         self.lbl_total_tv = ctk.CTkLabel(hdr, text="Total TV: 0",
                                           font=FONT_BODY, text_color=C_MUTED)
         self.lbl_total_tv.pack(side="left", padx=20)
-        self.btn_demo = ctk.CTkButton(hdr, text="🧪 Demo TV", width=140, height=34,
-                                      fg_color=C_BTN, hover_color=C_ACCENT2,
-                                      border_width=1, border_color=C_ACCENT2,
-                                      font=("Russo One", 10, "bold"),
-                                      text_color=C_ACCENT2,
-                                      command=self._tambah_tv_demo)
-        self.btn_demo.pack(side="right", padx=10, pady=10)
+        self.btn_install_client = ctk.CTkButton(hdr, text="📱 Install Client", width=140, height=34,
+                                                fg_color=C_GREEN, hover_color="#2E7D32",
+                                                font=("Russo One", 10, "bold"),
+                                                text_color="#000000",
+                                                command=self._open_install_apk_dialog)
+        self.btn_install_client.pack(side="right", padx=5, pady=10)
+        self.btn_overlay_setting = ctk.CTkButton(hdr, text="⚙ Overlay", width=110, height=34,
+                                                 fg_color=C_BTN, hover_color=C_ACCENT2,
+                                                 border_width=1, border_color=C_ACCENT2,
+                                                 font=("Russo One", 10, "bold"),
+                                                 text_color=C_ACCENT2,
+                                                 command=self._open_overlay_setting)
+        self.btn_overlay_setting.pack(side="right", padx=5, pady=10)
         if MATPLOTLIB_AVAILABLE:
             self.btn_revenue = ctk.CTkButton(hdr, text="📊 Revenue", width=120, height=34,
                                              fg_color=C_BTN, hover_color=C_ACCENT2,
@@ -7855,6 +10060,9 @@ class AutoRentApp(ctk.CTk):
                                          font=("Russo One", 10, "bold"),
                                          command=self._buka_dialog_tambah)
         self.btn_tambah.pack(side="right", padx=8, pady=10)
+        if (self.current_role or "kasir") != "admin":
+            self.btn_tambah.pack_forget()
+            self.btn_overlay_setting.pack_forget()
         self.scroll_dash = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         self.scroll_dash.pack(fill="both", expand=True, padx=6, pady=6)
         # column frames sebagai window items langsung di _parent_canvas
@@ -7864,6 +10072,10 @@ class AutoRentApp(ctk.CTk):
             dash_canvas = None
         self._scroll_canvas_dash = dash_canvas
         self._dash_card_windows = []  # (window_id, kartu)
+        # Dashboard dibuat ulang setiap login — kartu dimuat ulang dari config
+        # (daftar_tv) oleh _muat_daftar_tv, jadi reset daftar & counter di sini.
+        self._semua_kartu_tv = []
+        self.jumlah_tv = 0
         self._dash_layout_debounce_job = None
         self._dash_last_view_pos = (0, 0)
         if dash_canvas:
@@ -8015,7 +10227,7 @@ class AutoRentApp(ctk.CTk):
         add_map = promo.get("addTvOverride", {})
         if not add_map:
             return base_limit
-        status = LicenseManager.get_status(current_user=self.current_user or "")
+        status = LicenseManager.get_status(current_user=self._resolve_license_user())
         edition = status.get("edition", "")
         EDITION_TO_KEY = {"BULANAN": "1 Bulan", "3BULAN": "3 Bulan", "TAHUNAN": "1 Tahun", "LIFETIME": "LIFETIME"}
         key = EDITION_TO_KEY.get(edition)
@@ -8032,14 +10244,26 @@ class AutoRentApp(ctk.CTk):
                        on_confirm=self._on_tv_confirmed,
                        on_close_cb=self._unlock_tambah,
                        daftar_grup=self.daftar_nama_grup())
+
+    def _open_overlay_setting(self):
+        DialogOverlaySetting(self,
+                             mode=getattr(self, "tv_overlay_mode", "always"),
+                             last_minutes=getattr(self, "tv_overlay_last_minutes", 5),
+                             on_save=self._save_overlay_setting)
+
+    def _save_overlay_setting(self, mode, minutes):
+        self.tv_overlay_mode = mode
+        self.tv_overlay_last_minutes = minutes
+        ConfigManager.set("tv_overlay_mode", mode)
+        ConfigManager.set("tv_overlay_last_minutes", minutes)
+        messagebox.showinfo("✅ Pengaturan Disimpan",
+                            f"Mode overlay: {mode}\n"
+                            f"Tampil sejak sisa waktu {minutes} menit.",
+                            parent=self)
  
-    def _tambah_tv_demo(self):
-        demo_count = sum(1 for k in self._semua_kartu_tv if k.label_tv.startswith("Demo TV")) + 1
-        demo_name = f"Demo TV {demo_count}"
-        # Pastikan ada grup aktif; fallback ke default jika belum dipilih untuk menghindari AttributeError
-        default_group = self._grup_aktif if hasattr(self, '_grup_aktif') else NAMA_GRUP_DEFAULT
-        self._tambah_tv(ip="192.168.100.100", nama=demo_name, port=5555, nama_grup=default_group)
- 
+    def _open_install_apk_dialog(self):
+        DialogInstallAPK(self, ConfigManager)
+
     def _show_revenue_charts_dialog(self):
         if not MATPLOTLIB_AVAILABLE:
             messagebox.showerror("Error", "matplotlib tidak terinstall.\nInstall dengan: pip install matplotlib")
@@ -8182,10 +10406,61 @@ class AutoRentApp(ctk.CTk):
         self._unlock_tambah()
         self._tambah_tv(ip, nama, port, nama_grup)
 
-    def _tambah_tv(self, ip, nama, port, nama_grup=None):
-        tv_limit, _ = get_edition_limits(current_user=self.current_user)
+    def _simpan_daftar_tv(self):
+        """Simpan daftar kartu TV (ip/nama/port/grup) ke config (key daftar_tv)
+        agar otomatis dimuat ulang saat login berikutnya."""
+        try:
+            daftar = []
+            for kartu in list(getattr(self, "_semua_kartu_tv", [])):
+                daftar.append({
+                    "ip": getattr(kartu, "ip", ""),
+                    "nama": getattr(kartu, "label_tv", ""),
+                    "port": getattr(kartu, "port", 0),
+                    "nama_grup": getattr(kartu, "nama_grup", NAMA_GRUP_DEFAULT),
+                })
+            cfg = ConfigManager.load()
+            cfg["daftar_tv"] = daftar
+            ConfigManager.save(cfg)
+        except Exception as e:
+            print(f"[TV] Gagal simpan daftar_tv: {e}", flush=True)
+
+    def _muat_daftar_tv(self):
+        """Buat ulang kartu TV dari config (daftar_tv) setelah login.
+
+        Berlaku untuk admin maupun kasir (daftar disimpan admin); tanpa dialog,
+        tanpa pemberitahuan admin — lewati diam-diam jika limit tercapai."""
+        try:
+            cfg = ConfigManager.load()
+            daftar = cfg.get("daftar_tv", []) or []
+            for item in daftar:
+                try:
+                    ip = str(item.get("ip", "")).strip()
+                    nama = str(item.get("nama", "")).strip() or f"TV {self.jumlah_tv + 1}"
+                    try:
+                        port = int(item.get("port", 0) or 0)
+                    except Exception:
+                        port = 0
+                    nama_grup = str(item.get("nama_grup", "")).strip() or NAMA_GRUP_DEFAULT
+                    if not ip:
+                        continue
+                    if any(k.ip == ip and k.label_tv == nama
+                           for k in getattr(self, "_semua_kartu_tv", [])):
+                        continue
+                    self._tambah_tv(ip, nama, port, nama_grup, restore=True)
+                except Exception as e:
+                    print(f"[TV] Gagal memuat kartu {item}: {e}", flush=True)
+        except Exception as e:
+            print(f"[TV] Gagal muat daftar_tv: {e}", flush=True)
+
+    def _tambah_tv(self, ip, nama, port, nama_grup=None, restore=False):
+        if (self.current_role or "kasir") != "admin" and not restore:
+            messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah TV.")
+            return
+        tv_limit, _ = get_edition_limits(current_user=self._resolve_license_user())
         tv_limit = self._promo_override_tv_limit(tv_limit)
         if len(self._semua_kartu_tv) >= tv_limit:
+            if restore:
+                return  # saat muat ulang: lewati diam-diam
             messagebox.showwarning("Limit Tercapai",
                 f"Paket Anda hanya mengizinkan maksimal {tv_limit} TV.\n"
                 f"Hapus beberapa TV atau upgrade paket.")
@@ -8210,11 +10485,220 @@ class AutoRentApp(ctk.CTk):
         self._semua_kartu_tv.append(kartu)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
+        self._simpan_daftar_tv()
         self.after_idle(self._debounced_layout_dash)
     
+    # ── PIN KEAMANAN (HAPUS TV & KURSI WANET) ──────────────────────────
+    def _get_pin_hapus(self):
+        """PIN tersimpan di config (lokal). Admin dapat melihatnya lagi via Profil."""
+        cfg = ConfigManager.load()
+        sec = cfg.get("security") or {}
+        return str(sec.get("pin_hapus") or "").strip()
+
+    def _set_pin_hapus(self, pin):
+        cfg = ConfigManager.load()
+        sec = dict(cfg.get("security") or {})
+        if pin:
+            sec["pin_hapus"] = str(pin)
+            sec["pin_hapus_updated"] = datetime.now().isoformat(timespec="seconds")
+        else:
+            sec.pop("pin_hapus", None)
+            sec.pop("pin_hapus_updated", None)
+        cfg["security"] = sec
+        ConfigManager.save(cfg)
+
+    def _hapus_pin_hapus(self):
+        if not self._get_pin_hapus():
+            messagebox.showinfo("PIN Keamanan", "Belum ada PIN yang tersimpan.", parent=self)
+            return
+        if not messagebox.askyesno("Hapus PIN",
+                                   "Hapus PIN Keamanan?\n\nHapus TV/kursi akan terkunci sampai PIN dibuat lagi.",
+                                   parent=self):
+            return
+        self._set_pin_hapus("")
+        messagebox.showinfo("✅ Selesai", "PIN Keamanan telah dihapus.", parent=self)
+        self.after(200, self._setup_profil)
+
+    def _dialog_set_pin_hapus(self):
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("🔑 PIN Keamanan — Hapus TV & Kursi")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="Buat PIN (4–6 digit)", font=("Russo One", 13, "bold"),
+                     text_color=C_ACCENT).pack(pady=(14, 2))
+        ctk.CTkLabel(dlg, text="PIN wajib dimasukkan saat menghapus TV / kursi warnet.\n"
+                               "Jika lupa, PIN bisa dilihat lagi lewat tombol 👁 Lihat PIN.",
+                     font=FONT_SMALL, text_color=C_MUTED, wraplength=320).pack(padx=24)
+
+        frm = ctk.CTkFrame(dlg, fg_color=C_PANEL, corner_radius=10)
+        frm.pack(padx=24, pady=(10, 6))
+        ctk.CTkLabel(frm, text="PIN Baru:", font=FONT_LABEL, text_color=C_MUTED).grid(
+            row=0, column=0, padx=10, pady=8, sticky="w")
+        ent_pin = ctk.CTkEntry(frm, show="●", width=180, font=("Consolas", 14, "bold"),
+                               fg_color=C_BTN, text_color=C_ACCENT, border_color=C_BORDER)
+        ent_pin.grid(row=0, column=1, padx=10, pady=8)
+        ctk.CTkLabel(frm, text="Ulangi PIN:", font=FONT_LABEL, text_color=C_MUTED).grid(
+            row=1, column=0, padx=10, pady=8, sticky="w")
+        ent_pin2 = ctk.CTkEntry(frm, show="●", width=180, font=("Consolas", 14, "bold"),
+                                fg_color=C_BTN, text_color=C_ACCENT, border_color=C_BORDER)
+        ent_pin2.grid(row=1, column=1, padx=10, pady=8)
+        show_var = tk.BooleanVar(value=False)
+
+        def _toggle_lihat():
+            show = show_var.get()
+            ent_pin.configure(show="" if show else "●")
+            ent_pin2.configure(show="" if show else "●")
+
+        ctk.CTkCheckBox(frm, text="👁 Lihat PIN", variable=show_var, command=_toggle_lihat,
+                        font=FONT_SMALL, text_color=C_MUTED).grid(
+            row=2, column=1, padx=10, pady=(0, 10), sticky="w")
+        lbl_err = ctk.CTkLabel(dlg, text="", font=FONT_SMALL, text_color=C_RED)
+        lbl_err.pack()
+
+        def _simpan():
+            p1 = ent_pin.get().strip()
+            p2 = ent_pin2.get().strip()
+            if not (p1.isdigit() and 4 <= len(p1) <= 6):
+                lbl_err.configure(text="PIN harus 4–6 digit angka.")
+                return
+            if p1 != p2:
+                lbl_err.configure(text="PIN tidak sama.")
+                return
+            self._set_pin_hapus(p1)
+            dlg.destroy()
+            messagebox.showinfo("✅ Tersimpan",
+                                "PIN Keamanan berhasil disimpan.\n\n"
+                                "Simpan baik-baik — jika lupa, bisa dilihat lagi di Profil → 👁 Lihat PIN.",
+                                parent=self)
+            self.after(200, self._setup_profil)
+
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(pady=(4, 14))
+        ctk.CTkButton(row, text="💾 Simpan", width=110, height=34, fg_color=C_ACCENT2,
+                      font=("Russo One", 10, "bold"), command=_simpan).pack(side="left", padx=6)
+        ctk.CTkButton(row, text="Batal", width=90, height=34, fg_color=C_BTN,
+                      hover_color=C_RED, font=("Russo One", 10, "bold"),
+                      command=dlg.destroy).pack(side="left", padx=6)
+        dlg.bind("<Return>", lambda e: _simpan())
+        ent_pin.focus_set()
+
+    def _dialog_lihat_pin_hapus(self):
+        pin = self._get_pin_hapus()
+        if not pin:
+            messagebox.showinfo("PIN Keamanan", "Belum ada PIN yang tersimpan.", parent=self)
+            return
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("👁 Lihat PIN Keamanan")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        ctk.CTkLabel(dlg, text="PIN Keamanan Anda:", font=("Russo One", 12, "bold"),
+                     text_color=C_ACCENT).pack(pady=(16, 6))
+        ctk.CTkLabel(dlg, text=pin, font=("Consolas", 30, "bold"), text_color=C_YELLOW).pack(pady=(0, 6))
+        ctk.CTkLabel(dlg, text="Dipakai saat menghapus TV / kursi warnet.",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(padx=24, pady=(0, 4))
+        ctk.CTkLabel(dlg, text="🔒 Jangan bagikan PIN ini ke kasir.",
+                     font=FONT_SMALL, text_color=C_GREEN).pack(pady=(0, 8))
+
+        def _salin():
+            dlg.clipboard_clear()
+            dlg.clipboard_append(pin)
+            messagebox.showinfo("📋 Disalin", "PIN telah disalin ke clipboard.", parent=dlg)
+
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(pady=(4, 14))
+        ctk.CTkButton(row, text="📋 Salin", width=100, height=32, fg_color=C_ACCENT2,
+                      font=("Russo One", 9, "bold"), command=_salin).pack(side="left", padx=6)
+        ctk.CTkButton(row, text="Tutup", width=90, height=32, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                      command=dlg.destroy).pack(side="left", padx=6)
+
+    def _minta_pin_hapus(self, on_ok):
+        """Dialog PIN wajib sebelum hapus TV/kursi. on_ok() dipanggil jika PIN benar."""
+        pin = self._get_pin_hapus()
+        if not pin:
+            messagebox.showwarning("🔒 PIN BELUM DIBUAT",
+                                   "Admin belum membuat PIN Keamanan.\n\n"
+                                   "Buat PIN di menu: Profil → PIN Keamanan → 🔑 Buat PIN.\n"
+                                   "Hapus TV/kursi terkunci sampai PIN dibuat.",
+                                   parent=self)
+            return
+        now = time.time()
+        lock_until = getattr(self, "_pin_lock_until", 0.0)
+        if now < lock_until:
+            sisa = int(lock_until - now) + 1
+            messagebox.showwarning("🔒 PIN TERKUNCI",
+                                   f"Terlalu banyak PIN salah.\nCoba lagi dalam {sisa} detik.",
+                                   parent=self)
+            return
+
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("🔒 Masukkan PIN")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        ctk.CTkLabel(dlg, text="🔒 Konfirmasi PIN Keamanan", font=("Russo One", 13, "bold"),
+                     text_color=C_ACCENT).pack(pady=(16, 2))
+        ctk.CTkLabel(dlg, text="Masukkan PIN untuk melanjutkan penghapusan.",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(padx=24)
+        frm = ctk.CTkFrame(dlg, fg_color=C_PANEL, corner_radius=10)
+        frm.pack(padx=24, pady=(10, 6))
+        ent = ctk.CTkEntry(frm, show="●", width=190, font=("Consolas", 16, "bold"),
+                           fg_color=C_BTN, text_color=C_ACCENT, border_color=C_ACCENT)
+        ent.pack(padx=12, pady=12)
+        show_var = tk.BooleanVar(value=False)
+
+        def _toggle_lihat():
+            ent.configure(show="" if show_var.get() else "●")
+
+        ctk.CTkCheckBox(frm, text="👁 Lihat PIN", variable=show_var, command=_toggle_lihat,
+                        font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 10))
+        lbl_err = ctk.CTkLabel(dlg, text="", font=FONT_SMALL, text_color=C_RED)
+        lbl_err.pack()
+        state = {"salah": 0}
+
+        def _cek():
+            if ent.get().strip() == pin:
+                dlg.destroy()
+                on_ok()
+                return
+            state["salah"] += 1
+            if state["salah"] >= 5:
+                self._pin_lock_until = time.time() + 60
+                dlg.destroy()
+                messagebox.showwarning("🔒 PIN TERKUNCI",
+                                       "Terlalu banyak PIN salah (5x).\n"
+                                       "Fitur hapus TV/kursi dikunci selama 1 menit.",
+                                       parent=self)
+                return
+            lbl_err.configure(text=f"PIN salah ({state['salah']}/5). Sisa {5 - state['salah']}x percobaan.")
+            ent.delete(0, "end")
+            ent.focus_set()
+
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(pady=(4, 14))
+        ctk.CTkButton(row, text="✅ OK", width=100, height=34, fg_color=C_ACCENT2,
+                      font=("Russo One", 10, "bold"), command=_cek).pack(side="left", padx=6)
+        ctk.CTkButton(row, text="Batal", width=90, height=34, fg_color=C_BTN,
+                      hover_color=C_RED, font=("Russo One", 10, "bold"),
+                      command=dlg.destroy).pack(side="left", padx=6)
+        dlg.bind("<Return>", lambda e: _cek())
+        ent.focus_set()
+
     def _hapus_tv(self, kartu):
+        if (self.current_role or "kasir") != "admin":
+            messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menghapus TV.")
+            return
         if not messagebox.askyesno("Hapus TV", f"Yakin hapus '{kartu.label_tv}' dari dashboard?"):
             return
+        self._minta_pin_hapus(lambda: self._do_hapus_tv(kartu))
+
+    def _do_hapus_tv(self, kartu):
         wid_to_del = None
         for wid, k in self._dash_card_windows[:]:
             if k is kartu:
@@ -8237,12 +10721,14 @@ class AutoRentApp(ctk.CTk):
         self.jumlah_tv = max(0, self.jumlah_tv - 1)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
+        self._simpan_daftar_tv()
         self.after_idle(self._debounced_layout_dash)
  
     def _on_kartu_ganti_grup(self, kartu, grup_baru):
         """Saat user mengganti grup tarif sebuah TV: refresh closure get_paket_data
         kartu itu supaya menunjuk ke grup yang baru."""
         kartu.get_paket_data = lambda g=grup_baru: self.get_paket_data(g)
+        self._simpan_daftar_tv()
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TAB 2: Kontrol Harga
@@ -8313,6 +10799,9 @@ class AutoRentApp(ctk.CTk):
         self._tambah_warnet(nama=nama, nama_grup=nama_grup, pc_info=pc_info)
 
     def _tambah_warnet_demo(self):
+        if (self.current_role or "kasir") != "admin":
+            messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah kursi.")
+            return
         demo_count = sum(1 for k in getattr(self, '_semua_kartu_warnet', []) if k.label_kursi.startswith("Demo PC")) + 1
         demo_name = f"Demo PC {demo_count}"
         # Ensure warnet tab is visible so user can see the added demo card
@@ -8333,7 +10822,10 @@ class AutoRentApp(ctk.CTk):
             messagebox.showerror("❌ Demo Warnet Gagal", f"Gagal menambahkan Demo Warnet:\n{e}", parent=self)
 
     def _tambah_warnet(self, nama, nama_grup=None, pc_info=None):
-        _, warnet_limit = get_edition_limits(current_user=self.current_user)
+        if (self.current_role or "kasir") != "admin":
+            messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah kursi.")
+            return
+        _, warnet_limit = get_edition_limits(current_user=self._resolve_license_user())
         warnet_limit = self._promo_override_tv_limit(warnet_limit, is_warnet=True)
         if len(getattr(self, '_semua_kartu_warnet', [])) >= warnet_limit:
             messagebox.showwarning("Limit Tercapai",
@@ -8405,6 +10897,12 @@ class AutoRentApp(ctk.CTk):
         """Hapus sebuah kartu Warnet dari dashboard.
         KartuWarnet._confirm_hapus sudah menanyakan konfirmasi, jadi di sini langsung lakukan penghapusan.
         """
+        if (self.current_role or "kasir") != "admin":
+            messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menghapus kursi.")
+            return
+        self._minta_pin_hapus(lambda: self._do_hapus_warnet(kartu))
+
+    def _do_hapus_warnet(self, kartu):
         try:
             # Remove from list if present
             if hasattr(self, '_semua_kartu_warnet') and kartu in self._semua_kartu_warnet:
@@ -8457,28 +10955,20 @@ class AutoRentApp(ctk.CTk):
             self.lbl_warnet_total_pendapatan.configure(text=f"Total Pendapatan Warnet: {fmt_rp(total_warnet)}")
  
     def _refresh_warnet_socket_status(self):
-        cfg = self.socket_warnet_config or {}
-        enabled = bool(cfg.get('host'))
+        if not hasattr(self, 'lbl_socket_warnet'):
+            return
+        ok_client, msg = self._check_warnet_client_connection()
+        self.lbl_socket_warnet.configure(
+            text=f"Client: {'Tersambung' if ok_client else 'Belum tersambung'}",
+            text_color=C_GREEN if ok_client else C_YELLOW
+        )
+
+    def _schedule_warnet_status_refresh(self):
+        self._refresh_warnet_socket_status()
         if hasattr(self, 'lbl_socket_warnet'):
-            if not enabled:
-                self.lbl_socket_warnet.configure(
-                    text="Client: Belum dikonfigurasi",
-                    text_color=C_MUTED
-                )
-                return
+            self.after(10000, self._schedule_warnet_status_refresh)
 
-            ok_client, _ = self._check_warnet_client_connection(cfg=cfg, timeout=2)
-            self.lbl_socket_warnet.configure(
-                text=f"Client: {'Tersambung' if ok_client else 'Belum tersambung'}",
-                text_color=C_GREEN if ok_client else C_YELLOW
-            )
-
-    def _check_warnet_client_connection(self, cfg=None, timeout=3):
-        cfg = cfg or self.socket_warnet_config or {}
-        host = (cfg.get('host') or '').strip()
-        if not host:
-            return False, "Host/IP client belum diisi di Config Client."
-
+    def _check_warnet_client_connection(self):
         server = getattr(self, 'warnet_server', None)
         if server is None or not getattr(server, 'running', False):
             return False, "Socket server billing belum aktif."
@@ -8491,11 +10981,6 @@ class AutoRentApp(ctk.CTk):
 
         return True, f"{len(active_sessions)} client aktif terhubung."
 
-    def _open_socket_warnet_config(self):
-        DialogSocketConfig(self, config=self.socket_warnet_config,
-                           on_save=self._save_socket_warnet_config,
-                           on_test=self._test_socket_warnet_config)
-
     def _open_warnet_admin_code_generator(self):
         DialogWarnetAdminCode(self)
 
@@ -8503,68 +10988,6 @@ class AutoRentApp(ctk.CTk):
         """Buka dialog deploy client app ke PC warnet via SSH."""
         DialogDeployClient(self, warnet_server=self.warnet_server,
                            config_manager=ConfigManager)
-
-    def _save_socket_warnet_config(self, cfg):
-        ConfigManager.set('socket_warnet', cfg)
-        self.socket_warnet_config = cfg
-        self._refresh_warnet_socket_status()
-        messagebox.showinfo("✅ Config Client Disimpan", "Konfigurasi koneksi client berhasil disimpan.", parent=self)
-
-    def _test_socket_warnet_config(self, cfg):
-        host = (cfg.get('host') or '').strip()
-        if not host:
-            messagebox.showerror("❌ Test Koneksi Gagal", "Host/IP client belum diisi.", parent=self)
-            return
-
-        try:
-            port = int(cfg.get('port', DEFAULT_PORT) or DEFAULT_PORT)
-        except Exception:
-            messagebox.showerror("❌ Test Koneksi Gagal", "Port client tidak valid.", parent=self)
-            return
-
-        try:
-            with socket.create_connection((host, port), timeout=3):
-                pass
-            ok, msg = True, f"Port {host}:{port} dapat diakses."
-        except socket.timeout:
-            ok, msg = False, f"Timeout ke {host}:{port}"
-        except ConnectionRefusedError:
-            ok, msg = False, f"Koneksi ditolak di {host}:{port}"
-        except OSError as e:
-            ok, msg = False, f"Gagal konek ke {host}:{port} ({e})"
-
-        if ok:
-            messagebox.showinfo("✅ Test Koneksi Berhasil", f"{msg}", parent=self)
-        else:
-            messagebox.showerror("❌ Test Koneksi Gagal", f"{msg}", parent=self)
-
-    def _run_warnet_socket_command(self, cmd_template, kursi_label):
-        cfg = self.socket_warnet_config or ConfigManager.get('socket_warnet', {})
-        if not cfg.get('host'):
-            return False, "Socket Warnet belum dikonfigurasi."
-
-        if not cmd_template:
-            return False, "Perintah Socket belum diatur."
-
-        try:
-            cmd = cmd_template.format(kursi=kursi_label, kursi_label=kursi_label, label=kursi_label)
-        except Exception:
-            cmd = cmd_template
-
-        try:
-            port = int(cfg.get('port', DEFAULT_PORT) or DEFAULT_PORT)
-        except Exception:
-            port = DEFAULT_PORT
-
-        ok, msg = SocketHelper.send(
-            cfg.get('host', ''), port, cmd)
-
-        AuditLogger.log(
-            action='socket_warnet_command',
-            username=self.current_user or 'system',
-            status='success' if ok else 'failed',
-            details={'host': cfg.get('host'), 'kursi': kursi_label, 'command': cmd, 'result': msg})
-        return ok, msg
  
     def _setup_harga(self):
         f = self.frames["harga"]
@@ -9059,6 +11482,76 @@ class AutoRentApp(ctk.CTk):
                       font=("Russo One", 10, "bold"), text_color=C_GREEN,
                       command=self._export_excel).pack(side="left", padx=4)
 
+        filter_f = ctk.CTkFrame(f, fg_color=C_PANEL, height=64, corner_radius=0)
+        filter_f.pack(fill="x")
+        filter_f.pack_propagate(False)
+        ctk.CTkLabel(filter_f, text="🗓 Tanggal:", font=FONT_SMALL, text_color=C_MUTED).pack(
+            side="left", padx=(18, 4), pady=8)
+        self.lbl_filter_tanggal = ctk.CTkLabel(filter_f, text="Hari Ini", font=FONT_SMALL,
+                                               text_color=C_ACCENT)
+        self.lbl_filter_tanggal.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(filter_f, text="📅 Kalender", width=96, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, border_width=1, border_color=C_ACCENT,
+                      font=("Russo One", 9, "bold"), text_color=C_ACCENT,
+                      command=self._buka_kalender).pack(side="left", padx=4)
+        ctk.CTkButton(filter_f, text="Hari Ini", width=70, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 9, "bold"), text_color=C_TEXT,
+                      command=lambda: self._set_filter_tanggal("hari_ini")).pack(side="left", padx=2)
+        ctk.CTkButton(filter_f, text="Kemarin", width=76, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 9, "bold"), text_color=C_TEXT,
+                      command=lambda: self._set_filter_tanggal("kemarin")).pack(side="left", padx=2)
+        ctk.CTkButton(filter_f, text="7 Hari", width=64, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 9, "bold"), text_color=C_TEXT,
+                      command=lambda: self._set_filter_tanggal("7_hari")).pack(side="left", padx=2)
+        ctk.CTkButton(filter_f, text="Bulan Ini", width=80, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 9, "bold"), text_color=C_TEXT,
+                      command=lambda: self._set_filter_tanggal("bulan_ini")).pack(side="left", padx=2)
+        ctk.CTkButton(filter_f, text="Semua", width=66, height=30, fg_color=C_BTN,
+                      hover_color=C_ACCENT2, font=("Russo One", 9, "bold"), text_color=C_TEXT,
+                      command=lambda: self._set_filter_tanggal(None)).pack(side="left", padx=2)
+        ctk.CTkLabel(filter_f, text="👤 Kasir:", font=FONT_SMALL, text_color=C_MUTED).pack(
+            side="left", padx=(18, 4))
+        kasir_vals = self._riwayat_kasir_choices()
+        kasir_default = kasir_vals[0] if kasir_vals else "SEMUA"
+        if (self.current_role or "") == "kasir":
+            kasir_default = self.current_user or "SEMUA"
+        self.opt_filter_kasir = ctk.CTkOptionMenu(filter_f, values=kasir_vals,
+                                                  variable=ctk.StringVar(value=kasir_default),
+                                                  fg_color=C_BTN, button_color=C_ACCENT2,
+                                                  button_hover_color="#5A0FCC",
+                                                  text_color=C_TEXT,
+                                                  dropdown_fg_color=C_CARD,
+                                                  dropdown_text_color=C_TEXT,
+                                                  width=150, font=("Consolas", 10),
+                                                  command=lambda _v: self._apply_riwayat_filter())
+        self.opt_filter_kasir.pack(side="left", padx=(0, 8))
+        if (self.current_role or "") == "kasir":
+            self.opt_filter_kasir.configure(state="disabled")
+        self._riwayat_filter_kasir = kasir_default
+
+        self._riwayat_filter_status = getattr(self, "_riwayat_filter_status", "SEMUA") or "SEMUA"
+        ctk.CTkLabel(filter_f, text="💳 Status:", font=FONT_SMALL, text_color=C_MUTED).pack(
+            side="left", padx=(14, 4))
+        self.opt_filter_status = ctk.CTkOptionMenu(filter_f, values=["SEMUA", "LUNAS", "BELUM"],
+                                                   variable=ctk.StringVar(value=self._riwayat_filter_status),
+                                                   fg_color=C_BTN, button_color=C_ACCENT2,
+                                                   button_hover_color="#5A0FCC",
+                                                   text_color=C_TEXT,
+                                                   dropdown_fg_color=C_CARD,
+                                                   dropdown_text_color=C_TEXT,
+                                                   width=110, font=("Consolas", 10),
+                                                   command=lambda _v: self._apply_riwayat_filter())
+        self.opt_filter_status.pack(side="left", padx=(0, 8))
+        self._riwayat_filter_cari = ""
+        ctk.CTkLabel(filter_f, text="🔍 Cari:", font=FONT_SMALL, text_color=C_MUTED).pack(
+            side="left", padx=(10, 4))
+        self.ent_filter_cari = ctk.CTkEntry(filter_f, width=190, height=30,
+                                            fg_color=C_BTN, text_color=C_TEXT,
+                                            border_color=C_BORDER, font=("Consolas", 10),
+                                            placeholder_text="TV/PC, kasir, paket…")
+        self.ent_filter_cari.pack(side="left", padx=(0, 8))
+        self.ent_filter_cari.bind("<KeyRelease>", self._on_cari_ketik)
+
         rekap_f = ctk.CTkFrame(f, fg_color=C_PANEL, height=44, corner_radius=0)
         rekap_f.pack(fill="x")
         rekap_f.pack_propagate(False)
@@ -9159,6 +11652,37 @@ class AutoRentApp(ctk.CTk):
         self._refresh_riwayat_summary()
         self._save_riwayat()
         AuditLogger.log(action="payment_toggle", username=self.current_user or "", status="success",
+                        details={"transaction_index": idx, "new_status": "paid" if paid else "unpaid"})
+
+    def _set_transaksi_paid(self, item_id, paid):
+        """Sinkron status bayar dari kartu TV/PC ke baris riwayat terkait."""
+        if not item_id:
+            return
+        idx = self._tree_item_to_index.get(item_id, -1)
+        if idx < 0 or idx >= len(self.riwayat_meta):
+            return
+        self.riwayat_meta[idx]['paid'] = bool(paid)
+        status_str = "✅ Lunas" if paid else "⏳ Belum Lunas"
+        try:
+            row = list(self.riwayat_transaksi[idx])
+            if len(row) >= 8:
+                row[7] = status_str
+            else:
+                while len(row) < 8:
+                    row.append("—")
+                row[7] = status_str
+            self.riwayat_transaksi[idx] = tuple(row)
+        except Exception:
+            pass
+        if self.tree.exists(item_id):
+            self.tree.item(item_id, values=self.riwayat_transaksi[idx],
+                           tags=("paid" if paid else "unpaid",))
+        if item_id in self.tree.selection() and hasattr(self, 'btn_toggle_paid'):
+            self.btn_toggle_paid.configure(
+                text="⏳ Tandai Belum Lunas" if paid else "✅ Tandai Lunas")
+        self._refresh_riwayat_summary()
+        self._save_riwayat()
+        AuditLogger.log(action="payment_toggle_card", username=self.current_user or "", status="success",
                         details={"transaction_index": idx, "new_status": "paid" if paid else "unpaid"})
 
     def _show_invoice_dialog(self, iid=None):
@@ -9277,7 +11801,7 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Gagal", f"Gagal membuka bukti:\n{e}", parent=self)
 
-    def _format_riwayat_row(self, waktu, tv_label, paket_nama, pesanan_dict, total_int, pesanan_total=None, diskoni=0, diskoni_mode="nominal", paid=True):
+    def _format_riwayat_row(self, waktu, tv_label, paket_nama, pesanan_dict, total_int, pesanan_total=None, diskoni=0, diskoni_mode="nominal", paid=True, kasir=None):
         """Build a properly formatted riwayat row tuple with price annotations."""
         if pesanan_total is None:
             all_menu = {**self.menu_makanan, **self.menu_minuman}
@@ -9299,7 +11823,7 @@ class AutoRentApp(ctk.CTk):
         else:
             diskon_tampil = "—"
         status_str = "✅ Lunas" if paid else "⏳ Belum Lunas"
-        return (waktu, self.current_user, tv_label, paket_tampil, pesanan_tampil, diskon_tampil, fmt_rp(total_int), status_str)
+        return (waktu, kasir or self.current_user, tv_label, paket_tampil, pesanan_tampil, diskon_tampil, fmt_rp(total_int), status_str)
 
     def _save_riwayat(self):
         """Simpan riwayat transaksi ke file JSON agar tidak hilang saat restart."""
@@ -9315,6 +11839,20 @@ class AutoRentApp(ctk.CTk):
 
     def _load_riwayat(self):
         """Load riwayat transaksi dari file JSON setelah login/restart."""
+        # Default filter: pendapatan harian (hari ini); kasir hanya melihat transaksinya sendiri
+        self._riwayat_filter_tanggal = datetime.now().strftime("%Y-%m-%d")
+        if (self.current_role or "") == "admin":
+            self._riwayat_filter_kasir = "SEMUA"
+        else:
+            self._riwayat_filter_kasir = self.current_user or "SEMUA"
+        if hasattr(self, "lbl_filter_tanggal"):
+            self.lbl_filter_tanggal.configure(
+                text=f"Hari Ini ({self._riwayat_filter_tanggal})")
+        if hasattr(self, "opt_filter_kasir"):
+            try:
+                self.opt_filter_kasir.set(self._riwayat_filter_kasir)
+            except Exception:
+                pass
         if not os.path.exists(RIWAYAT_FILE):
             return
         try:
@@ -9342,16 +11880,13 @@ class AutoRentApp(ctk.CTk):
             # Muat SEMUA data ke memori (utuh, untuk keperluan saving)
             self.riwayat_transaksi = padded
             self.riwayat_meta = metas
-            # Isi tree hanya untuk entry milik user saat ini
-            uname = self.current_user or ""
-            self._tree_item_to_index = {}
-            for idx, row in enumerate(self.riwayat_transaksi):
-                if uname and len(row) > 1 and row[1] == uname:
-                    paid = self.riwayat_meta[idx].get('paid', True) if idx < len(self.riwayat_meta) else True
-                    tag = "paid" if paid else "unpaid"
-                    item_id = self.tree.insert("", 0, values=row, tags=(tag,))
-                    self._tree_item_to_index[item_id] = idx
-            self._refresh_riwayat_summary()
+            # Beri cloud_id stabil ke baris lama agar bisa diupload tanpa duplikat
+            try:
+                self._backfill_cloud_ids()
+            except Exception:
+                pass
+            # Tampilkan sesuai filter aktif (tanggal + kasir)
+            self._render_riwayat_tree()
         except Exception:
             pass
 
@@ -9385,11 +11920,25 @@ class AutoRentApp(ctk.CTk):
 
         row = self._format_riwayat_row(waktu, tv_label, paket, pesanan, total_int, pesanan_total, diskoni, diskoni_mode)
         self.riwayat_transaksi.append(row)
-        # maintain parallel meta
-        self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int, 'diskoni': diskoni, 'diskoni_mode': diskoni_mode, 'paid': True})
+        # maintain parallel meta + info upload cloud
+        cloud_id = f"tx_{int(time.time() * 1000)}"
+        self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int, 'diskoni': diskoni, 'diskoni_mode': diskoni_mode, 'paid': True, 'cloud_id': cloud_id, 'paket_raw': str(paket or ""), 'pesanan': {str(k): int(v) for k, v in (pesanan.items() if isinstance(pesanan, dict) else [])}})
 
-        item_id = self.tree.insert("", 0, values=row, tags=("paid",))
-        self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
+        # Tampilkan hanya bila lolos filter aktif
+        item_id = None
+        if self._row_matches_filter(row):
+            item_id = self.tree.insert("", 0, values=row, tags=("paid",))
+            self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
+
+        # Upload ke Firestore (billingps_users/{admin_utama}.transaksiList) agar
+        # admin bisa memantau transaksi desktop dari HP (APTV2: RiwayatScreen).
+        try:
+            tx_cloud = self._build_tx_cloud(row, self.riwayat_meta[-1])
+            if tx_cloud:
+                self._pending_tx_uploads.append(tx_cloud)
+                threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+        except Exception as e:
+            _LOGGER.warning("Gagal menyiapkan upload transaksi: %s", e)
 
         # refresh summaries
         if hasattr(self, '_refresh_riwayat_summary'):
@@ -9411,6 +11960,7 @@ class AutoRentApp(ctk.CTk):
             self.riwayat_transaksi.clear()
             self.riwayat_meta.clear()
             self._tree_item_to_index.clear()
+            self._pending_tx_uploads = []
             for item in self.tree.get_children():
                 self.tree.delete(item)
             summary_text = "Total Transaksi: 0  |  Total Pendapatan: Rp 0"
@@ -9529,60 +12079,96 @@ class AutoRentApp(ctk.CTk):
                       fg_color=C_ACCENT2, hover_color="#5A0FCC", command=submit).pack(side="right")
 
 
-    def _import_riwayat_from_cloud(self):
+    def _import_riwayat_from_cloud(self, silent=False):
         if not self.current_user:
-            messagebox.showwarning("Login", "Silakan login terlebih dahulu.", parent=self)
+            if not silent:
+                messagebox.showwarning("Login", "Silakan login terlebih dahulu.", parent=self)
             return
         try:
             fc = FirestoreClient()
-            tx_list = fc.fetch_transactions(self.current_user, max_days=6)
+            tx_list = fc.fetch_transactions(self._cloud_upload_target(), max_days=6)
         except Exception as e:
-            messagebox.showerror("Gagal", f"Gagal mengambil data dari cloud:\n{e}", parent=self)
+            if not silent:
+                messagebox.showerror("Gagal", f"Gagal mengambil data dari cloud:\n{e}", parent=self)
             return
         if not tx_list:
-            messagebox.showinfo("Import Cloud", "Tidak ada data transaksi dari cloud (6 hari terakhir).", parent=self)
+            if not silent:
+                messagebox.showinfo("Import Cloud", "Tidak ada data transaksi dari cloud (6 hari terakhir).", parent=self)
             return
-        existing = {(r[0], r[2], r[3]) for r in self.riwayat_transaksi}
+        existing_ids = {m.get('cloud_id') for m in self.riwayat_meta if m.get('cloud_id')}
+        existing_keys = {(r[0], r[2], r[3]) for r in self.riwayat_transaksi}
         imported = 0
         for tx in reversed(tx_list):
-            waktu  = tx.get("waktu", tx.get("timestamp", ""))
-            label  = tx.get("tv_label", tx.get("label", ""))
-            paket  = tx.get("paket", "")
-            pesanan_raw = tx.get("pesanan", {})
-            total  = tx.get("total", 0)
-            source = tx.get("source", "cloud")
+            if not isinstance(tx, dict):
+                continue
+            waktu = tx.get("waktu") or tx.get("timestamp") or ""
+            label = tx.get("kota") or tx.get("tv_label") or tx.get("label") or ""
+            paket_raw = tx.get("paket") or ""
+            total = tx.get("total", 0)
+            kasir = tx.get("kasir") or self.current_user or ""
+            cloud_id = tx.get("id") or ""
             if not waktu or not label:
                 continue
-            key = (waktu, label, paket)
-            if key in existing:
+            key = (waktu, label, paket_raw)
+            if cloud_id and cloud_id in existing_ids:
+                continue
+            if not cloud_id and key in existing_keys:
                 continue
             try:
                 total_int = int(total)
             except Exception:
                 total_int = 0
-            pesanan = pesanan_raw if isinstance(pesanan_raw, dict) else {}
-            row = self._format_riwayat_row(waktu, label, paket, pesanan, total_int)
+            pesanan_raw = tx.get("pesanan") or {}
+            pesanan = {}
+            if isinstance(pesanan_raw, dict):
+                for k, v in pesanan_raw.items():
+                    try:
+                        pesanan[str(k)] = int(v)
+                    except Exception:
+                        pesanan[str(k)] = 0
+            pesanan_total = 0
+            ph_raw = tx.get("pesananHarga") or {}
+            if isinstance(ph_raw, dict):
+                for v in ph_raw.values():
+                    try:
+                        pesanan_total += int(v)
+                    except Exception:
+                        pass
+            paket_harga = tx.get("paketHarga", 0)
+            try:
+                paket_harga = int(paket_harga)
+            except Exception:
+                paket_harga = 0
+            if paket_harga <= 0:
+                paket_harga = max(0, total_int - pesanan_total)
+            row = self._format_riwayat_row(waktu, label, paket_raw, pesanan, total_int,
+                                           pesanan_total, kasir=kasir)
             self.riwayat_transaksi.append(row)
             self.riwayat_meta.append({
-                'source': source,
-                'paket_harga': total_int,
-                'pesanan_total': 0,
+                'source': tx.get("source", "cloud"),
+                'paket_harga': paket_harga,
+                'pesanan_total': pesanan_total,
                 'total': total_int,
                 'paid': True,
+                'cloud_id': cloud_id or "",
+                'paket_raw': paket_raw,
             })
-            item_id = self.tree.insert("", 0, values=row, tags=("paid",))
-            self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
             imported += 1
         if imported > 0:
             self._save_riwayat()
-            self._refresh_riwayat_summary()
-            messagebox.showinfo("Import Cloud", f"{imported} transaksi berhasil diimport dari cloud (6 hr terakhir).", parent=self)
-        else:
+            try:
+                self.after(0, self._render_riwayat_tree)
+            except Exception:
+                pass
+            if not silent:
+                messagebox.showinfo("Import Cloud", f"{imported} transaksi berhasil diimport dari cloud (6 hr terakhir).", parent=self)
+        elif not silent:
             messagebox.showinfo("Import Cloud", "Semua data dari cloud sudah ada di riwayat lokal.", parent=self)
 
     def _export_excel(self):
-        if not self.riwayat_transaksi:
-            messagebox.showwarning("Kosong", "Belum ada data transaksi untuk diekspor.", parent=self)
+        rows_to_export = [self.riwayat_transaksi[i] for i in self._riwayat_filter_indices()]
+        if not rows_to_export:
+            messagebox.showwarning("Kosong", "Tidak ada data transaksi sesuai filter untuk diekspor.", parent=self)
             return
 
         wb  = openpyxl.Workbook()
@@ -9609,7 +12195,12 @@ class AutoRentApp(ctk.CTk):
         ws.row_dimensions[1].height = 32
 
         ws.merge_cells("A2:G2")
-        ws["A2"] = f"Dicetak: {datetime.now().strftime('%d %B %Y %H:%M')}  |  Kasir: {self.current_user}"
+        _filter_info = ""
+        if self._riwayat_filter_tanggal:
+            _filter_info += f"  |  Tanggal: {self._riwayat_filter_tanggal}"
+        if (self._riwayat_filter_kasir or "SEMUA") != "SEMUA":
+            _filter_info += f"  |  Kasir: {self._riwayat_filter_kasir}"
+        ws["A2"] = f"Dicetak: {datetime.now().strftime('%d %B %Y %H:%M')}  |  Kasir: {self.current_user}{_filter_info}"
         ws["A2"].font      = Font(name="Consolas", color="6060A0", size=9)
         ws["A2"].fill      = PatternFill("solid", fgColor="0D0D1A")
         ws["A2"].alignment = Alignment(horizontal="center")
@@ -9624,7 +12215,7 @@ class AutoRentApp(ctk.CTk):
             cell.border    = border
         ws.row_dimensions[3].height = 24
 
-        for r_idx, row in enumerate(self.riwayat_transaksi, 4):
+        for r_idx, row in enumerate(rows_to_export, 4):
             fill = accent_fill if r_idx % 2 == 0 else PatternFill("solid", fgColor="161628")
             # Pad rows to 7 cols for backward compat (skip Status col)
             padded = list(row)[:7] + ["—"] * max(0, 7 - len(row))
@@ -9833,6 +12424,7 @@ class AutoRentApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_aktivasi(self):
         f = self.frames["aktivasi"]
+        is_admin = (self.current_role or "kasir") == "admin"
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
         ctk.CTkLabel(hdr, text="🔑  AKTIVASI & BERLANGGANAN",
@@ -9842,7 +12434,7 @@ class AutoRentApp(ctk.CTk):
         scroll.pack(fill="both", expand=True, padx=20, pady=16)
 
         try:
-            status_lic = LicenseManager.get_status(current_user=self.current_user or "")
+            status_lic = LicenseManager.get_status(current_user=self._resolve_license_user())
         except Exception as e:
             _LOGGER.exception("Gagal get_status di _setup_aktivasi: %s", e)
             status_lic = {"status": "unknown", "sisa_hari": 0, "pesan": f"Error: {e}"}
@@ -9865,12 +12457,13 @@ class AutoRentApp(ctk.CTk):
             lic = LicenseManager.load()
             ctk.CTkLabel(status_card, text=f"Kode: {lic.get('kode_aktivasi', '')}  |  Aktif sejak: {lic.get('tgl_aktivasi', '—')[:10]}",
                          font=FONT_SMALL, text_color=C_MUTED).pack(padx=20, pady=(0, 16))
-            revoke_row = ctk.CTkFrame(status_card, fg_color="transparent")
-            revoke_row.pack(padx=20, pady=(0, 12))
-            ctk.CTkButton(revoke_row, text="🛑  Revoke License", width=160, height=34,
-                          fg_color=C_RED, hover_color="#7A1A1A",
-                          font=("Russo One", 10, "bold"), text_color="white",
-                          command=self._revoke_license).pack(side="left")
+            if is_admin:
+                revoke_row = ctk.CTkFrame(status_card, fg_color="transparent")
+                revoke_row.pack(padx=20, pady=(0, 12))
+                ctk.CTkButton(revoke_row, text="🛑  Revoke License", width=160, height=34,
+                              fg_color=C_RED, hover_color="#7A1A1A",
+                              font=("Russo One", 10, "bold"), text_color="white",
+                              command=self._revoke_license).pack(side="left")
         else:
             ctk.CTkLabel(status_card,
                          text="Aktifkan lisensi untuk menghilangkan batasan trial dan menggunakan semua fitur.",
@@ -10016,6 +12609,17 @@ class AutoRentApp(ctk.CTk):
                       font=FONT_SUB, text_color=C_GREEN,
                       command=lambda: webbrowser.open("https://wa.me/6281270647744")
                       ).pack(fill="x", padx=20, pady=(4, 16))
+
+        if not is_admin:
+            # Mode kasir: hanya lihat status lisensi (mengikuti admin utama),
+            # semua aksi aktivasi/pembayaran disembunyikan.
+            akt_card.pack_forget()
+            bayar_card.pack_forget()
+            pay_card.pack_forget()
+            ctk.CTkLabel(scroll,
+                         text="👤 Mode Kasir — status lisensi mengikuti akun admin utama.\n"
+                              "Aktivasi, perpanjangan & pembayaran hanya dilakukan oleh admin.",
+                         font=FONT_BODY, text_color=C_MUTED, justify="center").pack(pady=10)
 
         ctk.CTkLabel(scroll,
                      text="⚠  Aplikasi akan TERKUNCI otomatis setelah masa trial habis.\n"
@@ -10329,19 +12933,19 @@ class AutoRentApp(ctk.CTk):
 
     def _start_update_checker(self, interval_hours: int = 6):
         """Background loop: cek update via manifest URL atau Git setiap interval_hours."""
-        manifest = ConfigManager.get('update_manifest_url')
-        pubkey = ConfigManager.get('update_pubkey_path') or os.path.join(os.path.dirname(__file__), 'update_pubkey.pem')
-        app_exe = os.path.abspath(__file__)
+        manifest = ConfigManager.get('update_manifest_url') or ""
         # Delay awal agar UI tidak kena spam saat startup
         time.sleep(5)
         while True:
             try:
                 if manifest and manifest.strip():
-                    # Cek via manifest URL
+                    # Cek via manifest URL (hanya deteksi, tidak mengunduh otomatis)
                     try:
-                        from scripts import check_update
-                        msg = check_update.check_for_update(manifest, pubkey, APP_VERSION, app_exe)
-                        if msg and "Versi terbaru terpasang" not in msg:
+                        mf = self._detect_update()
+                        if mf is not None:
+                            msg = (f"Pembaruan v{mf.get('version')} tersedia "
+                                   f"(versi Anda v{APP_VERSION}).\n\n"
+                                   "Klik 'Download & Install' di sidebar untuk memasangnya.")
                             self.after(0, lambda m=msg: messagebox.showinfo("Pembaruan Tersedia", m))
                     except Exception:
                         pass
@@ -10381,15 +12985,12 @@ class AutoRentApp(ctk.CTk):
                 cfg = ConfigManager.load()
                 cfg["update_last_check_ts"] = now_ts
                 ConfigManager.save(cfg)
-                manifest = ConfigManager.get('update_manifest_url')
+                manifest = ConfigManager.get('update_manifest_url') or ""
                 has_update = False
                 if manifest and manifest.strip():
                     try:
-                        from scripts import check_update
-                        pubkey = ConfigManager.get('update_pubkey_path') or os.path.join(os.path.dirname(__file__), 'update_pubkey.pem')
-                        app_exe = os.path.abspath(__file__)
-                        msg = check_update.check_for_update(manifest, pubkey, APP_VERSION, app_exe)
-                        if msg and "Versi terbaru terpasang" not in msg:
+                        mf = self._detect_update()
+                        if mf is not None:
                             has_update = True
                     except Exception:
                         pass
@@ -10421,75 +13022,125 @@ class AutoRentApp(ctk.CTk):
                     w.configure(text="🔄")
 
     def _download_and_install_update(self):
-        """Download latest exe from GitHub releases and install."""
-        url = ConfigManager.get("update_download_url", "")
-        if not url:
-            messagebox.showwarning("⚠ Not Configured",
-                                   "URL download belum dikonfigurasi.\n"
-                                   "Set 'update_download_url' di config atau tab Profil.")
-            return
-        dlg = ctk.CTkToplevel(self)
-        dlg.title("⬇ Download Update")
-        dlg.configure(fg_color=C_BG)
-        dlg.geometry("450x160")
-        dlg.transient(self)
-        dlg.grab_set()
-        ctk.CTkLabel(dlg, text="Mengunduh pembaruan...", font=FONT_SUB,
-                     text_color=C_ACCENT2).pack(pady=(16, 8))
-        progress = ctk.CTkProgressBar(dlg, width=380, height=20,
-                                       fg_color=C_BTN, progress_color=C_ACCENT2)
-        progress.pack(padx=20, pady=(0, 8))
-        progress.set(0)
-        lbl_stat = ctk.CTkLabel(dlg, text="Memulai...", font=FONT_SMALL, text_color=C_MUTED)
-        lbl_stat.pack(pady=(0, 16))
-        def _download_thread():
+        """Download & install update EXE RR Billing Pro dengan aman:
+        manifest (tanda tangan RSA) -> konfirmasi -> unduh (cek sha256) -> ganti exe -> restart.
+        """
+        manifest = ConfigManager.get('update_manifest_url') or ""
+        if not manifest.strip():
+            dlg = ctk.CTkInputDialog(
+                text="URL manifest.json belum diatur.\n\n"
+                     "Tempel URL manifest dari developer, contoh:\n"
+                     "https://github.com/<user>/<repo>/releases/latest/download/manifest.json",
+                title="⬇ Download & Install — URL Manifest")
+            url = dlg.get_input()
+            if not url or not url.strip():
+                return
+            url = url.strip()
             try:
-                import urllib.request
-                import io
-                resp = urllib.request.urlopen(url, timeout=60)
-                total = int(resp.headers.get('content-length', 0))
-                chunk_size = 8192
-                data = io.BytesIO()
-                downloaded = 0
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    data.write(chunk)
-                    downloaded += len(chunk)
-                    if total > 0:
-                        pct = downloaded / total
-                        self.after(0, lambda v=pct: progress.set(v))
-                        self.after(0, lambda d=downloaded, t=total: lbl_stat.configure(
-                            text=f"{d//1024} KB / {t//1024} KB"))
-                dl_path = app_path("update_downloaded.exe")
-                with open(dl_path, "wb") as f:
-                    f.write(data.getvalue())
-                self.after(0, lambda: lbl_stat.configure(text="✅ Unduh selesai!"))
-                self.after(500, lambda: dlg.destroy())
-                if getattr(sys, "frozen", False):
-                    # PyInstaller build: replace running exe
-                    import shutil
-                    cur_exe = sys.executable
-                    bak = cur_exe + ".bak"
-                    try:
-                        shutil.move(cur_exe, bak)
-                        shutil.move(dl_path, cur_exe)
-                        os.remove(bak)
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Gagal mengganti exe: {e}\n"
-                                            f"File update ada di: {dl_path}")
-                        return
-                    messagebox.showinfo("✅ Update Siap",
-                                        "Aplikasi akan restart dengan versi baru.")
-                    self.after(1000, self._do_restart)
-                else:
-                    messagebox.showinfo("✅ Update Siap",
-                                        f"File update diunduh ke:\n{dl_path}\n\n"
-                                        "Jalankan secara manual untuk mengupdate.")
+                ConfigManager.set('update_manifest_url', url)
+            except Exception:
+                pass
+            manifest = url
+        threading.Thread(target=self._download_install_thread,
+                         args=(manifest,), daemon=True).start()
+
+    def _download_install_thread(self, manifest_url: str):
+        try:
+            from scripts import check_update
+
+            # 1) Fetch + verifikasi tanda tangan manifest
+            mf = check_update.fetch_manifest(manifest_url)
+            if not check_update.verify_manifest(mf, ConfigManager.get('update_pubkey_path') or None):
+                self.after(0, lambda: messagebox.showerror(
+                    "Gagal Verifikasi",
+                    "Tanda tangan manifest TIDAK VALID. Update dibatalkan.\n\n"
+                    "Kemungkinan file bukan dari developer RR Billing Pro."))
+                return
+
+            new_ver = str(mf.get('version', '?'))
+            if new_ver == str(APP_VERSION):
+                self.after(0, lambda: messagebox.showinfo(
+                    "Sudah Terbaru", f"Versi {APP_VERSION} sudah terpasang."))
+                return
+
+            # 2) Konfirmasi ke user sebelum mengunduh
+            confirmed = []
+            ev = threading.Event()
+
+            def _ask():
+                r = messagebox.askyesno(
+                    "⬇ Konfirmasi Update",
+                    f"Pembaruan tersedia:\n\n"
+                    f"  Versi baru  : v{new_ver}\n"
+                    f"  Versi Anda  : v{APP_VERSION}\n\n"
+                    f"Unduh dan pasang sekarang?\n"
+                    f"(Aplikasi akan menutup lalu restart otomatis dengan versi baru)")
+                confirmed.append(bool(r))
+                ev.set()
+
+            self.after(0, _ask)
+            if not ev.wait(timeout=120):
+                return
+            if not confirmed or not confirmed[0]:
+                return
+
+            # 3) Dialog progress download
+            dlg = ctk.CTkToplevel(self)
+            dlg.title("⬇ Mengunduh Update")
+            dlg.configure(fg_color=C_BG)
+            dlg.geometry("440x150")
+            dlg.transient(self)
+            dlg.grab_set()
+            ctk.CTkLabel(dlg, text="Mengunduh pembaruan…", font=FONT_SUB,
+                         text_color=C_ACCENT2).pack(pady=(16, 8))
+            bar = ctk.CTkProgressBar(dlg, width=380, height=18,
+                                     fg_color=C_BTN, progress_color=C_ACCENT2)
+            bar.pack(padx=20, pady=(0, 8))
+            bar.set(0)
+            st = ctk.CTkLabel(dlg, text="Memulai…", font=FONT_SMALL, text_color=C_MUTED)
+            st.pack(pady=(0, 16))
+
+            def _prog(done, total):
+                try:
+                    self.after(0, lambda d=done, t=total: (
+                        bar.set((d / t) if t > 0 else 0),
+                        st.configure(text=f"{d // 1024} KB / {max(t, 1) // 1024} KB")))
+                except Exception:
+                    pass
+
+            # 4) Unduh + verifikasi sha256
+            tmp = tempfile.mkdtemp(prefix='rr_update_')
+            asset_path = os.path.join(tmp, "RRBILLINGPRO.exe")
+            try:
+                check_update.download_asset(mf['asset_url'], asset_path,
+                                            mf.get('sha256'), _prog)
             except Exception as e:
-                self.after(0, lambda: lbl_stat.configure(text=f"❌ Gagal: {e}", text_color=C_RED))
-        threading.Thread(target=_download_thread, daemon=True).start()
+                self.after(0, lambda err=str(e): (
+                    dlg.destroy(),
+                    messagebox.showerror("Unduh Gagal", str(err))))
+                return
+
+            # 5) Pasang: ganti exe & restart (batch mandiri saat EXE, helper saat source)
+            app_exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+            try:
+                pesan = check_update.launch_updater(app_exe, asset_path)
+            except Exception as e:
+                self.after(0, lambda err=str(e): (
+                    dlg.destroy(),
+                    messagebox.showerror("Gagal Pasang Update", str(err))))
+                return
+
+            self.after(0, lambda: (
+                dlg.destroy(),
+                messagebox.showinfo(
+                    "✅ Update Siap",
+                    f"v{new_ver} terunduh dan diverifikasi.\n\n{pesan}")))
+            if getattr(sys, "frozen", False):
+                # Tutup aplikasi; batch yang menunggu akan mengganti exe & restart
+                self.after(3000, self.quit)
+        except Exception as e:
+            self.after(0, lambda err=str(e): messagebox.showerror(
+                "Download & Install", str(err)))
 
     def _do_restart(self):
         """Restart aplikasi dengan benar."""
@@ -10522,7 +13173,7 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_license_ui(self):
         """Refresh license status labels after activation."""
-        status = LicenseManager.get_status(current_user=self.current_user or "")
+        status = LicenseManager.get_status(current_user=self._resolve_license_user())
         lic_color = C_GREEN if status["status"] == "active" else C_YELLOW if status["status"] == "trial" else C_RED
         if getattr(self, "lbl_sidebar_license_status", None) is not None:
             self.lbl_sidebar_license_status.configure(text=status["pesan"], text_color=lic_color)
@@ -10691,7 +13342,7 @@ class AutoRentApp(ctk.CTk):
             ("Developer",  "RR CCTV"),
             ("Kontak",     "0812-7064-7744"),
             ("User Aktif", f"{self.current_user} [{self.current_role}]"),
-            ("Lisensi",    LicenseManager.get_status(current_user=self.current_user or "")["pesan"]),
+            ("Lisensi",    LicenseManager.get_status(current_user=self._resolve_license_user())["pesan"]),
         ]:
             row = ctk.CTkFrame(card, fg_color="transparent")
             row.pack(fill="x", padx=30, pady=3)
@@ -10733,6 +13384,46 @@ class AutoRentApp(ctk.CTk):
             lbl_val.pack(side="left", anchor="nw", fill="x", expand=True)
         
         ctk.CTkLabel(rental_card, text="",).pack(pady=4)
+
+        # ── PIN KEAMANAN (Hapus TV & Kursi) ──────────────────────────
+        pin_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)
+        pin_card.pack(fill="x", pady=(0, 16))
+
+        ctk.CTkLabel(pin_card, text="🔒  PIN KEAMANAN (HAPUS TV & KURSI)",
+                     font=("Russo One", 12, "bold"), text_color=C_ACCENT).pack(anchor="w", padx=20, pady=(16, 4))
+        ctk.CTkLabel(pin_card, text="PIN wajib dimasukkan admin saat menghapus TV / kursi warnet.",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(0, 8))
+
+        pin_row = ctk.CTkFrame(pin_card, fg_color="transparent")
+        pin_row.pack(fill="x", padx=20, pady=(0, 8))
+
+        def _refresh_pin_status():
+            ada = bool(self._get_pin_hapus())
+            lbl_pin_status.configure(
+                text="Status: AKTIF" if ada else "Status: BELUM DIBUAT",
+                text_color=C_GREEN if ada else C_RED)
+            btn_pin_set.configure(text="🔑 Ubah PIN" if ada else "🔑 Buat PIN")
+            btn_pin_lihat.configure(state="normal" if ada else "disabled")
+
+        lbl_pin_status = ctk.CTkLabel(pin_row, text="", font=FONT_SUB,
+                                      text_color=C_GREEN, width=150, anchor="w")
+        lbl_pin_status.pack(side="left")
+        btn_pin_set = ctk.CTkButton(pin_row, text="🔑 Buat PIN", height=32, width=120,
+                                    fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                                    command=self._dialog_set_pin_hapus)
+        btn_pin_set.pack(side="left", padx=4)
+        btn_pin_lihat = ctk.CTkButton(pin_row, text="👁 Lihat PIN", height=32, width=110,
+                                      fg_color=C_BTN, hover_color=C_ACCENT2,
+                                      border_width=1, border_color=C_YELLOW,
+                                      font=("Russo One", 9, "bold"), text_color=C_YELLOW,
+                                      command=self._dialog_lihat_pin_hapus)
+        btn_pin_lihat.pack(side="left", padx=4)
+        ctk.CTkButton(pin_row, text="🗑 Hapus PIN", height=32, width=110,
+                      fg_color=C_BTN, hover_color=C_RED,
+                      border_width=1, border_color=C_RED,
+                      font=("Russo One", 9, "bold"), text_color=C_RED,
+                      command=self._hapus_pin_hapus).pack(side="left", padx=4)
+        _refresh_pin_status()
 
         # ── TEMA APLIKASI ─────────────────────────────────────────────
         theme_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)
@@ -11217,7 +13908,7 @@ class AutoRentApp(ctk.CTk):
             self.log_textbox.configure(state="disabled")
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  TAB: USERS (Admin-only) — CRUD untuk akun kasir/admin
+    #  TAB: MANAJEMEN KASIR (Admin-only) — CRUD akun kasir/admin (APTV2-style)
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_users(self):
         f = self.frames.get("users")
@@ -11227,70 +13918,101 @@ class AutoRentApp(ctk.CTk):
             w.destroy()
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="👥  USER MANAGEMENT (Admin)", font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
+        ctk.CTkLabel(hdr, text="👥  MANAJEMEN KASIR (Admin)", font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
 
         content = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         content.pack(fill="both", expand=True, padx=16, pady=12)
 
         form = ctk.CTkFrame(content, fg_color=C_CARD, corner_radius=12)
         form.pack(fill="x", pady=(0,12))
-        ctk.CTkLabel(form, text="Buat Akun Baru", font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=12, pady=(12,6))
+        ctk.CTkLabel(form, text="Tambah Akun Kasir (Sub-Akun Admin)", font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=12, pady=(12,6))
         self.u_username = ctk.CTkEntry(form, placeholder_text="username (a-z0-9_.)", fg_color=C_BTN, text_color=C_TEXT)
         self.u_username.pack(fill="x", padx=12, pady=(0,6))
-        self.u_password = ctk.CTkEntry(form, placeholder_text="password (min 8)", show="●", fg_color=C_BTN, text_color=C_TEXT)
+        self.u_password = ctk.CTkEntry(form, placeholder_text="password (min 6, huruf besar & angka)", show="●", fg_color=C_BTN, text_color=C_TEXT)
         self.u_password.pack(fill="x", padx=12, pady=(0,6))
-        self.u_role = ctk.CTkOptionMenu(form, values=["kasir", "admin"], variable=ctk.StringVar(value="kasir"), fg_color=C_BTN, button_color=C_ACCENT2)
-        self.u_role.pack(anchor="w", padx=12, pady=(0,12))
-        ctk.CTkButton(form, text="➕ Buat Akun", fg_color=C_ACCENT2, command=self._create_user).pack(padx=12, pady=(0,12))
+        self.u_show_pw = ctk.CTkCheckBox(form, text="👁 Lihat Password", fg_color=C_ACCENT2,
+                                         hover_color=C_ACCENT, font=FONT_SMALL, text_color=C_TEXT,
+                                         command=self._toggle_u_show_pw)
+        self.u_show_pw.pack(anchor="w", padx=12, pady=(0,6))
+        ctk.CTkLabel(form, text=f"Role: kasir  •  Sub-akun dari: {self.current_user or '—'}\n"
+                                "Lisensi akun kasir mengikuti admin utama.",
+                     font=FONT_SMALL, text_color=C_MUTED, justify="left").pack(anchor="w", padx=12, pady=(0,6))
+        ctk.CTkButton(form, text="➕ Daftarkan Kasir", fg_color=C_ACCENT2, command=self._create_user).pack(padx=12, pady=(0,12))
 
         list_card = ctk.CTkFrame(content, fg_color=C_PANEL, corner_radius=12)
         list_card.pack(fill="both", expand=True)
-        ctk.CTkLabel(list_card, text="Daftar User", font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=12, pady=(12,6))
+        ctk.CTkLabel(list_card, text="Daftar Akun Kasir", font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=12, pady=(12,6))
 
         self.user_list_box = ctk.CTkScrollableFrame(list_card, fg_color="transparent")
         self.user_list_box.pack(fill="both", expand=True, padx=12, pady=(0,12))
 
         self._refresh_user_list()
 
+    def _toggle_u_show_pw(self):
+        if hasattr(self, "u_password"):
+            show = bool(getattr(self, "u_show_pw", None) and self.u_show_pw.get())
+            self.u_password.configure(show="" if show else "●")
+
     def _refresh_user_list(self):
         for w in self.user_list_box.winfo_children():
             w.destroy()
         users = ConfigManager.get("users", LoginPage.DEFAULT_USERS)
         for uname, u in users.items():
+            role = u.get("role", "kasir") if isinstance(u, dict) else "kasir"
+            # Hanya akun kasir yang ditampilkan (akun admin tidak tampil)
+            if role != "kasir":
+                continue
+            dibuat = (u.get("dibuat", "") or "") if isinstance(u, dict) else ""
+            admin_utama = (u.get("admin_utama", "") or "") if isinstance(u, dict) else ""
             row = ctk.CTkFrame(self.user_list_box, fg_color=C_CARD, corner_radius=8)
             row.pack(fill="x", pady=6)
-            ctk.CTkLabel(row, text=f"{uname}", font=FONT_BODY, text_color=C_TEXT).pack(side="left", padx=12)
-            ctk.CTkLabel(row, text=f"{u.get('role','kasir')}", font=FONT_SMALL, text_color=C_MUTED).pack(side="left", padx=8)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True, padx=12, pady=6)
+            ctk.CTkLabel(info, text=f"{uname}", font=FONT_BODY, text_color=C_TEXT).pack(anchor="w")
+            sub = f"Role: {role}"
+            if admin_utama:
+                sub += f"  •  Sub-akun: {admin_utama}"
+            if dibuat:
+                sub += f"  •  Dibuat: {dibuat}"
+            if uname == self.current_user:
+                sub += "  •  Akun Anda"
+            ctk.CTkLabel(info, text=sub, font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w")
             if uname != self.current_user:
-                ctk.CTkButton(row, text="🗑 Hapus", fg_color=C_RED, command=lambda n=uname: self._delete_user(n)).pack(side="right", padx=8)
-                ctk.CTkButton(row, text="🔁 Reset PW", fg_color=C_BTN, command=lambda n=uname: self._reset_user_pw(n)).pack(side="right", padx=8)
+                ctk.CTkButton(row, text="🔁 Reset PW", fg_color=C_BTN, width=100, command=lambda n=uname: self._reset_user_pw(n)).pack(side="right", padx=4)
+                ctk.CTkButton(row, text="🗑 Hapus", fg_color=C_RED, width=90, command=lambda n=uname: self._delete_user(n)).pack(side="right", padx=8)
 
     def _create_user(self):
         username = self.u_username.get().strip().lower()
         password = self.u_password.get().strip()
-        role = self.u_role.get() if hasattr(self.u_role, 'get') else "kasir"
         if not is_valid_username(username):
             messagebox.showwarning("⚠ Username tidak valid", "Gunakan 4-20 karakter: huruf kecil, angka, ., _")
             return
-        if not is_valid_password(password):
-            messagebox.showwarning("⚠ Password tidak valid", "Password minimal 8 karakter, berisi huruf dan angka")
+        if not is_valid_kasir_password(password):
+            messagebox.showwarning("⚠ Password tidak valid", "Password kasir: minimal 6 karakter, wajib huruf besar & angka")
             return
         cfg = ConfigManager.load()
         users = cfg.get("users", dict(LoginPage.DEFAULT_USERS))
         if username in users:
             messagebox.showwarning("⚠ Sudah ada", "Username sudah dipakai")
             return
-        users[username] = {"password_enc": hash_password(password), "role": role}
+        users[username] = {
+            "password_enc": hash_password(password),
+            "role": "kasir",
+            "admin_utama": self.current_user or "",
+            "dibuat": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
         cfg["users"] = users
         ConfigManager.save(cfg)
-        AuditLogger.log(action="user_created", username=username, status="success", details={"created_by": self.current_user})
-        messagebox.showinfo("✅ Berhasil", f"User '{username}' dibuat sebagai role '{role}'")
+        AuditLogger.log(action="user_created", username=username, status="success",
+                        details={"created_by": self.current_user, "role": "kasir",
+                                 "admin_utama": self.current_user or ""})
+        messagebox.showinfo("✅ Berhasil", f"Akun kasir '{username}' dibuat sebagai sub-akun dari '{self.current_user}'.")
         self.u_username.delete(0, 'end')
         self.u_password.delete(0, 'end')
         self._refresh_user_list()
 
     def _delete_user(self, username):
-        if not messagebox.askyesno("Hapus User", f"Hapus user '{username}'? Ini tidak bisa dibatalkan."):
+        if not messagebox.askyesno("Hapus User", f"Hapus user '{username}'? Akun tidak bisa login lagi.\n\nIni tidak bisa dibatalkan."):
             return
         cfg = ConfigManager.load()
         users = cfg.get("users", {})
@@ -11302,15 +14024,69 @@ class AutoRentApp(ctk.CTk):
             self._refresh_user_list()
 
     def _reset_user_pw(self, username):
-        # Set default temporary password 'changeme123' — admin harus memberi tahu user
+        # Admin memasukkan password baru secara langsung (pendekatan APTV2),
+        # bukan password temporary fix.
         cfg = ConfigManager.load()
         users = cfg.get("users", {})
-        if username in users:
-            users[username]["password_enc"] = hash_password("changeme123")
-            cfg["users"] = users
-            ConfigManager.save(cfg)
-            AuditLogger.log(action="user_pw_reset", username=username, status="success", details={"reset_by": self.current_user})
-            messagebox.showinfo("✅ Reset Pw", f"Password akun '{username}' telah di-reset ke 'changeme123' (mohon ganti segera)")
+        if username not in users:
+            messagebox.showwarning("⚠ Tidak ada", f"User '{username}' tidak ditemukan.")
+            return
+        role = users[username].get("role", "kasir")
+
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("🔁 Reset Password")
+        dlg.geometry("440x330")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text=f"RESET PASSWORD — {username}",
+                     font=("Russo One", 14, "bold"), text_color=C_YELLOW).pack(pady=(16, 2))
+        ctk.CTkLabel(dlg, text=f"Role: {role}",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 10))
+
+        entry = ctk.CTkEntry(dlg, placeholder_text="Password baru", show="●",
+                             fg_color=C_BTN, text_color=C_TEXT, font=("Consolas", 12),
+                             height=36, width=320, justify="center")
+        entry.pack(pady=(0, 4), padx=30)
+
+        show_pw_var = ctk.CTkCheckBox(dlg, text="👁 Lihat Password", fg_color=C_ACCENT2,
+                                      hover_color=C_ACCENT, font=FONT_SMALL, text_color=C_TEXT,
+                                      command=lambda: entry.configure(
+                                          show="" if show_pw_var.get() else "●"))
+        show_pw_var.pack(pady=(0, 4))
+
+        lbl = ctk.CTkLabel(dlg, text="", font=("Consolas", 10), text_color=C_RED)
+        lbl.pack(pady=(0, 6))
+
+        def _save():
+            pw = entry.get().strip()
+            valid = is_valid_kasir_password(pw) if role == "kasir" else is_valid_password(pw)
+            hint = ("Kasir: min 6 karakter, huruf besar & angka"
+                    if role == "kasir" else "Admin: min 8 karakter, huruf & angka")
+            if not pw or not valid:
+                lbl.configure(text=hint)
+                return
+            cfg2 = ConfigManager.load()
+            users2 = cfg2.get("users", {})
+            if username in users2:
+                users2[username]["password_enc"] = hash_password(pw)
+                cfg2["users"] = users2
+                ConfigManager.save(cfg2)
+                AuditLogger.log(action="user_pw_reset", username=username, status="success",
+                                details={"reset_by": self.current_user})
+                dlg.destroy()
+                messagebox.showinfo("✅ Reset Pw", f"Password akun '{username}' berhasil diganti.")
+
+        def _cancel():
+            dlg.destroy()
+
+        ctk.CTkButton(dlg, text="💾 SIMPAN", fg_color=C_YELLOW, hover_color=C_ACCENT,
+                      font=("Russo One", 12, "bold"), command=_save).pack(pady=(8, 4), padx=30, fill="x")
+        ctk.CTkButton(dlg, text="Batal", fg_color="transparent", hover_color=C_BTN,
+                      border_width=1, border_color=C_BORDER, font=("Russo One", 11), text_color=C_MUTED,
+                      command=_cancel).pack(pady=(0, 12), padx=30, fill="x")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
