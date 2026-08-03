@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#FF0B0F1E</color>
+    <color name="card_overlay">#CC0B0F1E</color>
+    <color name="neon_cyan">#FF00E5FF</color>
+    <color name="neon_green">#FF39FF14</color>
+    <color name="neon_red">#FFFF3B30</color>
+    <color name="neon_yellow">#FFFFEB3B</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="text_muted">#FF9AA5B1</color>
+    <color name="accent_purple">#FF9C27B0</color>
+</resources>

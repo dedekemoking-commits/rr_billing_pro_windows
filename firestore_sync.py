@@ -182,13 +182,25 @@ class FirestoreClient:
         return self.set_document(f"billingps_users/{username}", data, merge=merge)
 
     def push_transaction(self, username: str, tx: dict) -> bool:
+        return self.push_transactions(username, [tx])
+
+    def push_transactions(self, username: str, txs: list[dict]) -> bool:
+        """Merge beberapa transaksi ke billingps_users/{username}.transaksiList.
+        Idempoten: transaksi yang id-nya sudah ada di cloud TIDAK ditulis ulang,
+        sehingga sinkronisasi desktop & Android tidak saling menimpa.
+        """
+        if not txs:
+            return True
         doc = self.get_user_doc(username)
-        if doc is None:
-            tx_list = [tx]
-        else:
-            tx_list = doc.get("transaksiList", [])
-            tx_list.insert(0, tx)
-        return self.set_user_doc(username, {"transaksiList": tx_list}, merge=True)
+        tx_list = doc.get("transaksiList", []) if doc else []
+        if not isinstance(tx_list, list):
+            tx_list = []
+        existing_ids = {t.get("id") for t in tx_list if isinstance(t, dict) and t.get("id")}
+        fresh = [t for t in txs if isinstance(t, dict) and t.get("id") not in existing_ids]
+        if not fresh:
+            return True
+        merged = list(fresh) + list(tx_list)
+        return self.set_user_doc(username, {"transaksiList": merged}, merge=True)
 
     def fetch_transactions(self, username: str, max_days: int = 6) -> list[dict]:
         doc = self.get_user_doc(username)
@@ -202,11 +214,26 @@ class FirestoreClient:
         cutoff = time.time() - max_days * 86400
         result = []
         for tx in tx_list:
-            try:
-                tx_time = tx.get("timestamp", tx.get("waktu_epoch", 0))
-                if tx_time >= cutoff:
-                    result.append(tx)
-            except Exception:
+            if not isinstance(tx, dict):
+                result.append(tx)
+                continue
+            tx_time = tx.get("timestamp", tx.get("waktu_epoch", None))
+            if tx_time is None:
+                # Format Android: "yyyy-MM-dd'T'HH:mm:ss'Z'" (waktu lokal, huruf Z literal)
+                waktu = tx.get("waktu", "")
+                if len(str(waktu)) >= 19:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.strptime(str(waktu)[:19], "%Y-%m-%dT%H:%M:%S")
+                        tx_time = dt.timestamp()
+                    except Exception:
+                        tx_time = None
+            else:
+                try:
+                    tx_time = float(tx_time)
+                except Exception:
+                    tx_time = None
+            if tx_time is None or tx_time >= cutoff:
                 result.append(tx)
         return result
 

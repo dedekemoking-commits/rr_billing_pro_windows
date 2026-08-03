@@ -26,6 +26,7 @@ import random
 import uuid
 import tempfile
 import logging
+from urllib.parse import quote
 from email.message import EmailMessage
 _LOGGER = logging.getLogger(__name__)
 from PIL import Image, ImageTk  # ← tambah untuk logo
@@ -41,6 +42,7 @@ import tv_mesin
 from tv_ws_hub import TvWsHub
 from tv_test_api import TvTestApi
 from tv_media_server import TvMediaServer
+from media_prepare import ffmpeg_path, ffmpeg_target_path, prepare_video, FFMPEG_URL
 
 try:
     import matplotlib
@@ -6185,7 +6187,7 @@ class KartuTV(tk.Canvas):
         promo_url = ""
         cur = getattr(ms, 'current_media', None) or {}
         if cur.get("type") == "video" and cur.get("filename"):
-            promo_url = base + cur["filename"]
+            promo_url = base + quote(cur["filename"])
         return logo_url, promo_url
 
     def _ws_send_pause(self, paused):
@@ -6512,24 +6514,223 @@ class KartuTV(tk.Canvas):
             return
         app = self.winfo_toplevel()
         hub = getattr(app, 'tv_ws_hub', None)
+        if kategori == "video":
+            self._kirim_media_video(app, hub, ms, path)
+        else:
+            self._kirim_media_image(app, hub, ms, path)
+
+    def _kirim_media_image(self, app, hub, ms, path):
         try:
             filename = ms.simpan_file(path)
-            media_type = kategori
-            ms.set_current(media_type, filename)
-            url = f"http://{app._get_lan_ip()}:{ms.port}/media/{filename}"
+            ms.set_current("image", filename)
+            # quote(): nama file ber-spasi/karakter non-ASCII aman untuk
+            # semua versi Android.
+            url = f"http://{app._get_lan_ip()}:{ms.port}/media/{quote(filename)}"
             if hub:
-                hub.send_show_media(self.label_tv, media_type, url)
+                hub.send_show_media(self.label_tv, "image", url)
             messagebox.showinfo("✅ Media Terkirim",
                                 f"TV: {self.label_tv}\n{os.path.basename(path)}\n"
-                                f"({media_type})",
+                                f"(gambar)",
                                 parent=self.winfo_toplevel())
         except Exception as e:
             messagebox.showerror("Gagal Kirim Media", str(e),
                                  parent=self.winfo_toplevel())
 
+    def _kirim_media_video(self, app, hub, ms, path):
+        """Video diproses di background: normalisasi format (ffmpeg) supaya
+        jalan di SEMUA Android TV, lalu dikirim ke TV.
+
+        Video yang sudah H.264+faststart dikirim langsung; lainnya di-remux/
+        transcode ke MP4 H.264 Main L4.0 + AAC + faststart (format yang didukung
+        semua merk/versi Android, termasuk box lama Android 11 ke bawah)."""
+        parent_win = self.winfo_toplevel()
+        if not ffmpeg_path():
+            tanya = messagebox.askyesno(
+                "ffmpeg Belum Terpasang",
+                "Untuk menjamin video promo bisa diputar di SEMUA TV Android, "
+                "video perlu dinormalisasi dengan ffmpeg (±87 MB, diunduh sekali).\n\n"
+                "Unduh sekarang? (tanpa ffmpeg, video tetap dikirim apa adanya — "
+                "bisa gagal diputar di TV Android lama)",
+                parent=parent_win)
+            if not tanya:
+                self._kirim_media_image_raw(app, hub, ms, path, "video")
+                return
+            try:
+                ok = self._unduh_ffmpeg_dialog(app)
+            except Exception as e:
+                ok = False
+                self._kirim_media_image_raw(app, hub, ms, path, "video",
+                                            f"ffmpeg gagal diunduh: {e}")
+            if not ok:
+                return
+        # ── Window progress ───────────────────────────────────────────────────
+        win = tk.Toplevel(parent_win)
+        win.title("Siapkan Video Promosi")
+        win.geometry("440x170")
+        win.transient(app)
+        win.resizable(False, False)
+        tk.Label(win, text="Menganalisis & menyiapkan video...").pack(pady=(14, 6))
+        bar = ttk.Progressbar(win, mode="indeterminate", length=380)
+        bar.pack(padx=20, pady=4)
+        lbl_status = tk.Label(win, text="", font=("Segoe UI", 9))
+        lbl_status.pack(pady=2)
+        state = {"batal": False, "mulai": time.time()}
+
+        def on_batal():
+            state["batal"] = True
+        btn_batal = tk.Button(win, text="Batal", command=on_batal)
+        btn_batal.pack(pady=8)
+        bar.start(12)
+
+        def update_status(progress: float) -> None:
+            # progress = detik video yang sudah diproses
+            try:
+                m = int(progress // 60)
+                s = int(progress % 60)
+                lbl_status.config(text=f"Mengonversi video... {m}m {s:02d}s")
+            except Exception:
+                pass
+
+        def selesai(ok, pesan):
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            if ok:
+                messagebox.showinfo("✅ Video Terkirim", pesan,
+                                    parent=self.winfo_toplevel())
+            else:
+                messagebox.showerror("Video Gagal", pesan,
+                                     parent=self.winfo_toplevel())
+
+        def worker():
+            tmp_out = os.path.join(
+                tempfile.gettempdir(),
+                f"rr_promo_{int(time.time() * 1000)}.mp4")
+            try:
+                action = prepare_video(
+                    path, tmp_out,
+                    progress_cb=update_status,
+                    cancel=lambda: state["batal"])
+                filename = ms.simpan_file(tmp_out)
+                ms.set_current("video", filename)
+                url = f"http://{app._get_lan_ip()}:{ms.port}/media/{quote(filename)}"
+                if hub:
+                    hub.send_show_media(self.label_tv, "video", url)
+                ket = {"copy": "langsung (format sudah kompatibel)",
+                       "remux": "dirapikan (faststart)",
+                       "transcode": "dikonversi ke H.264 + faststart"}.get(action, action)
+                app.after(0, lambda: selesai(
+                    True, f"TV: {self.label_tv}\n{os.path.basename(path)}\n"
+                          f"→ {os.path.basename(filename)}\n({ket})"))
+            except Exception as e:
+                app.after(0, lambda: selesai(False, str(e)))
+            finally:
+                try:
+                    if os.path.isfile(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _kirim_media_image_raw(self, app, hub, ms, path, media_type, info=""):
+        """Fallback: kirim file apa adanya (tanpa normalisasi)."""
+        try:
+            filename = ms.simpan_file(path)
+            ms.set_current(media_type, filename)
+            url = f"http://{app._get_lan_ip()}:{ms.port}/media/{quote(filename)}"
+            if hub:
+                hub.send_show_media(self.label_tv, media_type, url)
+            pesan = (f"TV: {self.label_tv}\n{os.path.basename(path)}\n"
+                     f"({media_type} — dikirim apa adanya)")
+            if info:
+                pesan += f"\n\n{info}"
+            messagebox.showinfo("⚠ Media Terkirim (tanpa normalisasi)", pesan,
+                                parent=self.winfo_toplevel())
+        except Exception as e:
+            messagebox.showerror("Gagal Kirim Media", str(e),
+                                 parent=self.winfo_toplevel())
+
+    def _unduh_ffmpeg_dialog(self, app) -> bool:
+        """Unduh ffmpeg.exe sekali (dari GitHub release) dengan progress bar."""
+        import urllib.request
+
+        dest = ffmpeg_target_path()
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        win = tk.Toplevel(app)
+        win.title("Unduh ffmpeg (±87 MB)")
+        win.geometry("460x150")
+        win.transient(app)
+        win.resizable(False, False)
+        tk.Label(win, text="Mengunduh ffmpeg untuk normalisasi video...").pack(pady=(14, 6))
+        bar = ttk.Progressbar(win, mode="determinate", length=400, maximum=100)
+        bar.pack(padx=20, pady=4)
+        lbl = tk.Label(win, text="0%", font=("Segoe UI", 9))
+        lbl.pack()
+        win.update_idletasks()
+
+        hasil = {}
+
+        def reporthook(count, block_size, total_size):
+            if total_size and total_size > 0:
+                pct = min(100.0, count * block_size * 100.0 / total_size)
+                try:
+                    bar["value"] = pct
+                    lbl.config(text=f"{int(pct)}%  ({count * block_size / 1048576:.0f} MB)")
+                except Exception:
+                    pass
+
+        def worker():
+            part = dest + ".part"
+            try:
+                urllib.request.urlretrieve(FFMPEG_URL, part, reporthook=reporthook)
+                os.replace(part, dest)
+                # verifikasi bisa dijalankan
+                rc = subprocess.run([dest, "-version"],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode
+                hasil["ok"] = (rc == 0)
+                hasil["pesan"] = "" if rc == 0 else "ffmpeg tidak dapat dijalankan"
+            except Exception as e:
+                hasil["ok"] = False
+                hasil["pesan"] = str(e)
+            finally:
+                try:
+                    if os.path.isfile(part):
+                        os.remove(part)
+                except Exception:
+                    pass
+                app.after(0, finish)
+
+        def finish():
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            if hasil.get("ok"):
+                messagebox.showinfo("✅ ffmpeg Siap",
+                                    "ffmpeg berhasil diunduh.\nVideo promosi "
+                                    "sekarang akan dinormalisasi otomatis.",
+                                    parent=app)
+            else:
+                messagebox.showerror("Unduh ffmpeg Gagal",
+                                     hasil.get("pesan", "Coba lagi nanti."),
+                                     parent=app)
+
+        threading.Thread(target=worker, daemon=True).start()
+        try:
+            win.wait_window()  # tunggu unduhan selesai (thread menutup window)
+        except Exception:
+            pass
+        return bool(hasil.get("ok"))
+
     def _buka_media_video(self):
-        self._pilih_media("video", [("Video", "*.mp4 *.webm *.3gp"), ("Semua", "*.*")],
-                          "Pilih video promosi")
+        self._pilih_media(
+            "video",
+            [("Video", "*.mp4 *.webm *.3gp *.ts *.mkv *.mov *.avi"),
+             ("Semua", "*.*")],
+            "Pilih video promosi")
 
     def _buka_media_gambar(self):
         self._pilih_media("image", [("Gambar", "*.jpg *.jpeg *.png *.gif *.webp"),

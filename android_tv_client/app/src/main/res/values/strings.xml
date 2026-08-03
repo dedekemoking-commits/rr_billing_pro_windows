@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RR Billing TV</string>
+    <string name="notification_channel_name">RR Billing TV Service</string>
+    <string name="notification_title">RR Billing TV Aktif</string>
+    <string name="notification_text">Menunggu instruksi kasir…</string>
+</resources>

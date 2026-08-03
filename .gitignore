@@ -32,6 +32,38 @@ dist/
 *.exe
 Output/
 
+# Hasil ekstrak/inspeksi build
+RRBILLINGPRO.exe_extracted/
+
+# Log & file kerja lokal
+*.log
+*.bak
+*.tmp
+server_pid.txt
+_rr_salt
+.rr_salt
+_syntax_ok.txt
+firebase-debug.log
+rr_billing_github_users.json
+
+# Media & bukti transaksi (konten user)
+media_promo/
+invoices_bukti/
+
+# Kunci privat ADB pairing TV - JANGAN commit (cert publik boleh)
+android_tv_certs/key_*.pem
+
+# Android build artifacts
+android_tv_client/.gradle/
+android_tv_client/build/
+android_tv_client/local.properties
+android_tv_client/app/build/
+
+# Folder backup/deploy lokal
+deploy_warnet/
+RRBillingPro_Package_*/
+*.rar
+
 # Installer artifacts
 inno_build/
 installer/
