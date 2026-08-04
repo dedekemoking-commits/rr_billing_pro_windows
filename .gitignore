@@ -31,6 +31,11 @@ dist/
 *.spec
 *.exe
 Output/
+RRBillingPro_Package/_internal/
+RRBillingPro_Package/RRBILLINGPRO/
+
+# Folder kiriman update manual (exe besar, bukan untuk repo)
+Update_v2.4.1_Manual/
 
 # Hasil ekstrak/inspeksi build
 RRBILLINGPRO.exe_extracted/
@@ -39,7 +44,11 @@ RRBILLINGPRO.exe_extracted/
 *.log
 *.bak
 *.tmp
+*.lock
 server_pid.txt
+server_log.txt
+server_err.txt
+InstallUtil.InstallLog
 _rr_salt
 .rr_salt
 _syntax_ok.txt
