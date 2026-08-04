@@ -55,8 +55,12 @@ namespace BillingLockScreenUI
         [DllImport("user32.dll", EntryPoint = "SystemParametersInfo")]
         private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 
+        [DllImport("powrprof.dll")]
+        private static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
+
         private const uint SPI_SETSCREENSAVERRUNNING = 0x0061;
         private const uint SPIF_SENDWININICHANGE = 0x02;
+        private const int SLEEP_AFTER_SECONDS = 60;
 
         // ── UI Components ──────────────────────────────────────────────
         private Label _lblMessage;
@@ -67,6 +71,7 @@ namespace BillingLockScreenUI
         private PictureBox _logoBox;
         private System.Windows.Forms.Timer _timer;
         private DateTime _startTime;
+        private bool _sleepTriggered = false;
 
         // ── Server communication (optional, for real-time status) ──────
         private TcpClient _tcpClient;
@@ -151,7 +156,7 @@ namespace BillingLockScreenUI
             {
                 Size = new Size(96, 96),
                 BackColor = Color.Transparent,
-                Image = DrawLockIcon(96, 96),
+                Image = TryLoadLogo() ?? DrawLockIcon(96, 96),
                 SizeMode = PictureBoxSizeMode.CenterImage,
             };
 
@@ -253,6 +258,18 @@ namespace BillingLockScreenUI
             if (elapsed.TotalMinutes >= 1)
             {
                 _lblStatus.Text = $"Status: Terkunci ({elapsed.TotalMinutes:F0} menit)";
+            }
+
+            // Hemat listrik: tidurkan PC bila lockscreen dibiarkan ≥ 1 menit.
+            // Setelah bangun, PC masih dalam keadaan terkunci (state dipelihara tray app).
+            if (!_sleepTriggered && elapsed.TotalSeconds >= SLEEP_AFTER_SECONDS)
+            {
+                _sleepTriggered = true;
+                try
+                {
+                    SetSuspendState(false, false, false);
+                }
+                catch { }
             }
         }
 
@@ -356,6 +373,25 @@ namespace BillingLockScreenUI
 
         [DllImport("user32.dll")]
         static extern IntPtr GetThreadDesktop(uint dwThreadId);
+
+        // ── Logo dari file eksternal (opsional) ───────────────────────
+        // Letakkan lockscreen_logo.png (atau .jpg/.jpeg) di folder yang sama
+        // dengan BillingLockScreenUI.exe → tampil di kotak ikon menggantikan emoji.
+        // Ganti logo = cukup replace file-nya, tanpa build ulang.
+        private Image TryLoadLogo()
+        {
+            try
+            {
+                foreach (string name in new[] { "lockscreen_logo.png", "lockscreen_logo.jpg", "lockscreen_logo.jpeg" })
+                {
+                    string p = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name);
+                    if (File.Exists(p))
+                        return Image.FromFile(p);
+                }
+            }
+            catch { }
+            return null;
+        }
 
         // ── Draw a lock icon ───────────────────────────────────────────
         private Bitmap DrawLockIcon(int width, int height)

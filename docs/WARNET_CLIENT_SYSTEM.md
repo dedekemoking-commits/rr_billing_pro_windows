@@ -3,6 +3,11 @@
 Dokumentasi alur koneksi antara **server billing** (PC kasir, `main.py`) dan
 **client warnet** (PC warnet, `BillingClientService.exe` C#).
 
+> **Cara memasang client warnet ke PC warnet (flashdisk):**
+> baca `docs/PANDUAN_PASANG_CLIENT_WARNET.md` — berisi setup server
+> (daftarkan client + hash password + firewall), pasang di PC client
+> (`RRBillingPro_Client_Package\INSTALL_CLIENT.bat`), verifikasi & troubleshooting.
+
 ## Arsitektur
 
 ```
@@ -109,6 +114,27 @@ Edit `rr_billing_config.json` (tidak ada UI khusus):
 | Selesai manual (SELESAI) | `pending_commands: LOCK` (reason `selesai_manual`) |
 | Tombol ON/OFF kartu | `UNLOCK`/`LOCK` (reason `manual_on`/`manual_off`) + peringatan bila client offline |
 | Client request add_time | Tambah waktu langsung di kartu + catat transaksi |
+
+## Lock Persisten (Reboot Sangat Aman)
+
+- Client menyimpan state lock ke `rr_billing_lock_state.json` di folder
+  install (`C:\RRBillingClient`). Saat PC client reboot, service membaca
+  file tersebut dan **PC terkunci otomatis kembali** setelah user login
+  (tray app mengeksekusi lock ≤3 detik). Perintah UNLOCK dari server
+  menghapus state.
+- Server menandai kartu yang mengirim LOCK (`pc_locked`) dan meng-queue
+  ulang LOCK tiap ±60 detik bila kartu tidak punya sesi aktif — recovery
+  untuk kasus server `main.py` restart (antrean `pending_commands` hilang).
+- Auto-lock fail-safe: koneksi client ↔ server terputus > 15 detik setelah
+  pernah terhubung → PC auto-lock.
+
+## Notifikasi Realtime (Tray, kanan bawah)
+
+- Ikon tray menampilkan countdown sisa waktu langsung (update tiap 3 detik
+  poll): `🟢 <paket> mm:ss`.
+- Balloon notifikasi otomatis:
+  - Sesi baru dimulai → info paket + sisa waktu + total.
+  - Sisa waktu tersisa **5 / 3 / 1 menit** → peringatan untuk tambah waktu.
 
 ## Status Koneksi di UI
 

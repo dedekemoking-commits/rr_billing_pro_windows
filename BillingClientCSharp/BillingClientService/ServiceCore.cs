@@ -23,8 +23,10 @@ namespace BillingClientService
         private int _serverPort = 5000;
         private string _clientId = "WARNET_01";
         private string _password = "admin123";
-        private int _heartbeatIntervalMs = 5000;
+        private int _heartbeatIntervalMs = 3000;
         private int _heartbeatTimeoutMs = 15000;
+        private int _watchdogIntervalMs = 10000;
+        private int _trayHangTimeoutMs = 30000;
         private string _lockAppPath = "";
 
         // ── State ──────────────────────────────────────────────────────
@@ -33,11 +35,15 @@ namespace BillingClientService
         private readonly object _tcpLock = new object();
         private CancellationTokenSource _cts;
         private Thread _mainThread;
+        private Thread _watchdogThread;
         private DateTime _lastHeartbeatResponse = DateTime.MinValue;
+        private DateTime _lastTrayPing = DateTime.MinValue;
         private bool _isLocked = false;
         private string _pcId = null;
         private string _sessionToken = null;
         private string _kursiName = null;  // Nama kursi dari server
+        private string _lockMessage = "";
+        private int _getStatusFailCount = 0;
 
         // ── Billing status cache (for IPC) ─────────────────────────────
         private string _billingPaket = "-";
@@ -66,6 +72,7 @@ namespace BillingClientService
             try
             {
                 LoadConfig();
+                LoadLockState();
                 _cts = new CancellationTokenSource();
 
                 // Start named pipe server for IPC with tray app
@@ -82,6 +89,15 @@ namespace BillingClientService
                     Name = "BillingServiceMain",
                 };
                 _mainThread.Start();
+
+                // Watchdog: pastikan tray app (pengeksekusi lock) selalu hidup
+                // di user session, termasuk setelah PC reboot.
+                _watchdogThread = new Thread(WatchdogLoop)
+                {
+                    IsBackground = true,
+                    Name = "BillingWatchdog",
+                };
+                _watchdogThread.Start();
 
                 Log("Service started.");
             }
@@ -115,6 +131,7 @@ namespace BillingClientService
         public void StartForConsole()
         {
             LoadConfig();
+            LoadLockState();
             _cts = new CancellationTokenSource();
 
             _pipeThread = new Thread(PipeServerLoop)
@@ -130,6 +147,13 @@ namespace BillingClientService
                 Name = "BillingServiceMain",
             };
             _mainThread.Start();
+
+            _watchdogThread = new Thread(WatchdogLoop)
+            {
+                IsBackground = true,
+                Name = "BillingWatchdog",
+            };
+            _watchdogThread.Start();
 
             Log("Service started (console mode).");
         }
@@ -211,7 +235,15 @@ namespace BillingClientService
                 var req = ManualJsonDeserialize(request);
                 string action = req.GetValueOrDefault("action", "")?.ToString();
 
-                switch (action?.ToUpperInvariant())
+                // Tray app hidup & sehat = selalu poll GET_STATUS/GET_BILLING
+                // atau PING via pipe. Dipakai watchdog untuk deteksi hang.
+                string actionUpper = action?.ToUpperInvariant();
+                if (actionUpper == "GET_STATUS" || actionUpper == "GET_BILLING" || actionUpper == "PING")
+                {
+                    _lastTrayPing = DateTime.UtcNow;
+                }
+
+                switch (actionUpper)
                 {
                     case "GET_STATUS":
                         lock (_billingLock)
@@ -221,6 +253,7 @@ namespace BillingClientService
                                 ["status"] = "OK",
                                 ["connected"] = IsConnected(),
                                 ["is_locked"] = _isLocked,
+                                ["lock_message"] = _lockMessage,
                                 ["pc_id"] = _pcId ?? "",
                                 ["client_id"] = _clientId,
                                 ["kursi_name"] = _kursiName ?? "",
@@ -310,16 +343,26 @@ namespace BillingClientService
                         }
                     }
 
-                    // Send heartbeat (PING)
+                    // GET_STATUS rangkap sebagai heartbeat: server sudah
+                    // memperbarui last_heartbeat utk GET_STATUS, jadi PING
+                    // terpisah dihapus — 1 round-trip per siklus (lebih cepat,
+                    // respons tidak bisa tertukar/tertinggal di buffer).
                     if (IsConnected())
                     {
-                        SendHeartbeat();
-                    }
-
-                    // Send GET_STATUS to get billing data + pending commands
-                    if (IsConnected())
-                    {
-                        SendGetStatus();
+                        if (SendGetStatus())
+                        {
+                            _getStatusFailCount = 0;
+                        }
+                        else
+                        {
+                            _getStatusFailCount++;
+                            if (_getStatusFailCount >= 3)
+                            {
+                                Log("GET_STATUS tanpa respons berulang. Reconnect...");
+                                Disconnect();
+                                _getStatusFailCount = 0;
+                            }
+                        }
                     }
 
                     // Check heartbeat timeout
@@ -487,12 +530,12 @@ namespace BillingClientService
         // ════════════════════════════════════════════════════════════════
         //  GET_STATUS (poll billing data + pending commands)
         // ════════════════════════════════════════════════════════════════
-        private void SendGetStatus()
+        private bool SendGetStatus()
         {
             try
             {
                 if (string.IsNullOrEmpty(_sessionToken) || string.IsNullOrEmpty(_pcId))
-                    return;
+                    return false;
 
                 var req = new Dictionary<string, object>
                 {
@@ -505,7 +548,7 @@ namespace BillingClientService
                 SendJson(req);
 
                 var response = ReceiveJson();
-                if (response == null) return;
+                if (response == null) return false;
 
                 // Update last heartbeat on any response
                 _lastHeartbeatResponse = DateTime.UtcNow;
@@ -535,11 +578,25 @@ namespace BillingClientService
                             }
                         }
                     }
+
+                    // Fallback LOCK dari server: field is_locked=true dikirim
+                    // saat kartu ditandai pc_locked (waktu habis / selesai /
+                    // manual OFF). Dipakai bila pending_commands terlewat,
+                    // mis. misalignment respons atau server restart.
+                    bool serverLocked = billing.GetValueOrDefault("is_locked", false)?.ToString() == "True";
+                    if (serverLocked && !_isLocked)
+                    {
+                        Log("[GetStatus] Fallback is_locked=true dari server -> lock PC.");
+                        LockWorkstation("Waktu PC telah habis. Silahkan hubungi admin.");
+                    }
                 }
+
+                return true;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[GetStatus] Error: {ex.Message}");
+                return false;
             }
         }
 
@@ -587,6 +644,8 @@ namespace BillingClientService
 
             Log($"Lock flag set: {message}");
             _isLocked = true;
+            _lockMessage = message ?? "";
+            SaveLockState();
             SendClientStatus("locked");
         }
 
@@ -600,6 +659,8 @@ namespace BillingClientService
 
             Log("Unlock flag set.");
             _isLocked = false;
+            _lockMessage = "";
+            ClearLockState();
             SendClientStatus("unlocked");
         }
 
@@ -634,6 +695,203 @@ namespace BillingClientService
             {
                 Log($"SendStatus error: {ex.Message}");
             }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  WATCHDOG — pastikan tray app selalu berjalan di user session
+        // ════════════════════════════════════════════════════════════════
+        private void WatchdogLoop(object obj)
+        {
+            var token = _cts.Token;
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    EnsureTrayAppRunning();
+                }
+                catch (Exception ex)
+                {
+                    Log($"Watchdog error: {ex.Message}");
+                }
+                SleepWithCancellation(_watchdogIntervalMs, token);
+            }
+        }
+
+        private void EnsureTrayAppRunning()
+        {
+            if (_cts.IsCancellationRequested) return;
+
+            // Sudah ada tray app yang jalan? (di session mana pun)
+            try
+            {
+                Process[] procs = Process.GetProcessesByName("BillingClientApp");
+                if (procs != null && procs.Length > 0)
+                {
+                    // Proses ada tapi tidak pernah/tidak lagi poll pipe (hang):
+                    // kill lalu relaunch. Beri jeda untuk tray yang baru start.
+                    bool hung = _lastTrayPing != DateTime.MinValue &&
+                                (DateTime.UtcNow - _lastTrayPing).TotalMilliseconds > _trayHangTimeoutMs;
+                    if (!hung) return;
+
+                    Log($"Watchdog: tray app hang (ping terakhir >{_trayHangTimeoutMs / 1000}s lalu). Restart...");
+                    foreach (Process p in procs)
+                    {
+                        try { p.Kill(); } catch { }
+                    }
+                }
+            }
+            catch { }
+
+            string appPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BillingClientApp.exe");
+            if (!File.Exists(appPath))
+            {
+                Log("Watchdog: BillingClientApp.exe tidak ditemukan di folder install.");
+                return;
+            }
+
+            uint sessionId = WTSGetActiveConsoleSessionId();
+            if (sessionId == 0 || sessionId == INVALID_SESSION_ID)
+            {
+                // Belum ada user yang login — coba lagi di tick berikutnya.
+                return;
+            }
+
+            IntPtr userToken = IntPtr.Zero;
+            if (!WTSQueryUserToken(sessionId, out userToken) || userToken == IntPtr.Zero)
+            {
+                Log($"Watchdog: WTSQueryUserToken gagal (session {sessionId}, err {Marshal.GetLastWin32Error()}).");
+                return;
+            }
+
+            try
+            {
+                IntPtr primary = IntPtr.Zero;
+                const int TOKEN_ALL = TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY;
+                if (!DuplicateTokenEx(userToken, TOKEN_ALL, IntPtr.Zero,
+                                      SecurityImpersonation, TokenPrimary, out primary))
+                {
+                    Log($"Watchdog: DuplicateTokenEx gagal (err {Marshal.GetLastWin32Error()}).");
+                    return;
+                }
+
+                try
+                {
+                    IntPtr env = IntPtr.Zero;
+                    bool haveEnv = false;
+                    try { haveEnv = CreateEnvironmentBlock(out env, primary, false); }
+                    catch { }
+
+                    var si = new STARTUPINFO();
+                    si.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+                    si.lpDesktop = "winsta0\\default";
+                    si.dwFlags = STARTF_USESHOWWINDOW;
+                    si.wShowWindow = SW_SHOWNORMAL;
+
+                    string cmdLine = "\"" + appPath + "\"";
+                    PROCESS_INFORMATION pi;
+                    bool ok = CreateProcessAsUser(
+                        primary, null, cmdLine,
+                        IntPtr.Zero, IntPtr.Zero, false, 0,
+                        haveEnv ? env : IntPtr.Zero, null, ref si, out pi);
+
+                    if (haveEnv) { try { DestroyEnvironmentBlock(env); } catch { } }
+
+                    if (ok)
+                    {
+                        CloseHandle(pi.hThread);
+                        CloseHandle(pi.hProcess);
+                        Log($"Watchdog: BillingClientApp diluncurkan ulang di session {sessionId}.");
+                    }
+                    else
+                    {
+                        Log($"Watchdog: CreateProcessAsUser gagal (err {Marshal.GetLastWin32Error()}).");
+                    }
+                }
+                finally
+                {
+                    CloseHandle(primary);
+                }
+            }
+            finally
+            {
+                CloseHandle(userToken);
+            }
+        }
+
+        // ── P/Invoke untuk watchdog (launch di user session aktif) ─────
+        private const uint INVALID_SESSION_ID = 0xFFFFFFFF;
+        private const int TOKEN_ASSIGN_PRIMARY = 0x0001;
+        private const int TOKEN_DUPLICATE = 0x0002;
+        private const int TOKEN_QUERY = 0x0008;
+        private const int SecurityImpersonation = 2;
+        private const int TokenPrimary = 1;
+        private const uint STARTF_USESHOWWINDOW = 0x00000001;
+        private const ushort SW_SHOWNORMAL = 1;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WTSGetActiveConsoleSessionId();
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSQueryUserToken(uint sessionId, out IntPtr phToken);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DuplicateTokenEx(
+            IntPtr hExistingToken, int dwDesiredAccess, IntPtr lpTokenAttributes,
+            int ImpersonationLevel, int TokenType, out IntPtr phNewToken);
+
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
+
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcessAsUser(
+            IntPtr hToken, string lpApplicationName, string lpCommandLine,
+            IntPtr lpProcessAttributes, IntPtr lpThreadAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool bInheritHandles, uint dwCreationFlags,
+            IntPtr lpEnvironment, string lpCurrentDirectory,
+            ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public uint cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttribute;
+            public uint dwFlags;
+            public ushort wShowWindow;
+            public ushort cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public uint dwProcessId;
+            public uint dwThreadId;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -886,6 +1144,73 @@ namespace BillingClientService
                 }
             }
             return sb.ToString();
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  LOCK STATE PERSISTENCE — lock tetap terkunci setelah reboot
+        // ════════════════════════════════════════════════════════════════
+        private const string LOCK_STATE_FILE = "rr_billing_lock_state.json";
+
+        private string LockStatePath()
+        {
+            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LOCK_STATE_FILE);
+        }
+
+        private void SaveLockState()
+        {
+            try
+            {
+                var state = new Dictionary<string, object>
+                {
+                    ["is_locked"] = true,
+                    ["lock_message"] = _lockMessage ?? "",
+                    ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                };
+                string json = ManualJsonSerialize(state);
+                File.WriteAllText(LockStatePath(), json);
+                Log("Lock state disimpan (persisten lintas reboot).");
+            }
+            catch (Exception ex)
+            {
+                Log($"SaveLockState error: {ex.Message}");
+            }
+        }
+
+        private void ClearLockState()
+        {
+            try
+            {
+                string path = LockStatePath();
+                if (File.Exists(path))
+                    File.Delete(path);
+                Log("Lock state dihapus.");
+            }
+            catch (Exception ex)
+            {
+                Log($"ClearLockState error: {ex.Message}");
+            }
+        }
+
+        private void LoadLockState()
+        {
+            try
+            {
+                string path = LockStatePath();
+                if (!File.Exists(path)) return;
+
+                string json = File.ReadAllText(path);
+                var state = ManualJsonDeserialize(json);
+                if (state.TryGetValue("is_locked", out var locked) && locked is bool b && b)
+                {
+                    _isLocked = true;
+                    _lockMessage = state.GetValueOrDefault("lock_message", "")?.ToString() ?? "";
+                    Log("Lock state dimuat dari file — PC akan terkunci kembali setelah login.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"LoadLockState error: {ex.Message}");
+            }
         }
 
         // ════════════════════════════════════════════════════════════════

@@ -316,6 +316,111 @@ class DeployManager:
 
         return sorted(self.results, key=lambda x: (not x["success"], x["host"]))
 
+    # ════════════════════════════════════════════════════════════════════
+    #  DEPLOY PAKET CLIENT WARNET (3 exe + config + installer)
+    # ════════════════════════════════════════════════════════════════════
+    #  Urutan aman (pengganti copy manual):
+    #   1. stop service RRBillingClientService
+    #   2. taskkill tray (BillingClientApp) + lock UI (BillingLockScreenUI)
+    #   3. copy 3 exe + INSTALL_CLIENT.bat (+ config jika --keep-config tidak dipakai)
+    #   4. install ulang service (jika perlu) + net start
+    #   5. start tray app (jika belum jalan)
+    # ════════════════════════════════════════════════════════════════════
+
+    PKG_FILES = ["BillingClientService.exe", "BillingLockScreenUI.exe",
+                 "BillingClientApp.exe", "INSTALL_CLIENT.bat"]
+    SERVICE_NAME = "RRBillingClientService"
+
+    def deploy_package(self, host, pkg_dir, remote_dir="C:\\RRBillingClient",
+                       keep_config=False, start_tray=True):
+        """Deploy paket client lengkap ke satu PC via SSH.
+
+        Args:
+            host: IP client PC
+            pkg_dir: Folder lokal berisi 3 exe + INSTALL_CLIENT.bat (+ config opsional)
+            remote_dir: Direktori tujuan di client PC
+            keep_config: True = JANGAN timpa rr_billing_config.json yang ada di client
+            start_tray: True = jalankan BillingClientApp.exe setelah selesai
+
+        Returns:
+            dict: {"host": str, "success": bool, "message": str, "steps": list}
+        """
+        steps = []
+
+        # 0. Validasi paket
+        missing = [f for f in self.PKG_FILES
+                   if not os.path.isfile(os.path.join(pkg_dir, f))]
+        if missing:
+            return {"host": host, "success": False,
+                    "message": f"Paket tidak lengkap: {', '.join(missing)}", "steps": []}
+
+        # 1. Test koneksi
+        ok, msg = self.test_connection(host)
+        if not ok:
+            return {"host": host, "success": False, "message": msg, "steps": []}
+        steps.append(("test", True, msg))
+
+        # 2. Stop service + kill proses lama (tray, lock UI)
+        stop_cmd = (f'net stop {self.SERVICE_NAME} 2>nul & '
+                    f'taskkill /f /im BillingClientApp.exe 2>nul & '
+                    f'taskkill /f /im BillingLockScreenUI.exe 2>nul & '
+                    f'timeout /t 2 /nobreak >nul & exit /b 0')
+        self.exec_command(host, stop_cmd)
+        steps.append(("stop", True, "Service & proses client dihentikan"))
+
+        # 3. Buat direktori remote
+        self.exec_command(host, f'if not exist "{remote_dir}" mkdir "{remote_dir}"')
+
+        # 4. Kirim 3 exe + installer
+        sent_ok = True
+        for fname in self.PKG_FILES:
+            ok, msg = self.send_file(host,
+                                     os.path.join(pkg_dir, fname),
+                                     f"{remote_dir}\\{fname}")
+            if not ok:
+                sent_ok = False
+                steps.append(("send_file", False, f"{fname}: {msg}"))
+                break
+            steps.append(("send_file", True, f"{fname} terkirim"))
+        if not sent_ok:
+            return {"host": host, "success": False, "message": "Gagal kirim file", "steps": steps}
+
+        # 5. Kirim config (kecuali keep_config / tidak ada di paket)
+        cfg_local = os.path.join(pkg_dir, "rr_billing_config.json")
+        if not keep_config and os.path.isfile(cfg_local):
+            ok, msg = self.send_file(host, cfg_local, f"{remote_dir}\\rr_billing_config.json")
+            if not ok:
+                steps.append(("send_file", False, f"config: {msg}"))
+            else:
+                steps.append(("send_file", True, "rr_billing_config.json terkirim"))
+
+        # 6. Instal service (idempotent: hapus dulu jika ada, pasang lagi)
+        svc_exe = f'"{remote_dir}\\BillingClientService.exe"'
+        install_cmd = (f'net stop {self.SERVICE_NAME} 2>nul & '
+                       f'{svc_exe} -u 2>nul & '
+                       f'{svc_exe} -i & '
+                       f'net start {self.SERVICE_NAME}')
+        ok, msg = self.exec_command(host, install_cmd)
+        steps.append(("install_svc", ok, "Service dipasang & dijalankan" if ok else msg))
+        if not ok:
+            return {"host": host, "success": False,
+                    "message": f"Install service gagal: {msg}", "steps": steps}
+
+        # 7. Jalankan tray app (jika belum jalan)
+        if start_tray:
+            tray_cmd = (f'tasklist /fi "IMAGENAME eq BillingClientApp.exe" '
+                        f'2>nul | findstr /i "BillingClientApp.exe" >nul || '
+                        f'start "" "{remote_dir}\\BillingClientApp.exe"')
+            self.exec_command(host, tray_cmd)
+            steps.append(("start_tray", True, "Tray app dijalankan"))
+
+        return {
+            "host": host,
+            "success": True,
+            "message": f"Paket client ter-deploy ke {host}",
+            "steps": steps,
+        }
+
     def stop(self):
         """Hentikan semua operasi."""
         self._stop_flag = True

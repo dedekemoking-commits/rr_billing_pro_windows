@@ -634,7 +634,17 @@ class WarnetSocketServer:
                         billing_status["paket_aktif"] = "SELESAI"
                     if kursi.sisa_waktu > 0:
                         billing_status["time_left"] = kursi.sisa_waktu
-                    if kursi.paket_harga_tetap > 0 or kursi.biaya_pesanan > 0:
+                    if getattr(kursi, 'is_bebas', False) and getattr(kursi, 'waktu_mulai', None):
+                        # Main Bebas: total_biaya = tarif/menit × menit terpakai + pesanan,
+                        # sama dengan estimator "Total berjalan" di kartu (agar angka
+                        # di PC client cocok dengan dashboard server).
+                        tarif_menit = hitung_tarif_per_menit(kursi.get_paket_data())
+                        total_detik = kursi.menit_dipakai_awal * 60 + int(
+                            (datetime.now() - kursi.waktu_mulai).total_seconds())
+                        biaya_waktu = tarif_menit * (max(total_detik, 0) / 60)
+                        billing_status["total_biaya"] = int(
+                            kursi._total_setelah_diskon(biaya_waktu + kursi.biaya_pesanan))
+                    elif kursi.paket_harga_tetap > 0 or kursi.biaya_pesanan > 0:
                         billing_status["total_biaya"] = kursi.paket_harga_tetap + kursi.biaya_pesanan
                     if kursi.paket_aktif is not None:
                         billing_status["is_playing"] = True
@@ -643,7 +653,37 @@ class WarnetSocketServer:
                     if hasattr(kursi, 'is_on') and not kursi.is_on:
                         billing_status["is_playing"] = False
                         billing_status["time_left"] = 0
+                    # Sumber kebenaran kedua utk lock state: kartu menandai pc_locked
+                    # (LOCK via waktu_habis/selesai_manual/manual_off). Client memakai
+                    # field ini sbg fallback bila pending_commands hilang (restart dll).
+                    if getattr(kursi, 'pc_locked', False):
+                        billing_status["is_locked"] = True
+                    print(f"[GET_STATUS] pc={pc_id} client={client_id} "
+                          f"kartu={kursi.label_kursi} pc_id_kartu={getattr(kursi, '_pc_id', None)} "
+                          f"paket={billing_status.get('paket_aktif')} "
+                          f"time_left={billing_status.get('time_left')} "
+                          f"is_playing={billing_status.get('is_playing')} "
+                          f"is_locked={billing_status.get('is_locked', False)}", flush=True)
                     break
+        
+        # Kartu yang ditandai terkunci (pc_locked) & tidak ada sesi aktif:
+        # pastikan LOCK terkirim ulang — recovery saat client reboot /
+        # server restart (pending_commands di server hilang). Debounce 10 dtk
+        # (client idempotent: LockWorkstation skip bila sudah _isLocked).
+        if is_warnet_client and self.app and hasattr(self.app, '_semua_kartu_warnet'):
+            for kursi in self.app._semua_kartu_warnet:
+                if getattr(kursi, '_pc_id', None) != pc_id:
+                    continue
+                if getattr(kursi, 'pc_locked', False):
+                    sesi_aktif = bool(getattr(kursi, 'paket_aktif', None)) and getattr(kursi, 'sisa_waktu', 0) > 0
+                    if not sesi_aktif:
+                        now = time.time()
+                        if now - getattr(kursi, '_last_lock_requeue', 0) >= 10:
+                            kursi._last_lock_requeue = now
+                            reason = getattr(kursi, '_pc_lock_reason', '') or "waktu_habis"
+                            message = getattr(kursi, '_pc_lock_message', '') or f"PC {kursi.label_kursi} terkunci."
+                            self.queue_pending_command(pc_id, "LOCK", reason=reason, message=message)
+                break
         
         # Check for pending commands for this PC
         pending = self.pop_pending_commands(pc_id)
@@ -999,7 +1039,7 @@ def fmt_durasi(menit):
     return f"{sisa} menit"
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1520,6 +1560,30 @@ class TimerService:
                                 kartu.waktu_mulai = datetime.now()
                         kartu.is_on = True
                         restored_count += 1
+            for kartu in getattr(app, '_semua_kartu_warnet', []):
+                key = str(getattr(kartu, '_pc_id', None) or kartu.nomor)
+                if key in warnet_state:
+                    s = warnet_state[key]
+                    if s.get("paket") and s.get("sisa_waktu", 0) > 0:
+                        kartu.paket_aktif = s["paket"]
+                        kartu.sisa_waktu = s["sisa_waktu"]
+                        kartu.is_bebas = s.get("is_bebas", False)
+                        kartu.biaya_pesanan = s.get("biaya_pesanan", 0)
+                        kartu.paket_harga_tetap = s.get("paket_harga_tetap", 0)
+                        kartu.pesanan_aktif = dict(s.get("pesanan_aktif", {}))
+                        kartu.daftar_paket_sesi = list(s.get("daftar_paket_sesi", []))
+                        kartu.menit_dipakai_awal = s.get("menit_dipakai_awal", 0)
+                        kartu.diskoni = s.get("diskoni", 0)
+                        kartu.diskoni_mode = s.get("diskoni_mode", "nominal")
+                        if s.get("waktu_mulai"):
+                            try:
+                                kartu.waktu_mulai = datetime.fromisoformat(s["waktu_mulai"])
+                            except Exception:
+                                kartu.waktu_mulai = datetime.now()
+                        kartu.is_on = True
+                        kartu.paid = s.get("paid", True)
+                        restored_count += 1
+                        print(f"[TIMER] Restored warnet {kartu.label_kursi}: {s.get('paket')} sisa {s.get('sisa_waktu')}s", flush=True)
             print(f"[TIMER] Restored {restored_count} active sessions")
         except Exception as e:
             print(f"[TIMER] Restore error: {e}")
@@ -2196,13 +2260,12 @@ class DialogInstallAPK(ctk.CTkToplevel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class DialogDeployClient(ctk.CTkToplevel):
-    """Dialog untuk deploy/update client app ke PC warnet via SSH."""
+    """Dialog untuk deploy/update client app ke PC warnet via SSH.
+    Paket client = 3 exe + INSTALL_CLIENT.bat (+ rr_billing_config.json opsional)."""
 
-    EXE_HINTS = [
-        "CLIENTPCWARNET\\warnet_client_app.exe",
-        "CLIENTPCWARNET\\RRBILLINGCLIENT.exe",
-        "dist\\RRBILLINGCLIENT.exe",
-        "warnet_client_app.py",
+    PKG_HINTS = [
+        os.path.join(APP_BASE_DIR, "RRBillingPro_Client_Package"),
+        os.path.join(APP_BASE_DIR, "BillingClientCSharp", "dist"),
     ]
 
     def __init__(self, master, warnet_server, config_manager):
@@ -2215,7 +2278,7 @@ class DialogDeployClient(ctk.CTkToplevel):
         self._stop_flag = False
 
         self.title("🚀 Deploy Client ke PC Warnet")
-        self.geometry("640x580")
+        self.geometry("640x620")
         self.configure(fg_color=C_BG)
         self.resizable(False, False)
         self.transient(master)
@@ -2223,7 +2286,7 @@ class DialogDeployClient(ctk.CTkToplevel):
 
         self._build_ui()
         self._load_pc_list()
-        self._auto_detect_exe()
+        self._auto_detect_pkg()
 
     def _build_ui(self):
         # Title
@@ -2232,19 +2295,26 @@ class DialogDeployClient(ctk.CTkToplevel):
         ctk.CTkLabel(title_frame, text="🚀  DEPLOY CLIENT APLIKASI",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=12)
 
-        # ── File selection ────────────────────────────────────────────────
+        # ── Paket selection ─────────────────────────────────────────────
         file_frame = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
         file_frame.pack(fill="x", padx=14, pady=(10, 4))
         file_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(file_frame, text="File Client", font=FONT_LABEL,
+        ctk.CTkLabel(file_frame, text="Folder Paket", font=FONT_LABEL,
                      text_color=C_MUTED).grid(row=0, column=0, padx=10, pady=8, sticky="w")
         self.exe_var = tk.StringVar()
         self.entry_exe = ctk.CTkEntry(file_frame, textvariable=self.exe_var)
         self.entry_exe.grid(row=0, column=1, padx=6, pady=8, sticky="ew")
         ctk.CTkButton(file_frame, text="Browse", width=80, height=28,
-                      fg_color=C_BTN, command=self._browse_exe
+                      fg_color=C_BTN, command=self._browse_pkg
                       ).grid(row=0, column=2, padx=(0, 10), pady=8)
+
+        self.var_keep_config = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(file_frame, text="Pertahankan rr_billing_config.json di client "
+                                          "(jangan timpa saat update)",
+                        variable=self.var_keep_config, font=FONT_SMALL,
+                        text_color=C_MUTED).grid(row=1, column=1, columnspan=2,
+                                                 padx=6, pady=(0, 8), sticky="w")
 
         # ── SSH credentials ───────────────────────────────────────────────
         ssh_frame = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=10)
@@ -2320,19 +2390,16 @@ class DialogDeployClient(ctk.CTkToplevel):
         self.progress.pack(fill="x", padx=14, pady=(2, 10))
         self.progress.set(0)
 
-    def _auto_detect_exe(self):
-        base = os.path.dirname(os.path.abspath(__file__))
-        for hint in self.EXE_HINTS:
-            p = os.path.join(base, hint)
-            if os.path.exists(p):
-                self.exe_var.set(os.path.normpath(p))
+    def _auto_detect_pkg(self):
+        for p in self.PKG_HINTS:
+            if os.path.isdir(p):
+                self.exe_var.set(p)
                 return
 
-    def _browse_exe(self):
-        path = filedialog.askopenfilename(
+    def _browse_pkg(self):
+        path = filedialog.askdirectory(
             parent=self,
-            title="Pilih file client (.exe / .py)",
-            filetypes=[("Executable", "*.exe"), ("Python", "*.py"), ("All files", "*.*")],
+            title="Pilih folder paket client (berisi 3 exe + INSTALL_CLIENT.bat)",
             initialdir=os.path.dirname(self.exe_var.get() or os.path.abspath(__file__))
         )
         if path:
@@ -2451,10 +2518,10 @@ class DialogDeployClient(ctk.CTkToplevel):
             messagebox.showwarning("Sedang Berjalan", "Proses deploy sedang berlangsung.", parent=self)
             return
 
-        exe_path = self.exe_var.get().strip()
-        if not exe_path or not os.path.exists(exe_path):
-            messagebox.showerror("File Tidak Ditemukan",
-                                 f"File tidak ditemukan:\n{exe_path}", parent=self)
+        pkg_path = self.exe_var.get().strip()
+        if not pkg_path or not os.path.isdir(pkg_path):
+            messagebox.showerror("Folder Tidak Ditemukan",
+                                 f"Folder paket tidak ditemukan:\n{pkg_path}", parent=self)
             return
 
         if not self.selected_indices:
@@ -2475,9 +2542,10 @@ class DialogDeployClient(ctk.CTkToplevel):
         self.progress.set(0)
         self._stop_flag = False
 
+        keep_config = self.var_keep_config.get()
         self.deploy_thread = threading.Thread(
             target=self._deploy_worker,
-            args=(targets, exe_path, ssh_user, ssh_pass),
+            args=(targets, pkg_path, ssh_user, ssh_pass, keep_config),
             daemon=True
         )
         self.deploy_thread.start()
@@ -2485,7 +2553,7 @@ class DialogDeployClient(ctk.CTkToplevel):
     def _open_config_client(self):
         DialogConfigClient(self)
 
-    def _deploy_worker(self, targets, exe_path, ssh_user, ssh_pass):
+    def _deploy_worker(self, targets, pkg_path, ssh_user, ssh_pass, keep_config):
         # Import here to avoid circular import at module level
         from scripts.deploy_manager import DeployManager
 
@@ -2511,11 +2579,14 @@ class DialogDeployClient(ctk.CTkToplevel):
                 self.after(0, lambda c=completed, t=total: self.progress.set(c / t))
                 continue
 
-            # Deploy
-            result = dm.deploy_single(ip, exe_path)
+            # Deploy paket lengkap (stop service -> kill -> copy -> install -> start)
+            result = dm.deploy_package(ip, pkg_path, keep_config=keep_config)
             if result.get("success"):
                 self.after(0, lambda i=ip: self._append_log(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {i}: Deploy selesai", C_GREEN))
+                    f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {i}: {result.get('message', 'Deploy selesai')}", C_GREEN))
+                for step_name, ok_step, step_msg in result.get("steps", []):
+                    self.after(0, lambda s=step_name, m=step_msg: self._append_log(
+                        f"       · {s}: {m}", C_MUTED))
             else:
                 self.after(0, lambda i=ip, m=result.get("message", ""): self._append_log(
                     f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {i}: {m}", C_RED))
@@ -7439,6 +7510,10 @@ class KartuWarnet(tk.Canvas):
         self._last_transaction_item = None
         self.paid             = True   # status pembayaran sesi (sinkron ke riwayat)
         self.is_on            = False
+        self.pc_locked        = False   # LOCK terakhir yang dikirim ke client (persisten lintas reconnect)
+        self._pc_lock_reason  = ""
+        self._pc_lock_message = ""
+        self._last_lock_requeue = 0
         self._warning_blink_on = False
         self._client_id       = None
         self._pc_id           = None
@@ -7508,9 +7583,6 @@ class KartuWarnet(tk.Canvas):
 
         y = hdr_y + hdr_h + 4
         # Status row
-        self._ids['lbl_power'] = self.create_text(8, y+10,
-            text="● SIAP", font=("Courier New", 9, "bold"),
-            fill=C_GREEN, anchor="w", tags="lbl_power")
         self._ids['lbl_grup'] = self.create_text(70, y+10,
             text=f"\u21bb {self.nama_grup}", font=("Courier New", 9, "bold"),
             fill=C_ACCENT2, anchor="w", tags="lbl_grup")
@@ -7533,22 +7605,20 @@ class KartuWarnet(tk.Canvas):
 
         # Button Row 1
         btn_h, gap_b = 30, 4
-        bw = (W - 8 - 4 * gap_b) // 5
+        bw = (W - 8 - gap_b) // 2
         bx = 4
         r1y = y
         btn_defs1 = [
-            ("power", "\u26a1 PWR", C_RED, self._toggle_power),
-            ("vol_up", "VOL+", C_GREEN, lambda: self._dummy_action("VOL+")),
-            ("vol_dn", "VOL\u2212", C_YELLOW, lambda: self._dummy_action("VOL-")),
-            ("home", "HOME", C_ACCENT, lambda: self._dummy_action("HOME")),
+            ("buka", "\U0001F513 BUKA", C_GREEN, self._buka_unlock),
             ("status", "ON", C_BTN, self._toggle_power),
         ]
         for i, (key, txt, col, cmd) in enumerate(btn_defs1):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, col, col, ("Courier New", 8, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, col, col, ("Russo One", 8, "bold"), cmd)
         y = r1y + btn_h + 4
 
         # Button Row 2
         r2y = y
+        bw2 = (W - 8 - 4 * gap_b) // 5
         btn_defs2 = [
             ("selesai", "SELESAI", C_BTN, C_RED, self._klik_selesai, True),
             ("shop", "SHOP", C_BTN, C_ACCENT, self._buka_tambah_pesanan, True),
@@ -7557,7 +7627,7 @@ class KartuWarnet(tk.Canvas):
             ("pindah", "Pindah PC", C_BTN, C_ACCENT2, self._klik_pindah, False),
         ]
         for i, (key, txt, bg, fg, cmd, disabled) in enumerate(btn_defs2):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r2y, bw, btn_h, txt, bg, fg, ("Russo One", 8, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 8, "bold"), cmd)
             if disabled:
                 self._disable_btn(key)
         y = r2y + btn_h + 4
@@ -7762,19 +7832,26 @@ class KartuWarnet(tk.Canvas):
         self.is_on = not self.is_on
         app = self.winfo_toplevel()
         if self.is_on:
-            self.itemconfig(self._ids['lbl_power'], text="\u25cf ON", fill=C_GREEN)
-            self.itemconfig(self._ids['btn_power'], fill="#3A0000")
             self.itemconfig(self._ids['btn_status'], fill=C_GREEN, outline=C_GREEN)
             self.itemconfig(self._ids['btn_status_txt'], text="ON", fill=C_GREEN)
             self._send_lock_command(app, "UNLOCK", "manual_on",
                                     f"PC {self.label_kursi} dinyalakan admin.")
         else:
-            self.itemconfig(self._ids['lbl_power'], text="\u25cf OFF", fill=C_MUTED)
-            self.itemconfig(self._ids['btn_power'], fill=C_BTN)
             self.itemconfig(self._ids['btn_status'], fill=C_BTN, outline=C_BORDER)
             self.itemconfig(self._ids['btn_status_txt'], text="OFF", fill=C_MUTED)
             self._send_lock_command(app, "LOCK", "manual_off",
                                     f"PC {self.label_kursi} dimatikan admin.")
+
+    # Tombol "BUKA" khusus: SELALU kirim UNLOCK, tidak mengubah is_on.
+    # Menghindari jebakan tombol PWR yang (jika is_on masih True) justru
+    # mematikan PC / mengirim LOCK.
+    def _buka_unlock(self):
+        app = self.winfo_toplevel()
+        self.pc_locked = False
+        self._pc_lock_reason = ""
+        self._pc_lock_message = ""
+        self._send_lock_command(app, "UNLOCK", "manual_on",
+                                f"PC {self.label_kursi} dibuka kunci oleh admin.")
 
     def _send_lock_command(self, app, cmd, reason, message):
         if not (hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None)):
@@ -7784,6 +7861,11 @@ class KartuWarnet(tk.Canvas):
                     f"{self.label_kursi} belum terhubung ke client PC.\n"
                     "Hubungkan client lalu ulangi.", parent=self.winfo_toplevel())
             return
+        # Tandai state lock kartu (dipakai untuk re-queue LOCK saat client reconnect)
+        self.pc_locked = (cmd == "LOCK")
+        if self.pc_locked:
+            self._pc_lock_reason = reason
+            self._pc_lock_message = message
         server = app.warnet_server
         ok = server.queue_pending_command(self._pc_id, cmd, reason=reason, message=message)
         with server.sessions_lock:
@@ -7907,8 +7989,6 @@ class KartuWarnet(tk.Canvas):
             self.after_cancel(self._timer_job)
 
         self.is_on = True
-        self.itemconfig(self._ids['lbl_power'], text="\u25cf ON", fill=C_GREEN)
-        self.itemconfig(self._ids['btn_power'], fill="#3A0000")
         self.itemconfig(self._ids['btn_status'], fill=C_GREEN, outline=C_GREEN)
         self.itemconfig(self._ids['btn_status_txt'], text="ON", fill=C_GREEN)
         self._enable_btn("selesai", C_BTN, C_RED)
@@ -7982,6 +8062,9 @@ class KartuWarnet(tk.Canvas):
 
         app = self.winfo_toplevel()
         if hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None):
+            self.pc_locked = False
+            self._pc_lock_reason = ""
+            self._pc_lock_message = ""
             app.warnet_server.queue_pending_command(
                 self._pc_id, "UNLOCK",
                 reason="sesi_baru",
@@ -8084,12 +8167,21 @@ class KartuWarnet(tk.Canvas):
             self.on_transaksi(self.label_kursi, self.paket_aktif or '-', self.pesanan_aktif, total_akhir, source='warnet',
                               diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
         if hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None):
+            self.pc_locked = True
+            self._pc_lock_reason = "waktu_habis"
+            self._pc_lock_message = f"Waktu PC {self.label_kursi} telah habis."
+            print(f"[WARNET] {self.label_kursi} waktu habis -> queue LOCK ke "
+                  f"pc_id={self._pc_id} (is_on={getattr(self, 'is_on', None)})", flush=True)
             app.warnet_server.queue_pending_command(
                 self._pc_id, "LOCK",
                 reason="waktu_habis",
                 time_left=0,
                 message=f"Waktu PC {self.label_kursi} telah habis."
             )
+        elif hasattr(app, 'warnet_server'):
+            print(f"[WARNET] {self.label_kursi} waktu habis TAPI _pc_id kosong — "
+                  f"LOCK TIDAK dikirim! pc_id=None, client_id={getattr(self, '_client_id', None)}",
+                  flush=True)
         messagebox.showwarning(
             "Waktu PC Habis",
             f"PC: {self.label_kursi}\n"
@@ -8172,6 +8264,9 @@ class KartuWarnet(tk.Canvas):
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         app = self.winfo_toplevel()
         if hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None):
+            self.pc_locked = True
+            self._pc_lock_reason = "selesai_manual"
+            self._pc_lock_message = f"Sesi {self.label_kursi} dihentikan admin."
             app.warnet_server.queue_pending_command(
                 self._pc_id, "LOCK",
                 reason="selesai_manual",
@@ -8344,6 +8439,7 @@ class AutoRentApp(ctk.CTk):
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
         self.current_tab  = None
         self._bg_image_path = cfg.get("app_bg_image", "")
+        self._bersihkan_grup_warnet_bocor()
 
         # ── Start Warnet Socket Server ──────────────────────────────────────────
         ws_port = cfg.get("warnet_ws_port", 5001)
@@ -9051,14 +9147,33 @@ class AutoRentApp(ctk.CTk):
 
         return {nama: {k: dict(v) for k, v in paket.items()} for nama, paket in DEFAULT_GRUP_TARIF.items()}
 
+    def _warnet_group_names(self):
+        """Return set of nama grup warnet-only (grup yang TIDAK boleh dipakai kartu TV).
+
+        Gabungan dua lapis: config 'warnet_only_groups' + semua kunci 'grup_tarif_warnet'.
+        Grup dalam set ini hanya boleh diikat ke kartu PC/warnet.
+        """
+        cfg = ConfigManager.load()
+        names = set(cfg.get('warnet_only_groups', []) or [])
+        for g in (cfg.get('grup_tarif_warnet', {}) or {}).keys():
+            names.add(g)
+        return names
+
+    def _is_warnet_group(self, nama_grup):
+        """True jika nama_grup adalah grup khusus warnet (tidak boleh dipakai TV)."""
+        if not nama_grup:
+            return False
+        return nama_grup in self._warnet_group_names()
+
     def daftar_nama_grup(self, for_warnet=False):
         """Return list of group names.
-        If for_warnet is False (default), exclude groups marked as warnet-only in config 'warnet_only_groups'.
+        If for_warnet is False (default), exclude groups marked as warnet-only in config 'warnet_only_groups'
+        dan semua grup di 'grup_tarif_warnet' — grup warnet tidak pernah muncul untuk kartu TV.
         If for_warnet is True, include warnet-only groups and any groups defined specifically for warnet in
         config key 'grup_tarif_warnet'. "Warnet" group (if exists) is always first.
         """
         cfg = ConfigManager.load()
-        warnet_only = set(cfg.get('warnet_only_groups', []))
+        warnet_only = self._warnet_group_names()
         if for_warnet:
             names = list(self.grup_tarif.keys()) if getattr(self, 'grup_tarif', None) else []
             # Include any warnet-specific groups defined separately in config
@@ -9115,6 +9230,7 @@ class AutoRentApp(ctk.CTk):
             w.destroy()
         self._build_layout()
         self._muat_daftar_tv()
+        self._muat_daftar_warnet()
         TimerService.restore_timer_state(self)
         self._load_riwayat()
         self._cek_adb_global_saat_start()
@@ -9648,48 +9764,44 @@ class AutoRentApp(ctk.CTk):
         cfg = ConfigManager.load()
         if for_warnet:
             warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
-            # Jika ada konfigurasi grup tarif khusus warnet, gunakan itu sepenuhnya
-            if warnet_map:
-                # support case-insensitive lookup: coba kecocokan exact, lalu lowercase-match
+            # Cek grup warnet dulu (exact, lalu case-insensitive)
+            if nama_grup:
                 k_found = None
-                if nama_grup:
-                    # exact match first
-                    if nama_grup in warnet_map:
-                        grp = warnet_map[nama_grup]
-                        k_found = nama_grup
-                    else:
-                        # try case-insensitive match
-                        lower_map = {k.lower(): k for k in warnet_map.keys()}
-                        k_found = lower_map.get(nama_grup.lower()) if isinstance(nama_grup, str) else None
-                        grp = warnet_map[k_found] if k_found else None
-                    if grp is not None:
-                        if isinstance(grp, dict):
-                            result = {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in grp.items()}
-                        else:
-                            result = {k: {"harga": int(v), "menit": 60} for k, v in grp.items()}
-                        return result
-                # Jika nama_grup tidak diberikan atau tidak ditemukan, kembalikan grup pertama dari konfigurasi warnet
+                if nama_grup in warnet_map:
+                    k_found = nama_grup
+                else:
+                    lower_map = {k.lower(): k for k in warnet_map.keys()}
+                    k_found = lower_map.get(nama_grup.lower()) if isinstance(nama_grup, str) else None
+                if k_found is not None:
+                    grp = warnet_map[k_found]
+                    if isinstance(grp, dict):
+                        return {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in grp.items()}
+                    return {k: {"harga": int(v), "menit": 60} for k, v in grp.items()}
+                # Kartu warnet bisa juga mengikat ke grup shared (Reguler, PS3, dll.)
+                # -> pakai harga shared yang sama seperti kartu TV
+                if nama_grup in self.grup_tarif and nama_grup not in self._warnet_group_names():
+                    return {k: dict(v) for k, v in self.grup_tarif[nama_grup].items()}
+            # Fallback: grup 'Warnet', lalu grup warnet pertama
+            if 'Warnet' in warnet_map:
+                grp = warnet_map['Warnet']
+                if isinstance(grp, dict):
+                    return {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in grp.items()}
+                return {k: {"harga": int(v), "menit": 60} for k, v in grp.items()}
+            if warnet_map:
                 first = next(iter(warnet_map.values()))
                 if isinstance(first, dict):
                     return {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in first.items()}
-                else:
-                    return {k: {"harga": int(v), "menit": 60} for k, v in first.items()}
+                return {k: {"harga": int(v), "menit": 60} for k, v in first.items()}
             # Jika tidak ada konfigurasi warnet sama sekali, jangan ambil dari grup PS — kembalikan kosong
             return {}
         
-        # Default behavior: use shared grup_tarif, tapi juga cek warnet grup jika ada
+        # Default behavior (kartu TV/PS): pakai shared grup_tarif saja.
+        # Grup warnet TIDAK PERNAH diberikan ke kartu TV — fallback ke Reguler.
+        warnet_only = self._warnet_group_names()
         if nama_grup:
             # Check shared grup_tarif first
-            if nama_grup in self.grup_tarif:
+            if nama_grup in self.grup_tarif and nama_grup not in warnet_only:
                 return {k: dict(v) for k, v in self.grup_tarif[nama_grup].items()}
-            # Check warnet-specific groups (untuk Kontrol Harga access)
-            warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
-            if nama_grup in warnet_map:
-                grp = warnet_map[nama_grup]
-                if isinstance(grp, dict):
-                    return {k: {"harga": int(v.get("harga", 0)), "menit": int(v.get("menit", 0))} for k, v in grp.items()}
-                else:
-                    return {k: {"harga": int(v), "menit": 60} for k, v in grp.items()}
         
         if NAMA_GRUP_DEFAULT in self.grup_tarif:
             return {k: dict(v) for k, v in self.grup_tarif[NAMA_GRUP_DEFAULT].items()}
@@ -10108,6 +10220,13 @@ class AutoRentApp(ctk.CTk):
                                                 text_color="#000000",
                                                 command=self._open_deploy_client_dialog)
         self.btn_deploy_client.pack(side="right", padx=8, pady=10)
+        self.btn_upload_logo = ctk.CTkButton(hdr, text="🖼 Logo Lock", width=120, height=34,
+                                                fg_color=C_ACCENT, hover_color="#5A0FCC",
+                                                font=("Russo One", 10, "bold"),
+                                                command=self._buka_upload_logo)
+        self.btn_upload_logo.pack(side="right", padx=8, pady=10)
+        if (self.current_role or "kasir") != "admin":
+            self.btn_upload_logo.pack_forget()
         self.btn_warnet_admin_code = ctk.CTkButton(
             hdr,
             text="🔐 Kode Client",
@@ -10653,6 +10772,74 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             print(f"[TV] Gagal muat daftar_tv: {e}", flush=True)
 
+    def _simpan_daftar_warnet(self):
+        """Simpan daftar kursi warnet ke config ('daftar_warnet') supaya bisa
+        dibangun ulang setelah login berikutnya (mirip daftar_tv)."""
+        try:
+            cfg = ConfigManager.load()
+            daftar = []
+            for kartu in getattr(self, '_semua_kartu_warnet', []):
+                daftar.append({
+                    "nama": getattr(kartu, 'label_kursi', ''),
+                    "nama_grup": getattr(kartu, 'nama_grup', NAMA_GRUP_DEFAULT),
+                    "client_id": getattr(kartu, '_client_id', None),
+                    "pc_id": getattr(kartu, '_pc_id', None),
+                    "pc_ip": getattr(kartu, '_pc_ip', None),
+                    "pc_locked": bool(getattr(kartu, 'pc_locked', False)),
+                    "pc_lock_reason": getattr(kartu, '_pc_lock_reason', '') or '',
+                    "pc_lock_message": getattr(kartu, '_pc_lock_message', '') or '',
+                })
+            cfg["daftar_warnet"] = daftar
+            ConfigManager.save(cfg)
+        except Exception as e:
+            print(f"[WARN] Gagal simpan daftar_warnet: {e}", flush=True)
+
+    def _muat_daftar_warnet(self):
+        """Buat ulang kartu warnet dari config (daftar_warnet) setelah login.
+
+        Berlaku untuk admin maupun kasir; tanpa dialog, tanpa pemberitahuan —
+        lewati diam-diam jika limit tercapai. Sesi aktif di-restore terpisah
+        oleh TimerService.restore_timer_state (key = pc_id)."""
+        try:
+            cfg = ConfigManager.load()
+            daftar = cfg.get("daftar_warnet", []) or []
+            if not daftar:
+                return
+            if not getattr(self, '_scroll_canvas_warnet', None):
+                return
+            if not hasattr(self, '_semua_kartu_warnet'):
+                self._semua_kartu_warnet = []
+            if not hasattr(self, '_warnet_card_windows'):
+                self._warnet_card_windows = []
+            for item in daftar:
+                try:
+                    nama = str(item.get("nama", "")).strip()
+                    if not nama:
+                        continue
+                    nama_grup = str(item.get("nama_grup", "")).strip() or NAMA_GRUP_DEFAULT
+                    pc_id = item.get("pc_id")
+                    if any(k.label_kursi == nama and getattr(k, '_pc_id', None) == pc_id
+                           for k in self._semua_kartu_warnet):
+                        continue
+                    pc_info = None
+                    if pc_id:
+                        pc_info = {
+                            "client_id": item.get("client_id"),
+                            "pc_id": pc_id,
+                            "ip": item.get("pc_ip"),
+                        }
+                    kartu = self._tambah_warnet(nama, nama_grup=nama_grup, pc_info=pc_info, restore=True)
+                    if kartu is not None and item.get("pc_locked"):
+                        # Restore state lock — LOCK akan di-requeue oleh GET_STATUS
+                        # bila tidak ada sesi aktif (recovery lintas restart server).
+                        kartu.pc_locked = True
+                        kartu._pc_lock_reason = str(item.get("pc_lock_reason") or "") or "waktu_habis"
+                        kartu._pc_lock_message = str(item.get("pc_lock_message") or "") or f"PC {nama} terkunci."
+                except Exception as e:
+                    print(f"[WARN] Gagal memuat kartu warnet {item}: {e}", flush=True)
+        except Exception as e:
+            print(f"[WARN] Gagal muat daftar_warnet: {e}", flush=True)
+
     def _tambah_tv(self, ip, nama, port, nama_grup=None, restore=False):
         if (self.current_role or "kasir") != "admin" and not restore:
             messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah TV.")
@@ -10992,7 +11179,6 @@ class AutoRentApp(ctk.CTk):
                             on_confirm=self._on_warnet_confirmed,
                             on_close_cb=self._unlock_tambah_warnet,
                             daftar_grup=daftar_warnet,
-                            lock_group=True,
                             pc_options=pc_options)
 
     def _on_warnet_confirmed(self, nama, nama_grup, pc_info=None):
@@ -11022,13 +11208,15 @@ class AutoRentApp(ctk.CTk):
             traceback.print_exc()
             messagebox.showerror("❌ Demo Warnet Gagal", f"Gagal menambahkan Demo Warnet:\n{e}", parent=self)
 
-    def _tambah_warnet(self, nama, nama_grup=None, pc_info=None):
-        if (self.current_role or "kasir") != "admin":
+    def _tambah_warnet(self, nama, nama_grup=None, pc_info=None, restore=False):
+        if (self.current_role or "kasir") != "admin" and not restore:
             messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah kursi.")
             return
         _, warnet_limit = get_edition_limits(current_user=self._resolve_license_user())
         warnet_limit = self._promo_override_tv_limit(warnet_limit, is_warnet=True)
         if len(getattr(self, '_semua_kartu_warnet', [])) >= warnet_limit:
+            if restore:
+                return  # saat muat ulang: lewati diam-diam
             messagebox.showwarning("Limit Tercapai",
                 f"Paket Anda hanya mengizinkan maksimal {warnet_limit} PC Warnet.\n"
                 f"Hapus beberapa PC atau upgrade paket.")
@@ -11058,7 +11246,7 @@ class AutoRentApp(ctk.CTk):
         kartu = KartuWarnet(canvas, self.jumlah_warnet,
                             label_kursi=nama,
                             on_transaksi=self._catat_transaksi,
-                            get_paket_data=lambda: self.get_paket_data("Warnet", for_warnet=True),
+                            get_paket_data=lambda g=default_group: self.get_paket_data(g, for_warnet=True),
                             get_makanan_data=self.get_makanan_data,
                             get_minuman_data=self.get_minuman_data,
                             get_semua_kartu=lambda: self._semua_kartu_warnet,
@@ -11080,11 +11268,13 @@ class AutoRentApp(ctk.CTk):
             pass
         if hasattr(self, '_refresh_warnet_footer'):
             self._refresh_warnet_footer()
+        self._simpan_daftar_warnet()
         self.after_idle(self._debounced_layout_warnet)
+        return kartu
 
     def _on_warnet_kartu_ganti_grup(self, kartu, grup_baru):
-        # Warnet PC dikunci ke grup "Warnet", jadi selalu ambil paket dari "Warnet"
-        kartu.get_paket_data = lambda: self.get_paket_data("Warnet", for_warnet=True)
+        # Binding grup -> harga paket kartu warnet ini (grup warnet atau shared)
+        kartu.get_paket_data = lambda g=grup_baru: self.get_paket_data(g, for_warnet=True)
         if not kartu.sesi_kosong() and not kartu.is_bebas:
             total_pesanan = kartu.biaya_pesanan
             if hasattr(kartu, '_ids'):
@@ -11093,6 +11283,7 @@ class AutoRentApp(ctk.CTk):
             else:
                 kartu.lbl_paket.configure(
                     text=f"{fmt_durasi(int(kartu.sisa_waktu / 60))} | {fmt_rp(kartu.paket_harga_tetap + total_pesanan)}")
+        self._simpan_daftar_warnet()
 
     def _hapus_warnet(self, kartu):
         """Hapus sebuah kartu Warnet dari dashboard.
@@ -11141,6 +11332,7 @@ class AutoRentApp(ctk.CTk):
                 except Exception:
                     pass
             self.after_idle(self._debounced_layout_warnet)
+            self._simpan_daftar_warnet()
             AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='success', details={'label': getattr(kartu, 'label_kursi', 'unknown')})
         except Exception as e:
             AuditLogger.log(action="hapus_warnet", username=self.current_user or 'system', status='failed', details={'error': str(e)})
@@ -11189,6 +11381,46 @@ class AutoRentApp(ctk.CTk):
         """Buka dialog deploy client app ke PC warnet via SSH."""
         DialogDeployClient(self, warnet_server=self.warnet_server,
                            config_manager=ConfigManager)
+
+    def _buka_upload_logo(self):
+        """Upload logo lockscreen client → disimpan ke folder paket client.
+        Logo ikut terkirim ke PC client saat tombol 🚀 Deploy Client dijalankan."""
+        path = filedialog.askopenfilename(
+            parent=self, title="Pilih Logo Lockscreen",
+            filetypes=[("Gambar", "*.png *.jpg *.jpeg *.bmp"), ("Semua file", "*.*")])
+        if not path:
+            return
+        try:
+            img = Image.open(path)
+            img.verify()
+        except Exception as e:
+            messagebox.showerror("Logo Tidak Valid",
+                                 f"File bukan gambar yang valid:\n{e}", parent=self)
+            return
+        pkg_dir = None
+        for p in DialogDeployClient.PKG_HINTS:
+            if os.path.isdir(p):
+                pkg_dir = p
+                break
+        if pkg_dir is None:
+            messagebox.showerror("Folder Paket Tidak Ditemukan",
+                                 "Folder paket client tidak ditemukan.\n"
+                                 "Jalankan 🚀 Deploy Client sekali lalu coba lagi.", parent=self)
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".jpg", ".jpeg", ".bmp"):
+            dest = os.path.join(pkg_dir, "lockscreen_logo.jpg")
+        else:
+            dest = os.path.join(pkg_dir, "lockscreen_logo.png")
+        try:
+            shutil.copy2(path, dest)
+        except Exception as e:
+            messagebox.showerror("Gagal Simpan",
+                                 f"Tidak bisa menyimpan logo:\n{e}", parent=self)
+            return
+        messagebox.showinfo("✅ Logo Tersimpan",
+                            f"Logo disimpan ke:\n{dest}\n\nLogo akan ikut terkirim "
+                            "ke PC client saat tombol 🚀 Deploy Client dijalankan.", parent=self)
  
     def _setup_harga(self):
         f = self.frames["harga"]
@@ -11205,19 +11437,67 @@ class AutoRentApp(ctk.CTk):
         self.scroll_harga = ctk.CTkScrollableFrame(f, fg_color=C_BG)
         self.scroll_harga.pack(fill="both", expand=True, padx=14, pady=10)
 
+        self._bersihkan_grup_warnet_bocor()
+        self._pastikan_grup_warnet_ada()
         self._grup_aktif = self.daftar_nama_grup()[0]
         self._harga_entries = {}
         self._build_kotak_grup_dan_info()
-        self._build_harga_section_editable("paket", f"⏱  Paket Waktu Main — Grup: {self._grup_aktif}",
+        self._build_harga_section_editable("paket", self._judul_section_paket(),
                                             self.grup_tarif[self._grup_aktif])
         self._build_harga_section_editable("makanan", "🍔  Menu Makanan",     self.menu_makanan)
         self._build_harga_section_editable("minuman", "🥤  Menu Minuman",     self.menu_minuman)
+
+    def _pastikan_grup_warnet_ada(self):
+        """Jamin minimal ada satu grup warnet ('Warnet') di config, supaya Kontrol Harga
+        selalu bisa mengedit paket warnet. Dibuat dari salinan grup shared pertama."""
+        cfg = ConfigManager.load()
+        warnet_map = cfg.get('grup_tarif_warnet', {}) or {}
+        if warnet_map:
+            return
+        if getattr(self, 'grup_tarif', None):
+            first = next(iter(self.grup_tarif.values()))
+            warnet_map['Warnet'] = {k: dict(v) for k, v in first.items()}
+        else:
+            warnet_map['Warnet'] = {k: dict(v) for k, v in _PAKET_STANDAR.items()}
+        cfg['grup_tarif_warnet'] = warnet_map
+        cfg['warnet_only_groups'] = sorted(set(cfg.get('warnet_only_groups', []) or []) | {'Warnet'})
+        ConfigManager.save(cfg)
+        # Muat ke memori supaya dropdown/editing langsung melihatnya
+        if 'Warnet' not in self.grup_tarif:
+            self.grup_tarif['Warnet'] = {k: dict(v) for k, v in warnet_map['Warnet'].items()}
+
+    def _judul_section_paket(self):
+        if self._is_warnet_group(self._grup_aktif):
+            return f"⏱  Paket Waktu Main — Grup WARNET: {self._grup_aktif} 🖥"
+        return f"⏱  Paket Waktu Main — Grup: {self._grup_aktif}"
+
+    def _bersihkan_grup_warnet_bocor(self):
+        """Migrasi 1x: grup warnet yang terlanjur bocor ke grup_tarif (shared)
+        dipindah ke grup_tarif_warnet + warnet_only_groups supaya tidak bisa dipakai kartu TV."""
+        cfg = ConfigManager.load()
+        warnet_map = dict(cfg.get('grup_tarif_warnet', {}) or {})
+        warnet_only = set(cfg.get('warnet_only_groups', []) or [])
+        shared = dict(cfg.get('grup_tarif', {}) or {})
+        changed = False
+        for g, paket in list(shared.items()):
+            if g in warnet_only or g in warnet_map:
+                warnet_map.setdefault(g, paket)
+                del shared[g]
+                changed = True
+        if changed:
+            cfg['grup_tarif'] = shared
+            cfg['grup_tarif_warnet'] = warnet_map
+            cfg['warnet_only_groups'] = sorted(set(warnet_only) | set(warnet_map.keys()))
+            ConfigManager.save(cfg)
 
     def _refresh_grup_info(self):
         jumlah_tv = sum(1 for k in self._semua_kartu_tv if k.nama_grup == self._grup_aktif)
         jumlah_warnet = sum(1 for k in getattr(self, '_semua_kartu_warnet', []) if k.nama_grup == self._grup_aktif)
         total_pengguna = jumlah_tv + jumlah_warnet
-        label_sumber = "TV" if jumlah_warnet == 0 else "TV dan Warnet" if jumlah_tv and jumlah_warnet else "Warnet"
+        if self._is_warnet_group(self._grup_aktif):
+            label_sumber = "PC Warnet (grup khusus warnet — tidak bisa dipakai TV)"
+        else:
+            label_sumber = "TV" if jumlah_warnet == 0 else "TV dan Warnet" if jumlah_tv and jumlah_warnet else "Warnet"
         self.lbl_grup_info.configure(
             text=f"Sedang mengedit harga untuk grup '{self._grup_aktif}'  ·  "
                  f"dipakai oleh {total_pengguna} {label_sumber} saat ini di Dashboard.")
@@ -11258,7 +11538,14 @@ class AutoRentApp(ctk.CTk):
             return
         # Grup baru dimulai dari salinan paket grup yang sedang aktif, supaya
         # user tinggal sesuaikan harganya saja (tidak mulai dari kosong).
+        # Tipe grup mengikuti grup aktif: kalau grup aktif adalah grup warnet,
+        # grup baru ini juga menjadi grup warnet (tidak bisa dipakai TV).
+        is_warnet_baru = self._is_warnet_group(self._grup_aktif)
         self.grup_tarif[nama_baru] = {k: dict(v) for k, v in self.grup_tarif[self._grup_aktif].items()}
+        if is_warnet_baru:
+            cfg = ConfigManager.load()
+            cfg['warnet_only_groups'] = sorted(set(cfg.get('warnet_only_groups', []) or []) | {nama_baru})
+            ConfigManager.save(cfg)
         self._simpan_paket_aktif_ke_memori()
         self._grup_aktif = nama_baru
         self._simpan_grup_tarif_ke_config()
@@ -11266,10 +11553,42 @@ class AutoRentApp(ctk.CTk):
         self._refresh_grup_info()
         self._refresh_info_bebas()
         self._rebuild_harga()
+        tipe = "grup warnet (khusus PC)" if is_warnet_baru else "grup (TV & PC warnet)"
         messagebox.showinfo("✅ Grup Ditambahkan",
-                            f"Grup '{nama_baru}' dibuat (salinan harga dari '{self._grup_aktif}').\n"
+                            f"Grup '{nama_baru}' dibuat sebagai {tipe} (salinan harga dari grup aktif).\n"
                             f"Atur harganya lalu klik Simpan Semua.\n\n"
-                            f"Grup baru ini langsung tersedia di Dashboard TV saat menambah/ganti TV.")
+                            f"Grup baru ini langsung tersedia di Dashboard TV/Warnet saat menambah/mengganti kartu.")
+
+    def _tambah_grup_warnet(self):
+        dlg = ctk.CTkInputDialog(text="Nama grup tarif warnet baru (mis. Warnet Reguler, Warnet VIP):",
+                                  title="➕ Tambah Grup Warnet")
+        nama_baru = dlg.get_input()
+        if not nama_baru:
+            return
+        nama_baru = nama_baru.strip()
+        if not nama_baru:
+            return
+        if nama_baru in self.grup_tarif or self._is_warnet_group(nama_baru):
+            messagebox.showwarning("⚠ Sudah Ada", f"Grup '{nama_baru}' sudah ada.")
+            return
+        # Mulai dari salinan paket grup aktif (atau grup 'Warnet' bila ada)
+        sumber_nama = self._grup_aktif if self._grup_aktif in self.grup_tarif else 'Warnet'
+        sumber = self.grup_tarif.get(sumber_nama) or self.grup_tarif.get('Warnet') or _PAKET_STANDAR
+        self.grup_tarif[nama_baru] = {k: dict(v) for k, v in sumber.items()}
+        cfg = ConfigManager.load()
+        cfg['warnet_only_groups'] = sorted(set(cfg.get('warnet_only_groups', []) or []) | {nama_baru})
+        ConfigManager.save(cfg)
+        self._simpan_paket_aktif_ke_memori()
+        self._grup_aktif = nama_baru
+        self._simpan_grup_tarif_ke_config()
+        self._refresh_opt_grup_semua()
+        self._refresh_grup_info()
+        self._refresh_info_bebas()
+        self._rebuild_harga()
+        messagebox.showinfo("✅ Grup Warnet Ditambahkan",
+                            f"Grup warnet '{nama_baru}' dibuat (salinan harga dari '{sumber_nama}').\n"
+                            f"Atur harganya lalu klik Simpan Semua.\n\n"
+                            f"Grup ini hanya bisa diikat ke kartu PC/Warnet — kartu TV tidak akan memakainya.")
 
     def _rename_grup_tarif(self):
         grup_lama = self._grup_aktif
@@ -11285,12 +11604,31 @@ class AutoRentApp(ctk.CTk):
             messagebox.showwarning("⚠ Sudah Ada", f"Grup '{nama_baru}' sudah ada.")
             return
         self._simpan_paket_aktif_ke_memori()
+        is_warnet_lama = self._is_warnet_group(grup_lama)
         self.grup_tarif[nama_baru] = self.grup_tarif.pop(grup_lama)
+        if is_warnet_lama:
+            # Update nama di warnet_only_groups supaya tetap terkunci untuk warnet
+            cfg = ConfigManager.load()
+            warnet_only = [g if g != grup_lama else nama_baru for g in (cfg.get('warnet_only_groups', []) or [])]
+            cfg['warnet_only_groups'] = sorted(warnet_only)
+            warnet_map = dict(cfg.get('grup_tarif_warnet', {}) or {})
+            if grup_lama in warnet_map:
+                warnet_map[nama_baru] = warnet_map.pop(grup_lama)
+                cfg['grup_tarif_warnet'] = warnet_map
+            ConfigManager.save(cfg)
         for kartu in self._semua_kartu_tv:
             if kartu.nama_grup == grup_lama:
                 kartu.nama_grup = nama_baru
                 kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\U0001f3f7 {nama_baru}")
                 kartu.get_paket_data = lambda g=nama_baru: self.get_paket_data(g)
+        for kartu in getattr(self, '_semua_kartu_warnet', []):
+            if kartu.nama_grup == grup_lama:
+                kartu.nama_grup = nama_baru
+                if hasattr(kartu, '_ids'):
+                    kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\u21bb {nama_baru}")
+                else:
+                    kartu.lbl_grup.configure(text=f"\u21bb {nama_baru}")
+                kartu.get_paket_data = lambda g=nama_baru: self.get_paket_data(g, for_warnet=True)
         self._grup_aktif = nama_baru
         self._simpan_grup_tarif_ke_config()
         self._refresh_opt_grup_semua()
@@ -11305,31 +11643,55 @@ class AutoRentApp(ctk.CTk):
                                     f"Grup '{grup}' tidak bisa dihapus "
                                     f"(minimal harus ada 1 grup tersisa).")
             return
+        is_warnet = self._is_warnet_group(grup)
         jumlah_tv = sum(1 for k in self._semua_kartu_tv if k.nama_grup == grup)
+        jumlah_warnet = sum(1 for k in getattr(self, '_semua_kartu_warnet', []) if k.nama_grup == grup)
         pesan = f"Hapus grup tarif '{grup}'?"
-        if jumlah_tv:
+        if is_warnet:
+            pesan += (f"\n\n⚠ {jumlah_warnet} PC Warnet di Dashboard saat ini memakai grup ini.\n"
+                      f"PC tersebut akan otomatis dipindah ke grup warnet lain.")
+        elif jumlah_tv:
             pesan += (f"\n\n⚠ {jumlah_tv} TV di Dashboard saat ini memakai grup ini.\n"
                       f"TV tersebut akan otomatis dipindah ke grup '{NAMA_GRUP_DEFAULT}'.")
         if not messagebox.askyesno("🗑 Hapus Grup Tarif", pesan):
             return
         del self.grup_tarif[grup]
-        fallback = NAMA_GRUP_DEFAULT if NAMA_GRUP_DEFAULT in self.grup_tarif else next(iter(self.grup_tarif))
-        for kartu in self._semua_kartu_tv:
-            if kartu.nama_grup == grup:
-                kartu.nama_grup = fallback
-                if hasattr(kartu, '_ids') and 'lbl_grup' in kartu._ids:
-                    kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\U0001f3f7 {fallback}")
-                else:
-                    kartu.lbl_grup.configure(text=f"\U0001f3f7 {fallback}")
-                kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g)
-        for kartu in getattr(self, '_semua_kartu_warnet', []):
-            if kartu.nama_grup == grup:
-                kartu.nama_grup = fallback
-                if hasattr(kartu, '_ids'):
-                    kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\u21bb {fallback}")
-                else:
-                    kartu.lbl_grup.configure(text=f"\u21bb {fallback}")
-                kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g)
+        if is_warnet:
+            # Hapus dari warnet_map + warnet_only_groups
+            cfg = ConfigManager.load()
+            warnet_map = dict(cfg.get('grup_tarif_warnet', {}) or {})
+            warnet_map.pop(grup, None)
+            cfg['grup_tarif_warnet'] = warnet_map
+            cfg['warnet_only_groups'] = [g for g in (cfg.get('warnet_only_groups', []) or []) if g != grup]
+            ConfigManager.save(cfg)
+            sisa_warnet = [g for g in self.daftar_nama_grup(for_warnet=True) if g != grup]
+            fallback = ('Warnet' if 'Warnet' in sisa_warnet else sisa_warnet[0]) if sisa_warnet else NAMA_GRUP_DEFAULT
+            for kartu in getattr(self, '_semua_kartu_warnet', []):
+                if kartu.nama_grup == grup:
+                    kartu.nama_grup = fallback
+                    if hasattr(kartu, '_ids'):
+                        kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\u21bb {fallback}")
+                    else:
+                        kartu.lbl_grup.configure(text=f"\u21bb {fallback}")
+                    kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g, for_warnet=True)
+        else:
+            fallback = NAMA_GRUP_DEFAULT if NAMA_GRUP_DEFAULT in self.grup_tarif else next(iter(self.grup_tarif))
+            for kartu in self._semua_kartu_tv:
+                if kartu.nama_grup == grup:
+                    kartu.nama_grup = fallback
+                    if hasattr(kartu, '_ids') and 'lbl_grup' in kartu._ids:
+                        kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\U0001f3f7 {fallback}")
+                    else:
+                        kartu.lbl_grup.configure(text=f"\U0001f3f7 {fallback}")
+                    kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g)
+            for kartu in getattr(self, '_semua_kartu_warnet', []):
+                if kartu.nama_grup == grup:
+                    kartu.nama_grup = fallback
+                    if hasattr(kartu, '_ids'):
+                        kartu.itemconfig(kartu._ids['lbl_grup'], text=f"\u21bb {fallback}")
+                    else:
+                        kartu.lbl_grup.configure(text=f"\u21bb {fallback}")
+                    kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g, for_warnet=True)
         self._grup_aktif = fallback
         self._simpan_grup_tarif_ke_config()
         self._refresh_opt_grup_semua()
@@ -11339,13 +11701,29 @@ class AutoRentApp(ctk.CTk):
 
     def _refresh_opt_grup_semua(self):
         """Refresh dropdown grup di tab Kontrol Harga setelah daftar grup berubah."""
-        daftar = self.daftar_nama_grup()
+        daftar = self.daftar_semua_grup()
         self.opt_grup_aktif.configure(values=daftar)
         self.var_grup_aktif.set(self._grup_aktif)
 
-    def _simpan_grup_tarif_ke_config(self):
-        cfg = ConfigManager.load()
-        cfg["grup_tarif"] = self.grup_tarif
+    def _simpan_grup_tarif_ke_config(self, cfg=None):
+        """Simpan grup tarif ke config dengan PEMISAHAN shared vs warnet.
+
+        Grup warnet (warnet_only_groups ∪ grup_tarif_warnet) disimpan ke
+        'grup_tarif_warnet' + 'warnet_only_groups', BUKAN ke 'grup_tarif' shared —
+        supaya grup warnet tidak bocor ke dropdown kartu TV.
+        """
+        cfg = cfg or ConfigManager.load()
+        warnet_map = dict(cfg.get('grup_tarif_warnet', {}) or {})
+        warnet_only = set(cfg.get('warnet_only_groups', []) or [])
+        shared = {}
+        for g, paket in self.grup_tarif.items():
+            if g in warnet_only or g in warnet_map:
+                warnet_map[g] = paket
+            else:
+                shared[g] = paket
+        cfg["grup_tarif"] = shared
+        cfg["grup_tarif_warnet"] = warnet_map
+        cfg["warnet_only_groups"] = sorted(set(warnet_only) | set(warnet_map.keys()))
         ConfigManager.save(cfg)
 
     def _simpan_paket_aktif_ke_memori(self):
@@ -11537,7 +11915,7 @@ class AutoRentApp(ctk.CTk):
         self._harga_entries = {}
         # Kotak grup tarif & info Main Bebas dibangun ulang juga supaya konsisten
         self._build_kotak_grup_dan_info()
-        self._build_harga_section_editable("paket", f"⏱  Paket Waktu Main — Grup: {self._grup_aktif}",
+        self._build_harga_section_editable("paket", self._judul_section_paket(),
                                             self.grup_tarif[self._grup_aktif])
         self._build_harga_section_editable("makanan", "🍔  Menu Makanan",     self.menu_makanan)
         self._build_harga_section_editable("minuman", "🥤  Menu Minuman",     self.menu_minuman)
@@ -11564,6 +11942,10 @@ class AutoRentApp(ctk.CTk):
                       fg_color=C_BTN, border_width=1, border_color=C_GREEN,
                       font=FONT_SMALL, text_color=C_GREEN,
                       command=self._tambah_grup_tarif).pack(side="left", padx=4)
+        ctk.CTkButton(grup_row, text="🖥➕ Grup Warnet", width=110, height=30,
+                      fg_color=C_BTN, border_width=1, border_color="#0FA0CE",
+                      font=FONT_SMALL, text_color="#0FA0CE",
+                      command=self._tambah_grup_warnet).pack(side="left", padx=4)
         ctk.CTkButton(grup_row, text="✏️ Ganti Nama", width=110, height=30,
                       fg_color=C_BTN, border_width=1, border_color=C_YELLOW,
                       font=FONT_SMALL, text_color=C_YELLOW,
@@ -11633,18 +12015,10 @@ class AutoRentApp(ctk.CTk):
         self.menu_minuman = new_minuman if new_minuman else self.menu_minuman
 
         cfg = ConfigManager.load()
-        cfg["grup_tarif"]   = self.grup_tarif
         cfg["menu_makanan"] = self.menu_makanan
         cfg["menu_minuman"] = self.menu_minuman
-        
-        # Sinkronkan grup warnet: jika grup yang diedit juga ada di grup_tarif_warnet, update sana juga
-        if 'grup_tarif_warnet' not in cfg:
-            cfg['grup_tarif_warnet'] = {}
-        warnet_map = cfg['grup_tarif_warnet']
-        if self._grup_aktif in warnet_map and new_paket_grup_aktif:
-            warnet_map[self._grup_aktif] = new_paket_grup_aktif
-        
-        ConfigManager.save(cfg)
+        # Grup tarif disimpan dengan pemisahan shared vs warnet (anti-bocor ke kartu TV)
+        self._simpan_grup_tarif_ke_config(cfg)
 
         # Sinkronkan tampilan Dashboard TV: semua KartuTV yang sedang memakai
         # grup yang baru saja diedit otomatis pakai data harga terbaru

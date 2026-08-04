@@ -25,6 +25,10 @@ namespace BillingClientApp
         private bool _previousIsLocked = false;
         private string _lockAppPath = "";
         private string _lockMessage = "";
+        private bool _warned5 = false;
+        private bool _warned3 = false;
+        private bool _warned1 = false;
+        private string _lastPaket = "-";
 
         // ── UI ────────────────────────────────────────────────────────
         private NotifyIcon _trayIcon;
@@ -35,8 +39,9 @@ namespace BillingClientApp
         private ToolStripMenuItem _miTime;
         private ToolStripMenuItem _miTotal;
         private ToolStripMenuItem _miConnect;
-        private ToolStripMenuItem _miExit;
         private System.Windows.Forms.Timer _clockTimer;
+
+        private const string APP_LOG_FILE = "rr_billing_client_app.log";
 
         public ClientAppForm()
         {
@@ -96,9 +101,6 @@ namespace BillingClientApp
             _miConnect = new ToolStripMenuItem("🔌 Hubungkan ke Server");
             _miConnect.Click += (s, e) => Reconnect();
 
-            _miExit = new ToolStripMenuItem("✖ Keluar");
-            _miExit.Click += (s, e) => ExitApp();
-
             _trayMenu.Items.Add(_miStatus);
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add(_miPaket);
@@ -106,7 +108,6 @@ namespace BillingClientApp
             _trayMenu.Items.Add(_miTotal);
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add(_miConnect);
-            _trayMenu.Items.Add(_miExit);
 
             _trayIcon.ContextMenuStrip = _trayMenu;
             _trayIcon.MouseClick += TrayIcon_Click;
@@ -154,31 +155,84 @@ namespace BillingClientApp
                 _isLocked = dict.GetValueOrDefault("is_locked", false)?.ToString() == "True";
                 _lockMessage = dict.GetValueOrDefault("lock_message", "")?.ToString() ?? "";
 
-                // Detect lock state change and call DesktopLocker from user session
-                if (_isLocked != _previousIsLocked)
+                // Lock state machine — retried EVERY poll, so a single failed
+                // DesktopLocker.Lock() is not fatal: we keep trying until it works.
+                bool actuallyLocked = false;
+                try
                 {
-                    _previousIsLocked = _isLocked;
-                    if (_isLocked)
+                    // Jika PC terjebak di lock desktop orphan (handle hilang karena
+                    // proses lama sudah di-kill saat update), adopsi dulu supaya
+                    // Unlock() bisa memindahkan user kembali ke desktop normal.
+                    DesktopLocker.AdoptOrphanDesktop();
+                    actuallyLocked = DesktopLocker.IsLocked;
+                }
+                catch { }
+
+                if (_isLocked && !actuallyLocked)
+                {
+                    bool wasLocked = _previousIsLocked;
+                    _previousIsLocked = true;
+                    if (!wasLocked)
                     {
                         _trayIcon.ShowBalloonTip(5000, "🔒 PC Terkunci",
                             string.IsNullOrEmpty(_lockMessage)
                                 ? "Waktu habis. Silahkan hubungi admin."
                                 : _lockMessage,
                             ToolTipIcon.Warning);
-                        try { DesktopLocker.Lock(_lockAppPath); }
-                        catch (Exception lockEx)
-                        {
-                            Debug.WriteLine($"[ClientApp] Lock error: {lockEx.Message}");
-                        }
                     }
-                    else
+                    try
                     {
-                        try { DesktopLocker.Unlock(); }
-                        catch (Exception unlockEx)
+                        string lockArgs = "";
+                        if (!string.IsNullOrEmpty(_lockMessage))
+                            lockArgs = "--message \"" + _lockMessage.Replace("\"", "\\\"") + "\"";
+                        if (DesktopLocker.Lock(_lockAppPath, lockArgs))
                         {
-                            Debug.WriteLine($"[ClientApp] Unlock error: {unlockEx.Message}");
+                            if (!wasLocked) Log($"[ClientApp] PC terkunci. ({_lockMessage})");
+                        }
+                        else if (!wasLocked)
+                        {
+                            Log("[ClientApp] Lock GAGAL dijalankan (akan dicoba lagi di poll berikutnya).");
                         }
                     }
+                    catch (Exception lockEx)
+                    {
+                        Log($"[ClientApp] Lock error: {lockEx.Message}");
+                    }
+                }
+                else if (!_isLocked && actuallyLocked)
+                {
+                    bool wasLocked = _previousIsLocked;
+                    _previousIsLocked = false;
+                    try
+                    {
+                        DesktopLocker.Unlock();
+                        if (wasLocked) Log("[ClientApp] PC dibuka kuncinya.");
+                    }
+                    catch (Exception unlockEx)
+                    {
+                        Log($"[ClientApp] Unlock error: {unlockEx.Message}");
+                    }
+                }
+                else if (_isLocked && actuallyLocked)
+                {
+                    // Lock aktif — pastikan UI lock screen masih hidup.
+                    // Jika BillingLockScreenUI mati/di-kill, relaunch otomatis.
+                    _previousIsLocked = true;
+                    try
+                    {
+                        string lockArgs = "";
+                        if (!string.IsNullOrEmpty(_lockMessage))
+                            lockArgs = "--message \"" + _lockMessage.Replace("\"", "\\\"") + "\"";
+                        DesktopLocker.EnsureLockUIAlive(_lockAppPath, lockArgs);
+                    }
+                    catch (Exception uiEx)
+                    {
+                        Log($"[ClientApp] EnsureLockUIAlive error: {uiEx.Message}");
+                    }
+                }
+                else
+                {
+                    _previousIsLocked = _isLocked;
                 }
 
                 if (dict.TryGetValue("billing", out var billingObj) && billingObj is System.Collections.Generic.Dictionary<string, object> billing)
@@ -188,6 +242,8 @@ namespace BillingClientApp
                     _totalBiaya = ParseInt(billing.GetValueOrDefault("total_biaya", 0));
                     _isPlaying = billing.GetValueOrDefault("is_playing", false)?.ToString() == "True";
                 }
+
+                ShowRealtimeNotifications();
 
                 UpdateDisplay();
             }
@@ -199,14 +255,82 @@ namespace BillingClientApp
             }
         }
 
+        // ── Notifikasi realtime (balloon kanan bawah) ─────────────────
+        private void ShowRealtimeNotifications()
+        {
+            if (_isLocked)
+            {
+                _lastPaket = _paketAktif;
+                _warned5 = _warned3 = _warned1 = false;
+                return;
+            }
+
+            if (_isPlaying && _timeLeft > 0)
+            {
+                // Deteksi sesi baru → info billing tampil realtime
+                if (_lastPaket != _paketAktif)
+                {
+                    _lastPaket = _paketAktif;
+                    _warned5 = _warned3 = _warned1 = false;
+                    int m = _timeLeft / 60;
+                    int s = _timeLeft % 60;
+                    _trayIcon.ShowBalloonTip(6000, "🟢 Sesi Dimulai",
+                        $"Paket: {_paketAktif}\nSisa Waktu: {m:D2}:{s:D2}\nTotal: Rp{_totalBiaya:N0}".Replace(",00", ""),
+                        ToolTipIcon.Info);
+                }
+
+                // Peringatan 5 / 3 / 1 menit — terpicu saat countdown MENURUN
+                // melewati ambang, jadi tidak terlewat walau poll melompat.
+                int minutesLeft = (int)Math.Ceiling(_timeLeft / 60.0);
+                if (minutesLeft > 5)
+                {
+                    _warned5 = _warned3 = _warned1 = false; // tambah waktu → reset
+                }
+                else
+                {
+                    if (minutesLeft <= 5 && !_warned5)
+                    {
+                        _warned5 = true;
+                        _trayIcon.ShowBalloonTip(8000, "⏰ Sisa Waktu Habis",
+                            $"Paket {_paketAktif} tersisa 5 menit lagi!\nHubungi kasir untuk tambah waktu.",
+                            ToolTipIcon.Warning);
+                    }
+                    if (minutesLeft <= 3 && !_warned3)
+                    {
+                        _warned3 = true;
+                        _trayIcon.ShowBalloonTip(8000, "⏰ Sisa Waktu Habis",
+                            $"Paket {_paketAktif} tersisa 3 menit lagi!\nHubungi kasir untuk tambah waktu.",
+                            ToolTipIcon.Warning);
+                    }
+                    if (minutesLeft <= 1 && !_warned1)
+                    {
+                        _warned1 = true;
+                        _trayIcon.ShowBalloonTip(8000, "⏰ Sisa Waktu Habis",
+                            $"Paket {_paketAktif} tersisa 1 menit lagi!\nHubungi kasir untuk tambah waktu.",
+                            ToolTipIcon.Warning);
+                    }
+                }
+            }
+            else
+            {
+                _lastPaket = _paketAktif;
+                if (!_isPlaying)
+                    _warned5 = _warned3 = _warned1 = false;
+            }
+        }
+
         private void UpdateDisplay()
         {
-            // Tray icon text
+            // Tray icon text (realtime, update tiap poll 3 detik)
             string iconText = "RR Billing Client";
             if (_isLocked)
                 iconText += "\n🔒 Terkunci";
             else if (_isPlaying)
-                iconText += "\n🟢 Sedang Bermain";
+            {
+                int m = _timeLeft / 60;
+                int s = _timeLeft % 60;
+                iconText += $"\n🟢 {_paketAktif} {m:D2}:{s:D2}";
+            }
             else if (_isConnected)
                 iconText += "\n⏸ Siap";
             else
@@ -256,12 +380,20 @@ namespace BillingClientApp
             PollStatus();
         }
 
-        private void ExitApp()
+        // ── File logging (visible: log di C:\RRBillingClient\) ─────────
+        private void Log(string message)
         {
-            _pollTimer?.Stop();
-            _clockTimer?.Stop();
-            _trayIcon?.Visible = false;
-            Application.Exit();
+            string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
+            Debug.WriteLine(line);
+            try
+            {
+                string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, APP_LOG_FILE);
+                lock (typeof(ClientAppForm))
+                {
+                    File.AppendAllText(logPath, line + Environment.NewLine);
+                }
+            }
+            catch { }
         }
 
         private void TrayIcon_Click(object sender, MouseEventArgs e)
