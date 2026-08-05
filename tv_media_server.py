@@ -31,6 +31,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
@@ -92,6 +93,34 @@ class _Handler(BaseHTTPRequestHandler):
         if getattr(self.server, "debug_log", False):
             super().log_message(fmt, *args)
 
+    def log_access(self, detail: str) -> None:
+        """Access log: selalu dicatat — ke console (jika ada) DAN ke file
+        media_promo/access.log (EXE di-build tanpa console, jadi file ini
+        adalah satu-satunya tempat log terlihat di kasir).
+
+        Berguna untuk diagnosa: apakah client TV benar-benar mengunduh file,
+        dan berapa besar Range yang diminta (mis. macet di tengah-tengah).
+        """
+        try:
+            line = "%s [TV MEDIA] %s %s %s\n" % (
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                self.command or "?",
+                self.client_address[0] if self.client_address else "?",
+                detail,
+            )
+            print(line.rstrip("\n"), flush=True)
+            media = getattr(self.server, "media", None)
+            if media is not None:
+                with media._access_lock:
+                    try:
+                        with open(os.path.join(media.media_dir, "access.log"),
+                                  "a", encoding="utf-8") as f:
+                            f.write(line)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
     @property
     def media(self) -> Any:
         return self.server.media  # type: ignore[attr-defined]
@@ -132,6 +161,7 @@ class _Handler(BaseHTTPRequestHandler):
             filename = os.path.basename(unquote(path[len("/media/"):]))
             full = os.path.join(self.media.media_dir, filename)
             if not filename or not os.path.isfile(full):
+                self.log_access(f"404 {filename or self.path}")
                 self.send_error(404, "File not found")
                 return
             ctype, _ = mimetypes.guess_type(full)
@@ -176,6 +206,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
+                self.log_access(f"{filename} range {start}-{end}/{size}")
                 if not head_only:
                     with open(full, "rb") as f:
                         f.seek(start)
@@ -194,6 +225,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
+            self.log_access(f"{filename} full {size}")
             if not head_only:
                 with open(full, "rb") as f:
                     while True:
@@ -223,6 +255,7 @@ class TvMediaServer:
         # Media yang sedang ditampilkan: {"type": "video"/"image", "filename": str}
         self.current_media: dict = {}
         self._media_lock = threading.Lock()
+        self._access_lock = threading.Lock()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -238,6 +271,7 @@ class TvMediaServer:
         self._thread.start()
         print(f"[TV MEDIA SERVER] HTTP media on http://{self.host}:{self.port} "
               f"(folder: {self.media_dir})")
+        print(f"[TV MEDIA SERVER] Access log -> {os.path.join(self.media_dir, 'access.log')}")
 
     def stop(self) -> None:
         self.running = False

@@ -13,7 +13,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.util.Log
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
@@ -23,12 +25,15 @@ import android.widget.TextView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.rrbillingpro.tvclient.R
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.Proxy
+import java.util.concurrent.TimeUnit
 
 /**
  * MediaActivity — pemutar video/gambar promosi fullscreen di client TV.
@@ -39,8 +44,14 @@ import okhttp3.Request
  *
  * Video memakai ExoPlayer (media3) — jauh lebih tahan banting daripada
  * VideoView/MediaPlayer bawaan di semua versi Android & merk box:
- *   - HTTP source toleran ke server kasir (HEAD/Range/206/keep-alive)
+ *   - HTTP source: OkHttpDataSource (OkHttp 4.12) — lebih andal daripada
+ *     HttpURLConnection bawaan yang sering HANG di Android 11 (layar hitam +
+ *     spinner buffering tanpa henti, tanpa error).
+ *   - decoder fallback ke software bila HW decoder STB hang (beberapa box
+ *     Android 11 tidak mengeluarkan error, hanya buffering selamanya).
  *   - retry otomatis 3x (beberapa box gagal sekali lalu sukses)
+ *   - watchdog buffering: bila >15 dtk stuck BUFFERING, tampilkan teks error
+ *     (bukan spinner selamanya) + log logcat untuk diagnosa
  *   - kode error ditampilkan di layar (PlaybackException) untuk diagnosa
  *
  * Video otomatis LANJUT diputar saat TV/STB bangun dari sleep (SCREEN_ON):
@@ -59,6 +70,7 @@ class MediaActivity : Activity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var autoSwitchRunnable: Runnable? = null
+    private var bufferingWatchdog: Runnable? = null
 
     private var player: ExoPlayer? = null
     private var videoUrl = ""
@@ -155,7 +167,17 @@ class MediaActivity : Activity() {
         window.decorView.setOnSystemUiVisibilityChangeListener { hideSystemUi() }
     }
 
+    // Proxy.NO_PROXY: media promo datang dari server LAN kasir — JANGAN ikuti
+    // proxy sistem TV (beberapa box Android 11 punya proxy aktif dari router/
+    // ISP yang membuat unduhan media macet selamanya tanpa error).
+    private val mediaHttpClient = OkHttpClient.Builder()
+        .proxy(Proxy.NO_PROXY)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
     private fun playVideo(url: String) {
+        Log.i(TAG, "playVideo url=$url")
         releasePlayer()
         videoUrl = url
         retryCount = 0
@@ -166,35 +188,55 @@ class MediaActivity : Activity() {
         errorText?.visibility = View.GONE
         progress?.visibility = View.VISIBLE
 
+        // OkHttpDataSource: ganti HttpURLConnection yang rentan HANG di
+        // Android 11 (spinner buffering selamanya tanpa error).
+        // Timeout koneksi/baca diatur lewat OkHttpClient di atas.
         val exo = ExoPlayer.Builder(this)
+            .setRenderersFactory(
+                // Fallback ke software decoder bila HW decoder STB hang
+                // (beberapa box Android 11 tidak error, hanya buffering).
+                DefaultRenderersFactory(this)
+                    .setEnableDecoderFallback(true))
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(this)
-                    .setDataSourceFactory(
-                        DefaultHttpDataSource.Factory()
-                            .setAllowCrossProtocolRedirects(true)))
+                    .setDataSourceFactory(OkHttpDataSource.Factory(mediaHttpClient)))
             .build()
         player = exo
         exo.setVideoSurfaceView(surfaceView)
         exo.volume = 1f
         exo.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                Log.i(TAG, "state=$state (url=$videoUrl)")
                 when (state) {
                     Player.STATE_READY -> {
                         progress?.visibility = View.GONE
+                        cancelBufferingWatchdog()
                         videoReady = true
                         if (!exo.isPlaying && !preparedOnce) exo.play()
                     }
-                    Player.STATE_BUFFERING -> progress?.visibility = View.VISIBLE
-                    Player.STATE_ENDED -> switchToLastInput()
-                    else -> Unit
+                    Player.STATE_BUFFERING -> {
+                        progress?.visibility = View.VISIBLE
+                        armBufferingWatchdog()
+                    }
+                    Player.STATE_ENDED -> {
+                        cancelBufferingWatchdog()
+                        switchToLastInput()
+                    }
+                    else -> {
+                        cancelBufferingWatchdog()
+                    }
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                cancelBufferingWatchdog()
                 progress?.visibility = View.GONE
+                Log.e(TAG, "onPlayerError code=${error.errorCode} " +
+                    "name=${error.errorCodeName} msg=${error.message}")
                 if (retryCount < MAX_RETRIES) {
                     retryCount++
                     val delay = (1000L * retryCount)
+                    Log.i(TAG, "retry $retryCount/$MAX_RETRIES after ${delay}ms")
                     mainHandler.postDelayed({ playVideo(videoUrl) }, delay)
                 } else {
                     videoReady = false
@@ -205,6 +247,29 @@ class MediaActivity : Activity() {
         })
         exo.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
         exo.prepare()
+    }
+
+    /** Watchdog: kalau >15 dtk stuck BUFFERING, tampilkan error (bukan spinner selamanya). */
+    private fun armBufferingWatchdog() {
+        cancelBufferingWatchdog()
+        bufferingWatchdog = Runnable {
+            val p = player
+            if (p != null && p.playbackState == Player.STATE_BUFFERING) {
+                val buf = p.bufferedPosition
+                val dur = p.duration
+                Log.e(TAG, "watchdog: stuck BUFFERING > ${BUFFER_WATCHDOG_MS}ms url=$videoUrl " +
+                    "buffered=$buf duration=$dur")
+                progress?.visibility = View.GONE
+                showError("Video macet (buffering > 15 dtk).\n$videoUrl\n" +
+                    "Periksa server media & coba kirim ulang video.")
+            }
+        }
+        mainHandler.postDelayed(bufferingWatchdog!!, BUFFER_WATCHDOG_MS)
+    }
+
+    private fun cancelBufferingWatchdog() {
+        bufferingWatchdog?.let { mainHandler.removeCallbacks(it) }
+        bufferingWatchdog = null
     }
 
     private fun releasePlayer() {
@@ -224,7 +289,8 @@ class MediaActivity : Activity() {
         progress?.visibility = View.VISIBLE
         Thread {
             try {
-                val client = OkHttpClient()
+                // NO_PROXY: gambar promo dari server LAN kasir, jangan lewat proxy sistem.
+                val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).build()
                 val req = Request.Builder().url(url).build()
                 client.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) {
@@ -314,6 +380,8 @@ class MediaActivity : Activity() {
         const val EXTRA_TYPE = "type"
         const val EXTRA_URL = "url"
         private const val MAX_RETRIES = 3
+        private const val BUFFER_WATCHDOG_MS = 15_000L
+        private const val TAG = "RRMedia"
 
         @Volatile
         var instance: MediaActivity? = null

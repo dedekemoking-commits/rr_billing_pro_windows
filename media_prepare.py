@@ -9,7 +9,7 @@ Alur:
 1. Analisis file (ffmpeg -i + cek posisi box moov).
 2. Sudah kompatibel + faststart        -> "copy"      (file dipakai apa adanya)
 3. Kompatibel tapi moov di belakang    -> "remux"     (ffmpeg -c copy +faststart, cepat)
-4. Codec/resolusi/fps/audio beda       -> "transcode" (encode ulang penuh)
+4. Codec/profile High/resolusi/fps/audio beda / tanpa audio -> "transcode" (encode ulang penuh)
 5. Error                                -> raise      (caller fallback ke file asli)
 
 ffmpeg diambil dari imageio-ffmpeg (dibundle saat build EXE); jika tidak ada,
@@ -141,6 +141,12 @@ def decide_action(info: dict) -> str:
         return "transcode"
     if v.get("codec") != "h264":
         return "transcode"
+    # H.264 profile: hanya Main/Baseline yang didukung decoder SEMUA box
+    # (beberapa STB Android 11 gagal decode High profile: layar hitam + spinner).
+    pm = re.search(r"\(([^)]*)\)", v.get("profile") or "")
+    profile = pm.group(1).strip().lower() if pm else ""
+    if profile and profile not in ("main", "baseline"):
+        return "transcode"
     if v.get("width", 0) > MAX_WIDTH or v.get("height", 0) > MAX_HEIGHT:
         return "transcode"
     if v.get("fps", 0) > MAX_FPS:
@@ -149,6 +155,10 @@ def decide_action(info: dict) -> str:
         return "transcode"
     audio = (info.get("audio") or "").lower()
     if audio and audio not in AUDIO_OK:
+        return "transcode"
+    # Video tanpa audio: tambahkan track audio senyap (beberapa box hang
+    # memutar video-only karena wait pakai pts audio). => transcode.
+    if not audio:
         return "transcode"
     if info.get("faststart"):
         return "copy"
@@ -188,13 +198,27 @@ def prepare_video(src: str, dest: str,
                 "-map_metadata", "-1", dest]
     else:
         vf = f"scale='min({MAX_WIDTH},iw)':-2"
-        args = [exe, "-y", "-hide_banner", "-loglevel", "info",
-                "-i", src,
-                "-vf", vf, "-r", str(TARGET_FPS),
-                "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
-                "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
-                "-movflags", "+faststart", "-map_metadata", "-1", dest]
+        if info.get("audio"):
+            args = [exe, "-y", "-hide_banner", "-loglevel", "info",
+                    "-i", src,
+                    "-vf", vf, "-r", str(TARGET_FPS),
+                    "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
+                    "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast",
+                    "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+                    "-movflags", "+faststart", "-map_metadata", "-1", dest]
+        else:
+            # Sumber tanpa audio: suntik track audio senyap (AAC stereo).
+            # Beberapa box Android 11 hang memutar video-only; tanpa audio,
+            # sinkronisasi (wait pada pts audio) tidak pernah jalan.
+            args = [exe, "-y", "-hide_banner", "-loglevel", "info",
+                    "-i", src,
+                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                    "-vf", vf, "-r", str(TARGET_FPS),
+                    "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
+                    "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast",
+                    "-c:a", "aac", "-b:a", "64k", "-ac", "2", "-ar", "48000",
+                    "-movflags", "+faststart", "-map_metadata", "-1", dest]
 
     try:
         proc = subprocess.Popen(

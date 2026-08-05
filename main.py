@@ -1039,7 +1039,7 @@ def fmt_durasi(menit):
     return f"{sisa} menit"
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1126,6 +1126,9 @@ def center_window(win, master=None, width=None, height=None):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  KONFIGURASI MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════
+_CONFIG_LOCK = threading.RLock()
+
+
 class ConfigManager:
     """Simpan & load data harga, user, dan lisensi dengan file locking untuk thread-safety."""
     @staticmethod
@@ -1160,76 +1163,102 @@ class ConfigManager:
 
     @staticmethod
     def load():
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # Decrypt _enc fields
-                data = ConfigManager._decrypt_all(data)
-                # Auto-migrate: if users have plain 'password' (no password_enc), migrate
-                users = data.get("users", {})
-                migrated = False
-                for uname, u in users.items():
-                    if isinstance(u, dict) and "password" in u and "password_enc" not in u:
-                        pw = u.pop("password")
-                        if pw:
-                            u["password_enc"] = CryptoConfig.encrypt(pw)
-                        else:
-                            u["password_enc"] = ""
-                        migrated = True
-                    # Also check if role is missing
-                    if isinstance(u, dict) and "role" not in u:
-                        u["role"] = "kasir"
-                if migrated:
-                    data["users"] = users
-                    # Don't auto-save here; let the caller handle it
-                return data
-            except Exception:
-                pass
-        return {}
+        with _CONFIG_LOCK:
+            if os.path.exists(CONFIG_FILE):
+                # Retry singkat: jika file sedang ditulis proses lain, baca ulang
+                # daripada mengembalikan {} (yang bisa menimpa config saat di-save).
+                for _attempt in range(10):
+                    try:
+                        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        # Decrypt _enc fields
+                        data = ConfigManager._decrypt_all(data)
+                        # Auto-migrate: if users have plain 'password' (no password_enc), migrate
+                        users = data.get("users", {})
+                        migrated = False
+                        for uname, u in users.items():
+                            if isinstance(u, dict) and "password" in u and "password_enc" not in u:
+                                pw = u.pop("password")
+                                if pw:
+                                    u["password_enc"] = CryptoConfig.encrypt(pw)
+                                else:
+                                    u["password_enc"] = ""
+                                migrated = True
+                            # Also check if role is missing
+                            if isinstance(u, dict) and "role" not in u:
+                                u["role"] = "kasir"
+                        if migrated:
+                            data["users"] = users
+                            # Don't auto-save here; let the caller handle it
+                        return data
+                    except Exception:
+                        time.sleep(0.05)
+            return {}
 
     @staticmethod
     def save(data):
-        """Simpan config dengan file locking untuk prevent race condition."""
-        # Encrypt _enc fields before saving
-        data = ConfigManager._encrypt_all(data)
-        lock_file = CONFIG_FILE + ".lock"
-        max_retry = 10
-        retry_delay = 0.05
-        
-        for attempt in range(max_retry):
-            try:
-                # Buat lock file jika belum ada
-                with open(lock_file, 'a') as lock:
-                    if os.name == 'nt':  # Windows
-                        # Windows: gunakan win32 file locking
-                        import msvcrt
-                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-                        try:
-                            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                                json.dump(data, f, indent=2, ensure_ascii=False)
-                        finally:
-                            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:  # Unix/Linux/Mac
-                        if fcntl is not None:
-                            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        """Simpan config dengan file locking + tulis atomik (tmp → replace)."""
+        with _CONFIG_LOCK:
+            # Encrypt _enc fields before saving
+            data = ConfigManager._encrypt_all(data)
+            lock_file = CONFIG_FILE + ".lock"
+            max_retry = 10
+            retry_delay = 0.05
+            tmp_file = CONFIG_FILE + ".tmp"
+
+            for attempt in range(max_retry):
+                try:
+                    # Buat lock file jika belum ada
+                    with open(lock_file, 'a') as lock:
+                        if os.name == 'nt':  # Windows
+                            # Windows: gunakan win32 file locking
+                            import msvcrt
+                            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
                             try:
-                                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                                with open(tmp_file, "w", encoding="utf-8") as f:
                                     json.dump(data, f, indent=2, ensure_ascii=False)
+                                os.replace(tmp_file, CONFIG_FILE)
                             finally:
-                                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                        else:
-                            # fcntl not available, write without lock
-                            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                                json.dump(data, f, indent=2, ensure_ascii=False)
-                return  # Success
-            except (IOError, OSError) as e:
-                if attempt < max_retry - 1:
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    print(f"Config save error after {max_retry} retries: {e}")
-                    raise
+                                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:  # Unix/Linux/Mac
+                            if fcntl is not None:
+                                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                try:
+                                    with open(tmp_file, "w", encoding="utf-8") as f:
+                                        json.dump(data, f, indent=2, ensure_ascii=False)
+                                    os.replace(tmp_file, CONFIG_FILE)
+                                finally:
+                                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                            else:
+                                # fcntl not available, write without lock
+                                with open(tmp_file, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=2, ensure_ascii=False)
+                                os.replace(tmp_file, CONFIG_FILE)
+                    return  # Success
+                except (IOError, OSError) as e:
+                    if attempt < max_retry - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"Config save error after {max_retry} retries: {e}")
+                        raise
+
+    @staticmethod
+    def update(mutator):
+        """Load → mutate → save secara atomik dalam satu lock.
+        Gunakan ini untuk penulis config yang bisa dipanggil dari thread lain
+        (mis. TimerService._sync_timer_state) agar tidak ada dua penulis yang
+        saling menimpa key (bug kehilangan menu/tarif saat R3).
+        Jika config tidak dapat dibaca, TIDAK menyimpan apa pun (mencegah wipe)."""
+        with _CONFIG_LOCK:
+            cfg = ConfigManager.load()
+            if not cfg and os.path.exists(CONFIG_FILE):
+                raise IOError("Config tidak dapat dibaca; simpan dibatalkan.")
+            result = mutator(cfg)
+            if result is not None:
+                cfg = result
+            ConfigManager.save(cfg)
+            return cfg
 
     @staticmethod
     def get(key, default=None):
@@ -1238,9 +1267,7 @@ class ConfigManager:
 
     @staticmethod
     def set(key, value):
-        d = ConfigManager.load()
-        d[key] = value
-        ConfigManager.save(d)
+        ConfigManager.update(lambda d: d.__setitem__(key, value) or d)
 
 
 def _load_theme():
@@ -1521,10 +1548,12 @@ class TimerService:
                         "diskoni": kartu.diskoni,
                         "diskoni_mode": kartu.diskoni_mode,
                     }
-            cfg = ConfigManager.load()
-            cfg["timer_state"] = state
-            cfg["timer_state_updated"] = datetime.now().isoformat()
-            ConfigManager.save(cfg)
+            try:
+                ConfigManager.update(lambda cfg: cfg.__setitem__("timer_state", state) or
+                                     cfg.__setitem__("timer_state_updated", datetime.now().isoformat()) or
+                                     cfg)
+            except Exception as e:
+                print(f"[TIMER] Sync error: {e}")
         except Exception as e:
             print(f"[TIMER] Sync error: {e}")
 
@@ -1684,6 +1713,19 @@ class ADBHelper:
     _connection_methods: dict[str, str] = {}
     _cert_paths: dict[str, str] = {}
     _lock = threading.Lock()
+    _reconnect_locks: dict[str, threading.Lock] = {}
+    _reconnect_locks_guard = threading.Lock()
+
+    @classmethod
+    def _reconnect_lock(cls, ip: str) -> threading.Lock:
+        """Lock per-IP agar reconnect/power-check tidak saling menumpuk
+        (dua thread connect_blocking bersamaan untuk TV yang sama)."""
+        with cls._reconnect_locks_guard:
+            lock = cls._reconnect_locks.get(ip)
+            if lock is None:
+                lock = threading.Lock()
+                cls._reconnect_locks[ip] = lock
+            return lock
 
     @classmethod
     def _get_remote(cls, ip: str) -> tv_mesin.AndroidTVRemote:
@@ -1700,6 +1742,36 @@ class ADBHelper:
             return True
         except ImportError:
             return False
+
+    _adb_path_cache: Optional[str] = None
+
+    @classmethod
+    def _adb_binary(cls) -> Optional[str]:
+        """Lokasi binary adb: 1) dibundel di folder app, 2) folder source,
+        3) PATH sistem. Hasil di-cache."""
+        if cls._adb_path_cache:
+            return cls._adb_path_cache
+        candidates = []
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(os.path.join(meipass, "platform-tools", "adb.exe"))
+        try:
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            candidates.append(os.path.join(exe_dir, "platform-tools", "adb.exe"))
+        except Exception:
+            pass
+        try:
+            src_dir = os.path.dirname(os.path.abspath(__file__))
+            candidates.append(os.path.join(src_dir, "platform-tools", "adb.exe"))
+        except Exception:
+            pass
+        for cand in candidates:
+            if cand and os.path.isfile(cand):
+                cls._adb_path_cache = cand
+                return cand
+        found = shutil.which("adb")
+        cls._adb_path_cache = found or ""
+        return found
 
     @classmethod
     def set_connection_method(cls, ip, method="atpv2"):
@@ -1743,7 +1815,10 @@ class ADBHelper:
     def _adb_connect(cls, ip, port=5555):
         import subprocess
         try:
-            r = subprocess.run(["adb", "connect", f"{ip}:{port}"],
+            adb_path = cls._adb_binary()
+            if not adb_path:
+                return {"status": "error", "message": "adb tidak ditemukan"}
+            r = subprocess.run([adb_path, "connect", f"{ip}:{port}"],
                                capture_output=True, text=True, timeout=10,
                                **subprocess_no_window_kwargs())
             if "connected" in r.stdout.lower() or "already connected" in r.stdout.lower():
@@ -1792,7 +1867,17 @@ class ADBHelper:
 
     @classmethod
     def power_toggle(cls, ip, port=0):
+        """Kirim KEYCODE_POWER via atpv2. Kalau remote belum terhubung,
+        coba reconnect dulu (sertifikat pairing tersimpan per IP) sebelum
+        mengirim — supaya perintah tidak gagal senyap saat koneksi putus."""
         rem = cls._get_remote(ip)
+        if not rem.is_connected():
+            try:
+                ok_c, _, msg_c = cls.cek_dan_reconnect(ip, port)
+                if not ok_c:
+                    return False, f"Tidak terhubung (reconnect gagal: {str(msg_c)[:100]})", str(msg_c)
+            except Exception as e:
+                return False, f"Tidak terhubung (reconnect error: {e})", str(e)
         res = rem.turn_off_blocking()
         ok = res.get("status") == "ok"
         return ok, res.get("message", ""), res.get("message", "")
@@ -1822,20 +1907,24 @@ class ADBHelper:
     def cek_dan_reconnect(cls, ip, port=0):
         if not cls.adb_tersedia():
             return False, "no_adb", "androidtvremote2 tidak terinstal."
-        status_awal, _ = cls.status_untuk_ip(ip)
-        if status_awal == "device":
-            return True, status_awal, f"Sudah terhubung ({ip})."
-        ok, msg = cls.connect(ip)
-        if ok:
-            return True, status_awal, "Reconnect berhasil."
-        return False, status_awal, msg or "Reconnect gagal."
+        with cls._reconnect_lock(ip):
+            status_awal, _ = cls.status_untuk_ip(ip)
+            if status_awal == "device":
+                return True, status_awal, f"Sudah terhubung ({ip})."
+            ok, msg = cls.connect(ip)
+            if ok:
+                return True, status_awal, "Reconnect berhasil."
+            return False, status_awal, msg or "Reconnect gagal."
 
     # ── TV Client Features ─────────────────────────────────────────────────
     @classmethod
     def adb_shell(cls, ip, command, timeout=15, port=5555):
         """Jalankan perintah ADB shell pada TV target."""
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:{port}", "shell", command],
+            adb_path = cls._adb_binary()
+            if not adb_path:
+                return False, "adb tidak ditemukan"
+            r = subprocess.run([adb_path, "-s", f"{ip}:{port}", "shell", command],
                                capture_output=True, text=True, timeout=timeout,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -1889,7 +1978,10 @@ class ADBHelper:
     def adb_push(cls, ip, local_path, remote_path="/sdcard/Download/"):
         """Push file ke TV via ADB."""
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:5555", "push", local_path, remote_path],
+            adb_path = cls._adb_binary()
+            if not adb_path:
+                return False, "adb tidak ditemukan"
+            r = subprocess.run([adb_path, "-s", f"{ip}:5555", "push", local_path, remote_path],
                                capture_output=True, text=True, timeout=120,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -1906,7 +1998,10 @@ class ADBHelper:
     def adb_install(cls, ip, apk_path):
         """Install APK ke TV via ADB."""
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:5555", "install", "-r", apk_path],
+            adb_path = cls._adb_binary()
+            if not adb_path:
+                return False, "adb tidak ditemukan"
+            r = subprocess.run([adb_path, "-s", f"{ip}:5555", "install", "-r", apk_path],
                                capture_output=True, text=True, timeout=180,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -5470,14 +5565,24 @@ class VirtualRemoteDialog(ctk.CTkToplevel):
         threading.Thread(target=self._send_thread, args=(key_name,), daemon=True).start()
 
     def _send_thread(self, key_name):
-        ok, out, err = ADBHelper.send_key(self.ip, key_name)
-        color = C_GREEN if ok else C_RED
-        self.after(0, lambda: self._flash_feedback(ok))
+        try:
+            ok, out, err = ADBHelper.send_key(self.ip, key_name)
+        except Exception:
+            ok = False
+        try:
+            self.after(0, lambda: self._flash_feedback(ok))
+        except Exception:
+            pass
 
     def _flash_feedback(self, ok):
-        if ok:
-            self.configure(fg_color="#0A2A0A")
-            self.after(150, lambda: self.configure(fg_color=C_BG))
+        try:
+            if not self.winfo_exists():
+                return
+            if ok:
+                self.configure(fg_color="#0A2A0A")
+                self.after(150, lambda: self.configure(fg_color=C_BG))
+        except Exception:
+            pass
 
     # ── TV Client Feature Methods ──────────────────────────────────────────
     def _send_video(self):
@@ -6220,31 +6325,80 @@ class KartuTV(tk.Canvas):
             self._tv_sleep_now(threshold)
 
     def _tv_sleep_now(self, grace_detik, alasan=None):
-        """Matikan TV (sleep) via atpv2 power_toggle — TANPA fallback ADB.
-        Kalau remote atpv2 belum terhubung, TV tetap menyala (tidak ada
-        adb connect/keyevent). Hasil selalu dicatat ke log kasir."""
+        """Matikan TV (sleep) dengan upaya berlapis:
+        1) power_toggle atpv2 (auto-reconnect + retry max 3x, selang 2 dtk),
+        2) KEYCODE_SLEEP via atpv2 (beberapa TV hanya merespons SLEEP),
+        3) fallback ADB: adb shell input keyevent KEYCODE_POWER / KEYCODE_SLEEP,
+        4) verifikasi status layar ±9 dtk -> audit jujur (ok hanya jika TV
+           benar-benar mati; gagal dicatat dengan alasan, tidak menipu log).
+        """
         app = self.winfo_toplevel()
         user = getattr(app, "current_user", "") or ""
         if alasan is None:
             alasan = f"Layar nyala tanpa paket aktif selama {grace_detik // 60} menit"
-        AuditLogger.log("TV_AUTO_OFF", user, "ok", {
-            "label_tv": self.label_tv,
-            "ip": self.ip,
-            "alasan": alasan,
-            "jam": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
         print(f"[TV SLEEP] {self.label_tv} ({self.ip}): {alasan}")
 
         def runner():
-            try:
-                ok, out, _ = ADBHelper.power_toggle(self.ip, port=self.port)
-            except Exception as e:
-                ok, out = False, str(e)
-            if ok:
-                print(f"[TV SLEEP] {self.label_tv}: atpv2 power_toggle OK")
-            else:
-                print(f"[TV SLEEP] {self.label_tv}: atpv2 gagal ({str(out)[:120]}) "
-                      f"— TV tetap menyala (tanpa fallback ADB)")
+            hasil, pesan = False, ""
+            # 1) atpv2 POWER dengan retry
+            for _ in range(3):
+                try:
+                    ok, out, _ = ADBHelper.power_toggle(self.ip, port=self.port)
+                    if ok:
+                        hasil, pesan = True, "atpv2 POWER terkirim"
+                        break
+                    pesan = str(out)[:120]
+                except Exception as e:
+                    pesan = str(e)
+                time.sleep(2)
+            # 2) KEYCODE_SLEEP via atpv2
+            if not hasil:
+                try:
+                    rem = ADBHelper._get_remote(self.ip)
+                    res = rem.sleep_blocking()
+                    if res.get("status") == "ok":
+                        hasil, pesan = True, "atpv2 SLEEP terkirim"
+                except Exception as e:
+                    pesan = str(e)[:120]
+            # 3) Fallback ADB (port 5555 / port kartu bila terbuka)
+            if not hasil:
+                for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+                    try:
+                        ok_adb, out_adb = ADBHelper.adb_shell(self.ip, f"input keyevent {kunci}",
+                                                              timeout=8, port=self.port)
+                        if ok_adb:
+                            hasil, pesan = True, f"fallback ADB keyevent {kunci}: {out_adb[:80]}"
+                            break
+                    except Exception as e:
+                        pesan = str(e)[:120]
+            # 4) Verifikasi status layar sungguhan (polls 3x, selang 3 dtk)
+            if hasil:
+                state = None
+                for _ in range(3):
+                    time.sleep(3)
+                    try:
+                        state = ADBHelper.tv_power_state(self.ip, self.port)
+                    except Exception:
+                        state = None
+                    if state is False:
+                        break
+                    if state is None:
+                        break  # tidak bisa diverifikasi; pertahankan hasil kirim
+                if state is False:
+                    pesan = pesan + " — terverifikasi MATI"
+                elif state is True:
+                    hasil, pesan = False, "perintah terkirim tapi layar masih nyala (verifikasi gagal)"
+                else:
+                    pesan = pesan + " — tanpa verifikasi (tak terdeteksi)"
+            status = "ok" if hasil else "gagal"
+            AuditLogger.log("TV_AUTO_OFF", user, status, {
+                "label_tv": self.label_tv,
+                "ip": self.ip,
+                "alasan": alasan,
+                "hasil": pesan,
+                "jam": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            print(f"[TV SLEEP] {self.label_tv}: {status.upper()} — {pesan}")
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -8548,7 +8702,68 @@ class AutoRentApp(ctk.CTk):
         return "RR Billing Pro"
 
     def _get_lan_ip(self) -> str:
-        """IP LAN mesin kasir (interface default route) untuk URL media."""
+        """IP LAN mesin kasir untuk URL media client TV.
+
+        Prioritas:
+          1. Konfigurasi manual: tv_media_ip di rr_billing_config.json
+          2. UDP connect ke IP TV pertama yang dikenal (daftar_tv + cert
+             android_tv_certs) — OS memilih sendiri interface yang menuju TV.
+             TV umumnya di LAN 192.168.1.x, sedangkan NIC default-route bisa
+             di subnet lain (modem/tethering 172.16.x.x dst.) — URL media
+             WAJIB pakai IP yang satu jaringan dengan TV, kalau tidak client
+             TV tak pernah bisa mengunduh video/gambar.
+          3. NIC lokal yang subnet-nya cocok dengan IP TV.
+          4. NIC default-route (perilaku lama).
+        """
+        # 1) Override manual dari config
+        try:
+            manual = ConfigManager.load().get("tv_media_ip", "").strip()
+            if manual:
+                return manual
+        except Exception:
+            pass
+        # Kumpulkan IP TV yang dikenal (daftar_tv + cert pairing)
+        tv_ips = set()
+        try:
+            cfg = ConfigManager.load()
+            for item in cfg.get("daftar_tv", []) or []:
+                ip = str(item.get("ip", "")).strip()
+                if ip:
+                    tv_ips.add(ip)
+        except Exception:
+            pass
+        for d in (APP_BASE_DIR, os.path.join(APP_BASE_DIR, "android_tv_certs")):
+            try:
+                if not os.path.isdir(d):
+                    continue
+                for fn in os.listdir(d):
+                    if fn.startswith("cert_") and fn.endswith(".pem"):
+                        ip = fn[5:-4].replace("_", ".")
+                        octets = ip.split(".")
+                        if (len(octets) == 4
+                                and all(o.isdigit() and 0 <= int(o) <= 255 for o in octets)):
+                            tv_ips.add(ip)
+            except OSError:
+                continue
+        # 2) NIC lokal yang subnet-nya menuju TV — pakai trik UDP connect:
+        #    socket.connect() ke IP TV (tanpa handshake) membuat OS memilih
+        #    sendiri interface + IP lokal yang tepat untuk mencapai TV itu.
+        #    Paling andal (tidak bergantung enumerasi NIC), bekerja walau TV
+        #    sedang mati (UDP connect tidak mengirim paket nyata).
+        for tip in sorted(tv_ips, key=lambda x: [int(o) for o in x.split(".")]):
+            ip = self._local_ip_for_target(tip)
+            if ip:
+                return ip
+        # 3) NIC lokal yang paling cocok subnet dengan TV
+        if tv_ips:
+            best, best_score = "", -1
+            for local in self._local_ipv4s():
+                score = sum(1 for tip in tv_ips if self._same_lan(local, tip))
+                if score > best_score:
+                    best, best_score = local, score
+            if best:
+                return best
+        # 4) Fallback: NIC default-route
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -8561,6 +8776,46 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
         return "127.0.0.1"
+
+    @staticmethod
+    def _local_ip_for_target(target_ip: str) -> str:
+        """IP lokal yang akan dipakai OS untuk menjangkau target_ip."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect((target_ip, 9))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+            if ip and ip != "0.0.0.0":
+                return ip
+        except Exception:
+            pass
+        return ""
+
+    def _local_ipv4s(self):
+        """Semua alamat IPv4 lokal mesin (Windows: gethostbyname_ex/getaddrinfo)."""
+        ips = set()
+        try:
+            for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+                ips.add(ip)
+        except Exception:
+            pass
+        try:
+            for res in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ips.add(res[4][0])
+        except Exception:
+            pass
+        return [ip for ip in ips
+                if ip != "127.0.0.1" and not ip.startswith("169.254.")]
+
+    @staticmethod
+    def _same_lan(a: str, b: str) -> bool:
+        """Cocokkan subnet /24 (skala warnet: 1 router = 1 LAN)."""
+        try:
+            return a.split(".")[:3] == b.split(".")[:3]
+        except Exception:
+            return False
 
     def _tv_logo_url(self) -> str:
         """URL logo lock dengan cache-buster (mtime file) — URL berubah setiap
@@ -8607,16 +8862,15 @@ class AutoRentApp(ctk.CTk):
         return dest
 
     def _media_state_extra(self, meja_id: str) -> list:
-        """Kirim ulang perintah SHOW_MEDIA saat client reconnect (resync media)."""
-        ms = getattr(self, 'tv_media_server', None)
-        if not ms or not ms.running:
-            return []
-        cur = getattr(ms, 'current_media', None)
-        if not cur or not cur.get("filename"):
-            return []
-        url = f"http://{self._get_lan_ip()}:{ms.port}/media/{cur['filename']}"
-        return [{"action": "SHOW_MEDIA", "meja_id": meja_id,
-                 "type": cur.get("type", "video"), "url": url}]
+        """TIDAK lagi mengirim ulang SHOW_MEDIA saat client reconnect.
+
+        Dulu media diputar ulang pada SETIAP reconnect WS (blip jaringan,
+        restart app TV, restart kasir) — membuat video promo "selalu play"
+        di waktu yang salah. Sejak R3, media saat TV bangun dari tidur
+        diputar oleh APK sendiri (onScreenWake: 1x per ACTION_SCREEN_ON,
+        URL terakhir yang diterima). Di sini selalu kosong.
+        """
+        return []
 
     def _lakukan_aktivasi(self):
         kode = self.entry_kode.get().strip()
@@ -9073,10 +9327,21 @@ class AutoRentApp(ctk.CTk):
             existing = {}
             if lic_path.exists():
                 existing = json.loads(lic_path.read_text())
-            # Jangan timpa lisensi milik user lain
+            # Lisensi file = cache cloud; binding mengikuti admin yang login
+            # (kasir ikut admin_utama). Lisensi milik user lain tidak ditimpa,
+            # kecuali admin yang login adalah pemilik data mesin ini.
             existing_user = existing.get("username", "")
-            if existing.get("aktif") and existing_user and existing_user != (self.current_user or ""):
-                return
+            resolved_user = (self._resolve_license_user() or (self.current_user or "")).strip()
+            if existing.get("aktif") and existing_user and existing_user != resolved_user:
+                admin_utama = None
+                try:
+                    for _u in (ConfigManager.get("users", {}) or {}).values():
+                        if isinstance(_u, dict) and _u.get("admin_utama"):
+                            admin_utama = _u.get("admin_utama")
+                except Exception:
+                    admin_utama = None
+                if not (admin_utama and resolved_user == admin_utama):
+                    return
             status = ls.get("status", "")
             expires_at = ls.get("expiresAt", "")
             if status == "active" and expires_at:
@@ -9088,7 +9353,7 @@ class AutoRentApp(ctk.CTk):
                     existing["expiry"] = expires_at
                     existing["firebase_sync"] = True
                     existing["binding_mode"] = "username"
-                    existing["username"] = self.current_user
+                    existing["username"] = resolved_user or self.current_user
                     if not existing.get("kode_aktivasi") or "edition" not in existing:
                         mtv = ls.get("maxTv", 5)
                         if mtv >= 999999:
@@ -9102,8 +9367,11 @@ class AutoRentApp(ctk.CTk):
                     existing.setdefault("promo_add_tv", 0)
                     existing.setdefault("promo_add_warnet", 0)
                     lic_path.write_text(json.dumps(existing, indent=2))
-                    self.after(200, self._rebuild_sidebar_lic)
-                    self.after(500, self._save_promo_override_to_license)
+                    try:
+                        self.after(200, self._rebuild_sidebar_lic)
+                        self.after(500, self._save_promo_override_to_license)
+                    except Exception:
+                        pass
         except Exception as e:
             _LOGGER.warning("Cloud license update error: %s", e)
 
@@ -9235,11 +9503,19 @@ class AutoRentApp(ctk.CTk):
         self._load_riwayat()
         self._cek_adb_global_saat_start()
 
-        # Pastikan Firebase auth siap sebelum restore cloud
-        try:
-            get_firebase_auth().ensure_anonymous()
-        except Exception:
-            pass
+        # Firebase auth + auto-restore kartu TV di thread agar UI tidak
+        # terkunci saat jaringan lambat (fix freeze "5 detik not responding").
+        def _startup_async():
+            try:
+                get_firebase_auth().ensure_anonymous()
+            except Exception:
+                pass
+            try:
+                self._auto_restore_daftar_tv()
+            except Exception as e:
+                print(f"[TV] Auto-restore error: {e}", flush=True)
+
+        threading.Thread(target=_startup_async, daemon=True).start()
 
         # Restore license from Firestore in background, then re-check license status
         # This syncs license from Android (which writes to billingps_users/{user}/licenseStatus)
@@ -9248,7 +9524,10 @@ class AutoRentApp(ctk.CTk):
                 self._try_restore_license_from_cloud()
             except Exception as e:
                 _LOGGER.warning("Cloud license restore error: %s", e)
-            self.after(100, self._cek_lisensi_saat_start)
+            try:
+                self.after(100, self._cek_lisensi_saat_start)
+            except Exception:
+                pass
 
         threading.Thread(target=_restore_and_recheck, daemon=True).start()
 
@@ -9316,21 +9595,93 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
 
+        # Watchdog: deteksi hang UI (heartbeat >5 dtk) → tulis diagnostic_hang.log
+        try:
+            self._start_watchdog()
+        except Exception:
+            pass
+
+    def _start_watchdog(self):
+        """Heartbeat 1 dtk dari main thread; monitor thread menulis stack dump
+        semua thread ke diagnostic_hang.log bila UI tidak bernapas >5 dtk."""
+        if getattr(self, "_wd_started", False):
+            return
+        self._wd_started = True
+        self._wd_last_beat = time.time()
+
+        def _beat():
+            self._wd_last_beat = time.time()
+            try:
+                self.after(1000, _beat)
+            except Exception:
+                pass
+
+        def _monitor():
+            while True:
+                time.sleep(2)
+                if time.time() - self._wd_last_beat <= 5:
+                    continue
+                try:
+                    lines = [
+                        f"--- RRBILLINGPRO HANG DIAGNOSTIC {datetime.now().isoformat()} "
+                        f"(UI tidak responsif >5 dtk) ---",
+                        f"PID {os.getpid()} | app v{APP_VERSION} | user: {getattr(self, 'current_user', '')}",
+                    ]
+                    frames = sys._current_frames()
+                    for th in threading.enumerate():
+                        frm = frames.get(th.ident)
+                        if frm is not None:
+                            try:
+                                import traceback
+                                lines.append(f"\n=== Thread '{th.name}' (daemon={th.daemon}, ident={th.ident}) ===")
+                                lines.append("".join(traceback.format_stack(frm)))
+                            except Exception:
+                                pass
+                    try:
+                        with open(app_path("diagnostic_hang.log"), "a", encoding="utf-8") as f:
+                            f.write("\n".join(lines) + "\n")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                self._wd_last_beat = time.time()
+
+        threading.Thread(target=_monitor, daemon=True).start()
+        try:
+            self.after(1000, _beat)
+        except Exception:
+            pass
+
     def _try_restore_license_from_cloud(self):
         """Coba restore lisensi dari Firestore setelah login dengan 4 sumber."""
         if not self.current_user:
             return
 
-        # Hapus lisensi lokal milik user lain agar bisa ditimpa dari cloud
+        # Lisensi file = cache cloud; binding mengikuti admin mesin ini
+        # (kasir ikut admin_utama). Hapus lisensi lokal CUKUP bila login yang
+        # datang adalah pemilik mesin — jangan biarkan admin lain merebutnya.
         import pathlib as _pl_try
         _lic_p = _pl_try.Path("rr_billing_license.json")
+        resolved_user = (self._resolve_license_user() or (self.current_user or "")).strip()
         if _lic_p.exists():
             try:
                 _old = json.loads(_lic_p.read_text())
-                if _old.get("username") and _old.get("username") != self.current_user:
+                _old_user = _old.get("username") or ""
+                if _old_user and _old_user != resolved_user:
+                    admin_utama = None
+                    try:
+                        for _u in (ConfigManager.get("users", {}) or {}).values():
+                            if isinstance(_u, dict) and _u.get("admin_utama"):
+                                admin_utama = _u.get("admin_utama")
+                    except Exception:
+                        admin_utama = None
+                    if admin_utama and resolved_user != admin_utama:
+                        _LOGGER.info("Lisensi milik '%s' dipertahankan (pemilik mesin '%s').",
+                                     _old_user, admin_utama)
+                        return
                     _lic_p.unlink()
                     _LOGGER.info("Removed old license for user '%s' to restore cloud license for '%s'",
-                                 _old["username"], self.current_user)
+                                 _old_user, resolved_user)
             except Exception:
                 pass
 
@@ -9353,23 +9704,38 @@ class AutoRentApp(ctk.CTk):
             lic = {}
             if lic_path.exists():
                 lic = json.loads(lic_path.read_text())
-            # Jangan timpa lisensi milik user lain
+            # Lisensi file = cache cloud. Binding mengikuti ADMIN yang login
+            # (kasir ikut admin_utama). Lisensi milik user lain TIDAK ditimpa,
+            # kecuali admin yang login sekarang adalah pemilik data mesin ini
+            # (terdaftar sebagai admin_utama pada akun di config).
             existing_user = lic.get("username", "")
-            if lic.get("aktif") and existing_user and existing_user != (self.current_user or ""):
-                return
+            resolved_user = (self._resolve_license_user() or (self.current_user or "")).strip()
+            if lic.get("aktif") and existing_user and existing_user != resolved_user:
+                admin_utama = None
+                try:
+                    for _u in (ConfigManager.get("users", {}) or {}).values():
+                        if isinstance(_u, dict) and _u.get("admin_utama"):
+                            admin_utama = _u.get("admin_utama")
+                except Exception:
+                    admin_utama = None
+                if not (admin_utama and resolved_user == admin_utama):
+                    return
             lic["aktif"] = True
             lic["expiry"] = expires_at
             lic["firebase_sync"] = True
             lic["binding_mode"] = "username"
-            lic["username"] = self.current_user
+            lic["username"] = resolved_user or self.current_user
             _save_edition_from_max_tv(lic, max_tv)
             if kode_aktivasi:
                 lic["kode_aktivasi"] = kode_aktivasi
             lic["promo_add_tv"] = promo_add_tv or lic.get("promo_add_tv", 0)
             lic["promo_add_warnet"] = lic["promo_add_tv"]
             lic_path.write_text(json.dumps(lic, indent=2))
-            self.after(200, self._rebuild_sidebar_lic)
-            self.after(500, self._save_promo_override_to_license)
+            try:
+                self.after(200, self._rebuild_sidebar_lic)
+                self.after(500, self._save_promo_override_to_license)
+            except Exception:
+                pass
 
         try:
             fc = FirestoreClient()
@@ -10738,9 +11104,10 @@ class AutoRentApp(ctk.CTk):
                     "port": getattr(kartu, "port", 0),
                     "nama_grup": getattr(kartu, "nama_grup", NAMA_GRUP_DEFAULT),
                 })
-            cfg = ConfigManager.load()
-            cfg["daftar_tv"] = daftar
-            ConfigManager.save(cfg)
+            try:
+                ConfigManager.update(lambda cfg: cfg.__setitem__("daftar_tv", daftar) or cfg)
+            except Exception as e:
+                print(f"[TV] Gagal simpan daftar_tv: {e}", flush=True)
         except Exception as e:
             print(f"[TV] Gagal simpan daftar_tv: {e}", flush=True)
 
@@ -10771,6 +11138,101 @@ class AutoRentApp(ctk.CTk):
                     print(f"[TV] Gagal memuat kartu {item}: {e}", flush=True)
         except Exception as e:
             print(f"[TV] Gagal muat daftar_tv: {e}", flush=True)
+
+    def _ui_call(self, cb, *args, **kwargs):
+        """Jalankan callback di main thread Tk secara aman dari thread lain.
+        Hanya after(0) + guard; callback harus sudah try/except sendiri."""
+        try:
+            self.after(0, lambda: cb(*args, **kwargs))
+        except Exception:
+            pass
+
+    def _auto_restore_daftar_tv(self):
+        """Pulihkan otomatis kartu TV yang hilang dari file sertifikat pairing
+        (cert_<ip>.pem) + nama terakhir dari audit log. Dijalankan sekali per
+        sesi saat login admin, hanya menambah kartu yang belum ada — tidak
+        pernah menimpa daftar yang sudah tersimpan (biar bug limit lama tidak
+        mengulang: daftar_tv tidak boleh terpotong oleh restore)."""
+        if (self.current_role or "") != "admin":
+            return
+        try:
+            if getattr(self, "_auto_restored_tv", False):
+                return
+            self._auto_restored_tv = True
+
+            known = set()
+            for k in getattr(self, "_semua_kartu_tv", []):
+                known.add(str(getattr(k, "ip", "")).strip())
+
+            ips = set()
+            base_dirs = [APP_BASE_DIR, os.path.join(APP_BASE_DIR, "android_tv_certs")]
+            for d in base_dirs:
+                try:
+                    if not os.path.isdir(d):
+                        continue
+                    for fn in os.listdir(d):
+                        if fn.startswith("cert_") and fn.endswith(".pem"):
+                            ip = fn[5:-4].replace("_", ".")
+                            octets = ip.split(".")
+                            if (len(octets) == 4
+                                    and all(o.isdigit() and 0 <= int(o) <= 255 for o in octets)):
+                                ips.add(ip)
+                except OSError:
+                    continue
+
+            if not (ips - known):
+                return
+
+            nama_map = {}
+            if os.path.exists(AUDIT_FILE):
+                try:
+                    with open(AUDIT_FILE, "r", encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                rec = json.loads(line)
+                                det = rec.get("details") or {}
+                                lip, ltv = det.get("ip"), det.get("label_tv")
+                                if rec.get("action") == "TV_AUTO_OFF" and lip and ltv:
+                                    nama_map[str(lip)] = str(ltv)
+                            except Exception:
+                                continue
+                except OSError:
+                    pass
+
+            candidates = sorted(ips - known,
+                                key=lambda ip: [int(x) for x in ip.split(".")])
+            tv_limit, _ = get_edition_limits(current_user=self._resolve_license_user())
+            tv_limit = self._promo_override_tv_limit(tv_limit)
+            current = len(getattr(self, "_semua_kartu_tv", []))
+            room = max(0, tv_limit - current)
+            if room <= 0:
+                print(f"[TV] Auto-restore dilewati: {len(candidates)} kartu baru — limit {tv_limit} tercapai.", flush=True)
+                return
+
+            allowed = candidates[:room]
+
+            # Pembuatan kartu harus di main thread (widget Tk). Scan sudah di
+            # thread; UI disatukan lewat satu after(0) agar tidak blokir login.
+            def _build_cards():
+                try:
+                    current = len(getattr(self, "_semua_kartu_tv", []))
+                    for ip in allowed:
+                        try:
+                            nama = nama_map.get(ip) or f"TV {self.jumlah_tv + 1}"
+                            self._tambah_tv(ip, nama, 0, None, restore=True)
+                            print(f"[TV] Auto-restore: {ip} -> {nama}", flush=True)
+                        except Exception as e:
+                            print(f"[TV] Auto-restore gagal untuk {ip}: {e}", flush=True)
+                    if len(getattr(self, "_semua_kartu_tv", [])) - current == len(allowed):
+                        self._simpan_daftar_tv()
+                    else:
+                        print("[TV] Auto-restore sebagian: config tidak ditimpa agar kartu lain tak hilang.", flush=True)
+                except Exception as e:
+                    print(f"[TV] Auto-restore UI error: {e}", flush=True)
+
+            self._ui_call(_build_cards)
+        except Exception as e:
+            print(f"[TV] Gagal auto-restore daftar_tv: {e}", flush=True)
 
     def _simpan_daftar_warnet(self):
         """Simpan daftar kursi warnet ke config ('daftar_warnet') supaya bisa
@@ -10848,7 +11310,8 @@ class AutoRentApp(ctk.CTk):
         tv_limit = self._promo_override_tv_limit(tv_limit)
         if len(self._semua_kartu_tv) >= tv_limit:
             if restore:
-                return  # saat muat ulang: lewati diam-diam
+                print(f"[TV] Restore dilewati '{nama}' ({ip}) — limit {tv_limit} TV tercapai", flush=True)
+                return
             messagebox.showwarning("Limit Tercapai",
                 f"Paket Anda hanya mengizinkan maksimal {tv_limit} TV.\n"
                 f"Hapus beberapa TV atau upgrade paket.")
@@ -10873,7 +11336,8 @@ class AutoRentApp(ctk.CTk):
         self._semua_kartu_tv.append(kartu)
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
-        self._simpan_daftar_tv()
+        if not restore:
+            self._simpan_daftar_tv()
         self.after_idle(self._debounced_layout_dash)
     
     # ── PIN KEAMANAN (HAPUS TV & KURSI WANET) ──────────────────────────
@@ -11216,13 +11680,15 @@ class AutoRentApp(ctk.CTk):
         warnet_limit = self._promo_override_tv_limit(warnet_limit, is_warnet=True)
         if len(getattr(self, '_semua_kartu_warnet', [])) >= warnet_limit:
             if restore:
+                print(f"[WARNET] Restore dilewati '{nama}' — limit {warnet_limit} kursi tercapai", flush=True)
                 return  # saat muat ulang: lewati diam-diam
             messagebox.showwarning("Limit Tercapai",
                 f"Paket Anda hanya mengizinkan maksimal {warnet_limit} PC Warnet.\n"
                 f"Hapus beberapa PC atau upgrade paket.")
             return
-        # Update/register PC in config
-        if pc_info:
+        # Update/register PC in config (read-only saat restore agar config
+        # tidak ikut tertulis ulang dari jalur pemulihan daftar_warnet)
+        if pc_info and not restore:
             try:
                 cfg = ConfigManager.load()
                 for c in cfg.get("warnet_clients", []):
@@ -11268,7 +11734,8 @@ class AutoRentApp(ctk.CTk):
             pass
         if hasattr(self, '_refresh_warnet_footer'):
             self._refresh_warnet_footer()
-        self._simpan_daftar_warnet()
+        if not restore:
+            self._simpan_daftar_warnet()
         self.after_idle(self._debounced_layout_warnet)
         return kartu
 

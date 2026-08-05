@@ -152,12 +152,15 @@ class TvWsHub:
                 pass
             self._ws_server = None
         with self._clients_lock:
-            for c in list(self.clients.values()):
-                try:
-                    await c["websocket"].close()
-                except Exception:
-                    pass
+            pending_close = [c.get("websocket")
+                             for c in self.clients.values()
+                             if c.get("websocket") is not None]
             self.clients.clear()
+        for ws_obj in pending_close:
+            try:
+                await asyncio.wait_for(ws_obj.close(), timeout=5)
+            except Exception:
+                pass
 
     # ── Server coroutine ──────────────────────────────────────────────────────
     async def _serve(self) -> None:
@@ -237,11 +240,8 @@ class TvWsHub:
                         continue
                     with self._clients_lock:
                         old = self.clients.get(meja_id)
-                        if old is not None and old.get("websocket") is not websocket:
-                            try:
-                                await old["websocket"].close()
-                            except Exception:
-                                pass
+                        old_ws = (old.get("websocket") if old is not None
+                                  and old.get("websocket") is not websocket else None)
                         self.clients[meja_id] = {
                             "websocket": websocket,
                             "address": address,
@@ -250,6 +250,13 @@ class TvWsHub:
                             "last_seen": time.time(),
                             "screen_on": None,
                         }
+                    # Tutup koneksi lama DI LUAR lock — koneksi macet tidak boleh
+                    # membekukan event loop / thread UI (deadlock fix).
+                    if old_ws is not None:
+                        try:
+                            await asyncio.wait_for(old_ws.close(), timeout=5)
+                        except Exception:
+                            pass
                     state = self._build_state_snapshot(meja_id)
                     await websocket.send(json.dumps({
                         "type": "REGISTERED",

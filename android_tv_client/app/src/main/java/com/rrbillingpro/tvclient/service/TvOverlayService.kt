@@ -72,6 +72,7 @@ class TvOverlayService : Service() {
     // TV bangun dari tidur, lalu pindah ke port/input terakhir yang dipakai.
     @Volatile
     private var lastPromoUrl: String = ""
+    private var lastPromoType: String = "video"
 
     private var screenReceiver: BroadcastReceiver? = null
 
@@ -147,14 +148,19 @@ class TvOverlayService : Service() {
 
     /** SCREEN_ON: promo 1x -> input terakhir. Jalan walau app sudah di-unlock
      * (server kirim UNLOCK_SCREEN saat kasir konfirmasi waktu habis) — selama
-     * lastPromoUrl masih terisi (dihapus saat sesi baru dimulai). Lockscreen
-     * "WAKTU SEWA HABIS" tidak muncul lagi di alur bangun-tidur. */
+     * lastPromoUrl masih terisi. Lockscreen "WAKTU SEWA HABIS" tidak muncul
+     * lagi di alur bangun-tidur.
+     *
+     * R3: media terakhir (video ATAU gambar) diputar setiap TV bangun dari
+     * tidur, sampai media baru dikirim (SHOW_MEDIA/LOCK_SCREEN mengganti arm).
+     * Server TIDAK lagi mengirim ulang SHOW_MEDIA saat reconnect WS — jadi
+     * tidak ada dobel putar dan tidak ada putar ulang saat blip/restart. */
     private fun onScreenWake() {
         if (lastPromoUrl.isBlank()) return
         mainHandler.post {
-            // MediaActivity memutar video sekali lalu otomatis switch ke
+            // MediaActivity memutar media sekali lalu otomatis switch ke
             // port/input terakhir yang dipakai (tv_last_used_input_id).
-            MediaActivity.start(this, "video", lastPromoUrl)
+            MediaActivity.start(this, lastPromoType, lastPromoUrl)
         }
     }
 
@@ -295,7 +301,8 @@ class TvOverlayService : Service() {
                 lastTotal = msg.totalTagihan.ifBlank { "Rp 0" }
                 lastMeja = msg.mejaId.ifBlank { lastMeja }
                 lastRental = msg.namaRental.ifBlank { lastRental }
-                lastPromoUrl = ""
+                // R3: lastPromoUrl TIDAK dihapus saat sesi mulai — promo tetap
+                // diputar 1x setiap TV bangun dari tidur walau ada sesi berjalan.
                 applyOverlayConfig(msg.overlayMode, msg.overlayLastMinutes)
                 setLocked(false, null)
                 overlay?.show(msg.mejaId, msg.namaRental, msg.totalTagihan)
@@ -363,6 +370,10 @@ class TvOverlayService : Service() {
 
             Actions.SHOW_MEDIA -> {
                 if (msg.mediaUrl.isNotBlank()) {
+                    // Arm promo untuk diputar 1x saat TV bangun dari tidur
+                    // (media terakhir, video ATAU gambar — sampai media baru).
+                    lastPromoUrl = msg.mediaUrl
+                    lastPromoType = msg.mediaType.ifBlank { "video" }
                     MediaActivity.start(this, msg.mediaType, msg.mediaUrl)
                     updateNotification("Media: ${msg.mediaType}")
                 }
