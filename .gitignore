@@ -68,8 +68,14 @@ rr_billing_github_users.json
 media_promo/
 invoices_bukti/
 
-# Kunci privat ADB pairing TV - JANGAN commit (cert publik boleh)
-android_tv_certs/key_*.pem
+# Data pairing ADB TV (cert+key) - data per-pelanggan, JANGAN commit
+android_tv_certs/
+signing_test_private.pem
+
+# Folder kiriman update / web / dashboard lokal (bukan untuk repo bersama)
+Update_20*/
+billing_web/
+monitoring_dashboard/
 
 # Android build artifacts
 android_tv_client/.gradle/
