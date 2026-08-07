@@ -36,6 +36,12 @@ RRBillingPro_Package/RRBILLINGPRO/
 
 # Folder kiriman update manual (exe besar, bukan untuk repo)
 Update_v2.4.1_Manual/
+Update_MediaPromo_*/
+
+# Paket client warnet / platform-tools lokal (bukan untuk repo)
+CLIENTPCWARNET/
+platform-tools/
+RRBillingPro_Package/android_tv_certs/
 
 # Hasil ekstrak/inspeksi build
 RRBILLINGPRO.exe_extracted/
