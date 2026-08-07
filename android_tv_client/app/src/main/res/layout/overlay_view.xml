@@ -51,11 +51,21 @@
     </LinearLayout>
 
     <TextView
+        android:id="@+id/tv_lunas"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Rp 0 LUNAS"
+        android:textColor="@color/neon_green"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:maxLines="1" />
+
+    <TextView
         android:id="@+id/tv_tagihan"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Rp 6.000"
-        android:textColor="@color/neon_yellow"
+        android:text="Rp 0 TAGIHAN"
+        android:textColor="@color/neon_red"
         android:textSize="12sp"
         android:textStyle="bold"
         android:maxLines="1" />

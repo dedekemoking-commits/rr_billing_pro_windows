@@ -28,22 +28,25 @@ class OverlayWidget(private val context: Context) {
     private var tvTimer: TextView? = null
     private var tvMeja: TextView? = null
     private var tvRental: TextView? = null
+    private var tvLunas: TextView? = null
     private var tvTagihan: TextView? = null
 
     val isShowing: Boolean get() = root != null
 
-    fun show(mejaId: String, namaRental: String, totalTagihan: String) {
+    fun show(mejaId: String, namaRental: String, totalTagihan: String,
+             lunasTotal: String = "", tagihanTotal: String = "") {
         if (root != null) return
         val view = inflater.inflate(R.layout.overlay_view, null)
         tvTimer = view.findViewById(R.id.tv_timer)
         tvMeja = view.findViewById(R.id.tv_meja)
         tvRental = view.findViewById(R.id.tv_rental)
+        tvLunas = view.findViewById(R.id.tv_lunas)
         tvTagihan = view.findViewById(R.id.tv_tagihan)
 
         tvMeja?.text = mejaId
         tvRental?.text = namaRental
-        tvTagihan?.text = totalTagihan
         tvTimer?.text = "00:00:00"
+        updateBill(totalTagihan, lunasTotal, tagihanTotal)
 
         val type = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -83,9 +86,28 @@ class OverlayWidget(private val context: Context) {
         mainHandler.post { tvTimer?.text = hms }
     }
 
-    fun updateBill(totalTagihan: String) {
-        mainHandler.post { tvTagihan?.text = totalTagihan }
+    fun updateBill(totalTagihan: String, lunasTotal: String = "", tagihanTotal: String = "") {
+        mainHandler.post {
+            tvTagihan?.text = buildTagihan(tagihanTotal)
+            tvLunas?.text = buildLunas(lunasTotal)
+            // Sembunyikan baris yang nilainya nol/kosong agar popup ringkas
+            tvLunas?.visibility = if (isNonZero(lunasTotal)) View.VISIBLE else View.GONE
+            tvTagihan?.visibility = if (isNonZero(tagihanTotal)) View.VISIBLE else View.GONE
+        }
     }
+
+    fun updateRental(namaRental: String) {
+        mainHandler.post { tvRental?.text = namaRental }
+    }
+
+    private fun isNonZero(value: String): Boolean =
+        !value.isNullOrBlank() && value.replace(Regex("[^0-9]"), "").toIntOrNull()?.let { it > 0 } ?: false
+
+    private fun buildLunas(value: String): String =
+        if (isNonZero(value)) "${value.trim()}  ✅ LUNAS" else ""
+
+    private fun buildTagihan(value: String): String =
+        if (isNonZero(value)) "${value.trim()}  ⏳ TAGIHAN" else ""
 
     fun hide() {
         val view = root ?: return
@@ -98,6 +120,7 @@ class OverlayWidget(private val context: Context) {
             tvTimer = null
             tvMeja = null
             tvRental = null
+            tvLunas = null
             tvTagihan = null
         }
     }

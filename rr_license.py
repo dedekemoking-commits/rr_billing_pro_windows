@@ -543,6 +543,31 @@ class LicenseManager:
         return trial_cfg or {}
 
     @staticmethod
+    def _effective_edition(lic: dict) -> str:
+        """Edition efektif dari data lisensi.
+
+        Field 'edition' bisa saja tertinggal nilai lama (mis. "BULANAN") setelah
+        user upgrade ke kode seumur hidup. Karena pola kode LIFETIME memakai
+        'expiry' tahun jauh (>= 2099), edition dianggap LIFETIME kalau label
+        LIFETIME pernah tersimpan ATAU pola expiry-nya menunjukkan seumur hidup.
+        """
+        try:
+            ed = str((lic or {}).get("edition") or "").strip().upper()
+            if ed == "LIFETIME":
+                return ed
+            exp = str((lic or {}).get("expiry") or "")
+            if exp:
+                year = int(exp[:4])
+                if year >= 2099:
+                    return "LIFETIME"
+            return ed
+        except Exception:
+            try:
+                return str((lic or {}).get("edition") or "").strip().upper()
+            except Exception:
+                return ""
+
+    @staticmethod
     def get_status(current_user: str = "") -> dict:
         """
         Get license status. Support per-username trial binding.
@@ -602,7 +627,7 @@ class LicenseManager:
                     "status": "active",
                     "sisa_hari": sisa_hari,
                     "pesan": lic.get("pesan", f"Lisensi aktif ✅ (sisa {sisa_hari} hari)"),
-                    "edition": lic.get("edition", ""),
+                    "edition": LicenseManager._effective_edition(lic),
                 }
             else:
                 lic["aktif"] = False

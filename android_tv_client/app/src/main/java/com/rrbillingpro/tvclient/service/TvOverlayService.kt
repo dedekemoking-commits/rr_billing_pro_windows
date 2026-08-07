@@ -57,6 +57,12 @@ class TvOverlayService : Service() {
     private var lastTotal: String = "Rp 0"
 
     @Volatile
+    private var lastLunas: String = ""
+
+    @Volatile
+    private var lastTagihan: String = ""
+
+    @Volatile
     private var lastMeja: String = "MEJA"
 
     @Volatile
@@ -299,13 +305,16 @@ class TvOverlayService : Service() {
         when (msg.action) {
             Actions.START_TIMER -> {
                 lastTotal = msg.totalTagihan.ifBlank { "Rp 0" }
+                lastLunas = msg.lunasTotal
+                lastTagihan = msg.tagihanTotal
                 lastMeja = msg.mejaId.ifBlank { lastMeja }
                 lastRental = msg.namaRental.ifBlank { lastRental }
                 // R3: lastPromoUrl TIDAK dihapus saat sesi mulai — promo tetap
                 // diputar 1x setiap TV bangun dari tidur walau ada sesi berjalan.
                 applyOverlayConfig(msg.overlayMode, msg.overlayLastMinutes)
                 setLocked(false, null)
-                overlay?.show(msg.mejaId, msg.namaRental, msg.totalTagihan)
+                overlay?.show(msg.mejaId, msg.namaRental, msg.totalTagihan,
+                    msg.lunasTotal, msg.tagihanTotal)
                 timer?.start(msg.sisaDetik)
                 updateTimerUi(msg.sisaDetik)
                 updateNotification("${msg.mejaId} — ${OverlayWidget.formatHms(msg.sisaDetik)}")
@@ -331,7 +340,9 @@ class TvOverlayService : Service() {
             Actions.UPDATE_TOTAL -> {
                 // Total berjalan Main Bebas: diperbarui kasir tiap detik.
                 lastTotal = msg.totalTagihan.ifBlank { lastTotal }
-                overlay?.updateBill(msg.totalTagihan)
+                if (msg.lunasTotal.isNotBlank()) lastLunas = msg.lunasTotal
+                if (msg.tagihanTotal.isNotBlank()) lastTagihan = msg.tagihanTotal
+                overlay?.updateBill(msg.totalTagihan, msg.lunasTotal, msg.tagihanTotal)
             }
 
             Actions.SYNC_TIMER -> {
@@ -339,7 +350,9 @@ class TvOverlayService : Service() {
                 applyOverlayConfig(msg.overlayMode, msg.overlayLastMinutes)
                 if (msg.totalTagihan.isNotBlank()) {
                     lastTotal = msg.totalTagihan
-                    overlay?.updateBill(msg.totalTagihan)
+                    if (msg.lunasTotal.isNotBlank()) lastLunas = msg.lunasTotal
+                    if (msg.tagihanTotal.isNotBlank()) lastTagihan = msg.tagihanTotal
+                    overlay?.updateBill(msg.totalTagihan, msg.lunasTotal, msg.tagihanTotal)
                 }
                 timer?.sync(msg.sisaDetik)
             }
@@ -365,6 +378,14 @@ class TvOverlayService : Service() {
                         lockDetail = updated
                         LockScreenActivity.updateDetail(updated)
                     }
+                }
+            }
+
+            Actions.UPDATE_RENTAL -> {
+                // Nama rental (popup kanan atas) diganti kasir dari Profil.
+                if (msg.namaRental.isNotBlank()) {
+                    lastRental = msg.namaRental
+                    overlay?.updateRental(msg.namaRental)
                 }
             }
 
@@ -417,14 +438,16 @@ class TvOverlayService : Service() {
 
     private fun ensureOverlayVisible() {
         val o = overlay ?: return
-        if (!o.isShowing) o.show(lastMeja, lastRental, lastTotal)
+        if (!o.isShowing) o.show(lastMeja, lastRental, lastTotal, lastLunas, lastTagihan)
     }
 
     private fun autoLock() {
         overlay?.hide()
         // Pakai detail dari server bila ada; kalau belum sempat tiba, pakai
         // total terakhir yang diketahui supaya tidak tampil "Rp 0".
-        val detail = lockDetail ?: LockDetail(lastMeja, "-", "Rp 0", lastTotal)
+        val detail = lockDetail ?: LockDetail(
+            lastMeja, "-", "Rp 0", lastTotal,
+            lunasTotal = lastLunas, tagihanTotal = lastTagihan)
         setLocked(true, detail)
     }
 

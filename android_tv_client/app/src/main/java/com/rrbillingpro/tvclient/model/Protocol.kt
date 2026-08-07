@@ -16,6 +16,7 @@ object Actions {
     const val LOCK_SCREEN = "LOCK_SCREEN"
     const val UNLOCK_SCREEN = "UNLOCK_SCREEN"
     const val UPDATE_LOGO = "UPDATE_LOGO"
+    const val UPDATE_RENTAL = "UPDATE_RENTAL"
     const val SHOW_MEDIA = "SHOW_MEDIA"
     const val HIDE_MEDIA = "HIDE_MEDIA"
     const val PING = "PING"
@@ -24,6 +25,7 @@ object Actions {
 data class BillLine(
     val item: String,
     val harga: String,
+    val lunas: Boolean = true,
 )
 
 data class LockDetail(
@@ -32,6 +34,9 @@ data class LockDetail(
     val fnb: String,
     val total: String,
     val sewaHarga: String = "",
+    val sewaLunas: Boolean = true,
+    val lunasTotal: String = "",
+    val tagihanTotal: String = "",
     val makanan: List<BillLine> = emptyList(),
     val minuman: List<BillLine> = emptyList(),
     val logoUrl: String = "",
@@ -49,6 +54,8 @@ data class ServerMessage(
     val sisaDetik: Int,
     val namaRental: String,
     val totalTagihan: String,
+    val lunasTotal: String,
+    val tagihanTotal: String,
     val pesan: String,
     val detail: LockDetail?,
     val mediaType: String,
@@ -73,12 +80,16 @@ data class ServerMessage(
                         fnb = d.optString("fnb", "Rp 0"),
                         total = d.optString("total", "Rp 0"),
                         sewaHarga = d.optString("sewa_harga", ""),
+                        sewaLunas = d.optBoolean("sewa_lunas", true),
+                        lunasTotal = d.optString("lunas_total", ""),
+                        tagihanTotal = d.optString("tagihan_total", ""),
                         makanan = d.optJSONArray("makanan")?.let { arr ->
                             List(arr.length()) { i ->
                                 val line = arr.optJSONObject(i)
                                 BillLine(
                                     line?.optString("item", "") ?: "",
                                     line?.optString("harga", "") ?: "",
+                                    line?.optBoolean("lunas", true) ?: true,
                                 )
                             }
                         } ?: emptyList(),
@@ -88,6 +99,7 @@ data class ServerMessage(
                                 BillLine(
                                     line?.optString("item", "") ?: "",
                                     line?.optString("harga", "") ?: "",
+                                    line?.optBoolean("lunas", true) ?: true,
                                 )
                             }
                         } ?: emptyList(),
@@ -101,6 +113,8 @@ data class ServerMessage(
                         sisaDetik = o.optInt("sisa_detik", 0),
                         namaRental = o.optString("nama_rental", "RR Billing Pro"),
                         totalTagihan = o.optString("total_tagihan", "Rp 0"),
+                        lunasTotal = o.optString("lunas_total", ""),
+                        tagihanTotal = o.optString("tagihan_total", ""),
                         pesan = o.optString("pesan", "WAKTU SEWA HABIS"),
                         detail = detail,
                         mediaType = o.optString("type", ""),

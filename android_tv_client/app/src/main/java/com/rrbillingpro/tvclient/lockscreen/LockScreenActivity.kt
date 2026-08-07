@@ -86,24 +86,32 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
         val container = findViewById<LinearLayout>(R.id.ll_bill_rows)
         container.removeAllViews()
 
-        // Sewa: "1 Jam + 2 Jam = Rp 30.000"
+        // Sewa: "1 Jam + 2 Jam = Rp 30.000" — warna hijau jika LUNAS, merah jika TAGIHAN
         val sewaText = if (d.sewaHarga.isNotBlank()) "${d.sewa} = ${d.sewaHarga}" else d.sewa
-        addBillRow(container, "Sewa", sewaText)
+        addBillRow(container, "Sewa", sewaText, bold = false, lunas = d.sewaLunas)
 
         if (d.makanan.isNotEmpty()) {
             addBillHeader(container, "Makanan")
-            d.makanan.forEach { addBillRow(container, it.item, it.harga) }
+            d.makanan.forEach { addBillRow(container, it.item, it.harga, lunas = it.lunas) }
         }
         if (d.minuman.isNotEmpty()) {
             addBillHeader(container, "Minuman")
-            d.minuman.forEach { addBillRow(container, it.item, it.harga) }
+            d.minuman.forEach { addBillRow(container, it.item, it.harga, lunas = it.lunas) }
         }
         if (d.makanan.isEmpty() && d.minuman.isEmpty()) {
-            addBillRow(container, "Makanan & Minuman", d.fnb)
+            addBillRow(container, "Makanan & Minuman", d.fnb, lunas = true)
         }
 
         addDivider(container)
         addBillRow(container, "TOTAL", d.total, bold = true)
+
+        // Rincian LUNAS / TAGIHAN berwarna (jika server mengirim keduanya)
+        if (d.lunasTotal.isNotBlank()) {
+            addBillRow(container, "LUNAS", d.lunasTotal, bold = true, lunas = true)
+        }
+        if (d.tagihanTotal.isNotBlank()) {
+            addBillRow(container, "TAGIHAN", d.tagihanTotal, bold = true, lunas = false)
+        }
     }
 
     private fun addBillHeader(parent: LinearLayout, text: String) {
@@ -119,7 +127,8 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
         })
     }
 
-    private fun addBillRow(parent: LinearLayout, label: String, value: String, bold: Boolean = false) {
+    private fun addBillRow(parent: LinearLayout, label: String, value: String,
+                           bold: Boolean = false, lunas: Boolean = true) {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row.addView(TextView(this).apply {
             text = label
@@ -129,8 +138,9 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         row.addView(TextView(this).apply {
-            text = value
-            setTextColor(getColor(if (bold) R.color.neon_yellow else R.color.white))
+            // Baris rincian item: tampilkan status LUNAS/TAGIHAN berwarna setelah harga
+            text = value + if (bold) "" else if (lunas) "  ✅ LUNAS" else "  ⏳ TAGIHAN"
+            setTextColor(getColor(if (bold) R.color.neon_yellow else if (lunas) R.color.neon_green else R.color.neon_red))
             textSize = 15f
             if (bold) setTypeface(typeface, Typeface.BOLD)
         })

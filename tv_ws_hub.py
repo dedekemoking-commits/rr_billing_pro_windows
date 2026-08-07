@@ -341,10 +341,18 @@ class TvWsHub:
                 total = kartu._total_setelah_diskon()
             except Exception:
                 total = getattr(kartu, "paket_harga_tetap", 0) + getattr(kartu, "biaya_pesanan", 0)
+            lunas, tagihan = 0, 0
+            if hasattr(kartu, "_split_payment"):
+                try:
+                    lunas, tagihan = kartu._split_payment()
+                except Exception:
+                    lunas, tagihan = 0, 0
             if getattr(kartu, "is_bebas", False):
-                cmds.append(self._msg_start(meja_id, -1, nama_rental, total))
+                cmds.append(self._msg_start(meja_id, -1, nama_rental, total,
+                                            lunas_total=lunas, tagihan_total=tagihan))
             elif getattr(kartu, "sisa_waktu", 0) > 0:
-                cmds.append(self._msg_start(meja_id, int(kartu.sisa_waktu), nama_rental, total))
+                cmds.append(self._msg_start(meja_id, int(kartu.sisa_waktu), nama_rental, total,
+                                            lunas_total=lunas, tagihan_total=tagihan))
         elif locked is not None:
             cmds.append(self._msg_lock(meja_id, locked.get("pesan", "WAKTU SEWA HABIS"),
                                        locked.get("detail_transaksi", {})))
@@ -397,7 +405,7 @@ class TvWsHub:
 
     # ── Public API (thread-safe, dipanggil dari thread UI) ───────────────────
     def _msg_start(self, meja_id: str, sisa_detik: int, nama_rental: str,
-                   total_tagihan: Any) -> dict:
+                   total_tagihan: Any, lunas_total: Any = 0, tagihan_total: Any = 0) -> dict:
         mode, minutes = self._overlay_cfg()
         return {
             "action": "START_TIMER",
@@ -405,14 +413,18 @@ class TvWsHub:
             "sisa_detik": int(sisa_detik),
             "nama_rental": nama_rental,
             "total_tagihan": fmt_rp_ws(total_tagihan),
+            "lunas_total": fmt_rp_ws(lunas_total),
+            "tagihan_total": fmt_rp_ws(tagihan_total),
             "overlay_mode": mode,
             "overlay_last_minutes": minutes,
         }
 
     def send_start_timer(self, meja_id: str, sisa_detik: int,
-                         total_tagihan: Any = 0, nama_rental: Optional[str] = None) -> bool:
+                         total_tagihan: Any = 0, nama_rental: Optional[str] = None,
+                         lunas_total: Any = 0, tagihan_total: Any = 0) -> bool:
         msg = self._msg_start(meja_id, sisa_detik,
-                              nama_rental or self._get_nama_rental(), total_tagihan)
+                              nama_rental or self._get_nama_rental(), total_tagihan,
+                              lunas_total, tagihan_total)
         with self._locked_lock:
             self._locked.pop(meja_id, None)
         ok = self._send_to(meja_id, msg)
@@ -420,18 +432,24 @@ class TvWsHub:
               f"{'terkirim' if ok else 'GAGAL (client tidak terhubung)'}")
         return ok
 
-    def send_update_total(self, meja_id: str, total_tagihan: Any = 0) -> bool:
+    def send_update_total(self, meja_id: str, total_tagihan: Any = 0,
+                          lunas_total: Any = 0, tagihan_total: Any = 0) -> bool:
         """Update tagihan berjalan (Main Bebas) — total dikirim tiap detik."""
         return self._send_to(meja_id, {"action": "UPDATE_TOTAL", "meja_id": meja_id,
-                                       "total_tagihan": fmt_rp_ws(total_tagihan)})
+                                       "total_tagihan": fmt_rp_ws(total_tagihan),
+                                       "lunas_total": fmt_rp_ws(lunas_total),
+                                       "tagihan_total": fmt_rp_ws(tagihan_total)})
 
     def send_sync_timer(self, meja_id: str, sisa_detik: int,
-                        total_tagihan: Any = 0) -> bool:
+                        total_tagihan: Any = 0,
+                        lunas_total: Any = 0, tagihan_total: Any = 0) -> bool:
         """Sinkronisasi sisa waktu + total tagihan kasir → TV (dikirim tiap detik)."""
         mode, minutes = self._overlay_cfg()
         return self._send_to(meja_id, {"action": "SYNC_TIMER", "meja_id": meja_id,
                                        "sisa_detik": int(sisa_detik),
                                        "total_tagihan": fmt_rp_ws(total_tagihan),
+                                       "lunas_total": fmt_rp_ws(lunas_total),
+                                       "tagihan_total": fmt_rp_ws(tagihan_total),
                                        "overlay_mode": mode,
                                        "overlay_last_minutes": minutes})
 
@@ -493,6 +511,40 @@ class TvWsHub:
         sent = 0
         for mid in self.get_connected_ids():
             if self.send_update_logo(mid, logo_url):
+                sent += 1
+        return sent
+
+    def send_update_rental(self, meja_id: str, nama_rental: str) -> bool:
+        """Kirim UPDATE_RENTAL ke satu TV (ganti nama popup kanan atas)."""
+        return self._send_to(meja_id, {"action": "UPDATE_RENTAL", "meja_id": meja_id,
+                                       "nama_rental": nama_rental})
+
+    def broadcast_update_rental(self, nama_rental: str) -> int:
+        """Kirim UPDATE_RENTAL ke semua client terhubung; return jumlah terkirim."""
+        sent = 0
+        for mid in self.get_connected_ids():
+            if self.send_update_rental(mid, nama_rental):
+                sent += 1
+        return sent
+
+    def push_current_state(self, meja_id: str) -> int:
+        """Kirim ulang snapshot state (START_TIMER / LOCK / STOP) ke satu TV.
+
+        Dipakai saat server restart: kalau TV telah reconnect lebih dulu sebelum
+        kasir login ulang, snapshot lama (saat kartu belom terbangun) berisi
+        STOP_TIMER. Setelah sesi direstore, hub mengirim ulang snapshot terbaru
+        supaya popup & countdown TV hidup kembali.
+        """
+        if not self._running:
+            return 0
+        try:
+            cmds = self._build_state_snapshot(meja_id)
+        except Exception as e:
+            _LOGGER.exception("push_current_state error: %s", e)
+            return 0
+        sent = 0
+        for cmd in cmds:
+            if self._send_to(meja_id, cmd):
                 sent += 1
         return sent
 

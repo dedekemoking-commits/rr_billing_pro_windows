@@ -1743,36 +1743,6 @@ class ADBHelper:
         except ImportError:
             return False
 
-    _adb_path_cache: Optional[str] = None
-
-    @classmethod
-    def _adb_binary(cls) -> Optional[str]:
-        """Lokasi binary adb: 1) dibundel di folder app, 2) folder source,
-        3) PATH sistem. Hasil di-cache."""
-        if cls._adb_path_cache:
-            return cls._adb_path_cache
-        candidates = []
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            candidates.append(os.path.join(meipass, "platform-tools", "adb.exe"))
-        try:
-            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-            candidates.append(os.path.join(exe_dir, "platform-tools", "adb.exe"))
-        except Exception:
-            pass
-        try:
-            src_dir = os.path.dirname(os.path.abspath(__file__))
-            candidates.append(os.path.join(src_dir, "platform-tools", "adb.exe"))
-        except Exception:
-            pass
-        for cand in candidates:
-            if cand and os.path.isfile(cand):
-                cls._adb_path_cache = cand
-                return cand
-        found = shutil.which("adb")
-        cls._adb_path_cache = found or ""
-        return found
-
     @classmethod
     def set_connection_method(cls, ip, method="atpv2"):
         with cls._lock:
@@ -1815,10 +1785,7 @@ class ADBHelper:
     def _adb_connect(cls, ip, port=5555):
         import subprocess
         try:
-            adb_path = cls._adb_binary()
-            if not adb_path:
-                return {"status": "error", "message": "adb tidak ditemukan"}
-            r = subprocess.run([adb_path, "connect", f"{ip}:{port}"],
+            r = subprocess.run(["adb", "connect", f"{ip}:{port}"],
                                capture_output=True, text=True, timeout=10,
                                **subprocess_no_window_kwargs())
             if "connected" in r.stdout.lower() or "already connected" in r.stdout.lower():
@@ -1921,10 +1888,7 @@ class ADBHelper:
     def adb_shell(cls, ip, command, timeout=15, port=5555):
         """Jalankan perintah ADB shell pada TV target."""
         try:
-            adb_path = cls._adb_binary()
-            if not adb_path:
-                return False, "adb tidak ditemukan"
-            r = subprocess.run([adb_path, "-s", f"{ip}:{port}", "shell", command],
+            r = subprocess.run(["adb", "-s", f"{ip}:{port}", "shell", command],
                                capture_output=True, text=True, timeout=timeout,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -1978,10 +1942,7 @@ class ADBHelper:
     def adb_push(cls, ip, local_path, remote_path="/sdcard/Download/"):
         """Push file ke TV via ADB."""
         try:
-            adb_path = cls._adb_binary()
-            if not adb_path:
-                return False, "adb tidak ditemukan"
-            r = subprocess.run([adb_path, "-s", f"{ip}:5555", "push", local_path, remote_path],
+            r = subprocess.run(["adb", "-s", f"{ip}:5555", "push", local_path, remote_path],
                                capture_output=True, text=True, timeout=120,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -1998,10 +1959,7 @@ class ADBHelper:
     def adb_install(cls, ip, apk_path):
         """Install APK ke TV via ADB."""
         try:
-            adb_path = cls._adb_binary()
-            if not adb_path:
-                return False, "adb tidak ditemukan"
-            r = subprocess.run([adb_path, "-s", f"{ip}:5555", "install", "-r", apk_path],
+            r = subprocess.run(["adb", "-s", f"{ip}:5555", "install", "-r", apk_path],
                                capture_output=True, text=True, timeout=180,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -7108,6 +7066,10 @@ class KartuTV(tk.Canvas):
                             app.riwayat_meta[idx]['paket_harga'] = paket_harga_baru
                             app.riwayat_meta[idx]['pesanan_total'] = pesanan_total_baru
                             app.riwayat_meta[idx]['total'] = total_semua
+                            app.riwayat_meta[idx]['pesanan'] = {
+                                str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                            threading.Thread(
+                                target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
                     except Exception:
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
@@ -7210,12 +7172,16 @@ class KartuTV(tk.Canvas):
                                 app.riwayat_meta[idx]['total'] = total_int
                                 app.riwayat_meta[idx]['diskoni'] = self.diskoni
                                 app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                                app.riwayat_meta[idx]['pesanan'] = {
+                                    str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                                threading.Thread(
+                                    target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
                         except Exception:
                             pass
-                        if hasattr(app, '_refresh_riwayat_summary'):
-                            app._refresh_riwayat_summary()
-                        if hasattr(app, '_save_riwayat'):
-                            app._save_riwayat()
+                    if hasattr(app, '_refresh_riwayat_summary'):
+                        app._refresh_riwayat_summary()
+                    if hasattr(app, '_save_riwayat'):
+                        app._save_riwayat()
             else:
                 total_int_baru = self._total_setelah_diskon(self.paket_harga_tetap + total_pesanan)
                 self._last_transaction_item = self.on_transaksi(
@@ -7340,6 +7306,10 @@ class KartuTV(tk.Canvas):
                         app.riwayat_meta[idx]['total'] = total_akhir
                         app.riwayat_meta[idx]['diskoni'] = self.diskoni
                         app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                        app.riwayat_meta[idx]['pesanan'] = {
+                            str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                        threading.Thread(
+                            target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
                     except Exception:
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
@@ -8084,11 +8054,16 @@ class KartuWarnet(tk.Canvas):
                         paket_harga = total_int - pesanan_total
                         if paket_harga < 0:
                             paket_harga = 0
-                        app.riwayat_meta[idx]['paket_harga'] = paket_harga
-                        app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
-                        app.riwayat_meta[idx]['total'] = total_int
-                        app.riwayat_meta[idx]['diskoni'] = self.diskoni
-                        app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                        if idx < len(app.riwayat_meta):
+                            app.riwayat_meta[idx]['paket_harga'] = paket_harga
+                            app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
+                            app.riwayat_meta[idx]['total'] = total_int
+                            app.riwayat_meta[idx]['diskoni'] = self.diskoni
+                            app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                            app.riwayat_meta[idx]['pesanan'] = {
+                                str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                            threading.Thread(
+                                target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
                     except Exception:
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
@@ -8187,6 +8162,10 @@ class KartuWarnet(tk.Canvas):
                                 app.riwayat_meta[idx]['total'] = total_int
                                 app.riwayat_meta[idx]['diskoni'] = self.diskoni
                                 app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                                app.riwayat_meta[idx]['pesanan'] = {
+                                    str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                                threading.Thread(
+                                    target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
                         except Exception:
                             pass
                         if hasattr(app, '_refresh_riwayat_summary'):
@@ -8311,6 +8290,10 @@ class KartuWarnet(tk.Canvas):
                             app.riwayat_meta[idx]['total'] = total_akhir
                             app.riwayat_meta[idx]['diskoni'] = self.diskoni
                             app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                            app.riwayat_meta[idx]['pesanan'] = {
+                                str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                            threading.Thread(
+                                target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
                     except Exception:
                         pass
                     if hasattr(app, '_refresh_riwayat_summary'):
@@ -10549,6 +10532,29 @@ class AutoRentApp(ctk.CTk):
             self._cloud_retry_job = self.after(30000, self._cloud_retry_tick)
         except Exception:
             pass
+
+    def _upsert_tx_cloud_from_index(self, idx):
+        """Upload ulang (replace by id) transaksi ke cloud setelah detailnya
+        berubah di riwayat lokal (mis. pesanan makanan/minuman ditambahkan)."""
+        try:
+            if idx is None or not (0 <= idx < len(self.riwayat_transaksi)):
+                return
+            if idx >= len(self.riwayat_meta):
+                return
+            row = self.riwayat_transaksi[idx]
+            meta = self.riwayat_meta[idx]
+            tx = self._build_tx_cloud(row, meta)
+            if not tx:
+                return
+            target = self._cloud_upload_target()
+            if not target:
+                return
+            fc = FirestoreClient()
+            ok = fc.upsert_transactions(target, [tx])
+            if ok:
+                _LOGGER.info("Transaksi %s di-update di cloud", tx.get("id"))
+        except Exception as e:
+            _LOGGER.warning("Gagal update transaksi cloud: %s", e)
 
     def _cloud_retry_tick(self):
         try:
