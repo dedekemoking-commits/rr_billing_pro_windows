@@ -5039,6 +5039,23 @@ class DialogPaket(ctk.CTkToplevel):
                            font=("Courier New", 9), fg_color=C_ACCENT, hover_color=C_ACCENT2,
                            command=self._update_total).pack(side="left")
 
+        # STATUS PEMBAYARAN — LUNAS (bayar) / TAGIHAN (belum bayar)
+        bayar_frame = ctk.CTkFrame(self, fg_color="transparent")
+        bayar_frame.pack(fill="x", padx=12, pady=(2, 2))
+        ctk.CTkLabel(bayar_frame, text="Status Pembayaran:",
+                     font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(anchor="w", pady=(0, 4))
+        self.paid_var = ctk.StringVar(value="lunas")
+        row_bayar = ctk.CTkFrame(bayar_frame, fg_color="transparent")
+        row_bayar.pack(fill="x")
+        ctk.CTkRadioButton(row_bayar, text="✅  LUNAS / BAYAR",
+                            variable=self.paid_var, value="lunas",
+                            font=("Russo One", 10, "bold"), text_color=C_GREEN,
+                            fg_color=C_ACCENT, hover_color=C_ACCENT2).pack(side="left", padx=(0, 20))
+        ctk.CTkRadioButton(row_bayar, text="⏳  TAGIHAN / BELUM BAYAR",
+                            variable=self.paid_var, value="belum",
+                            font=("Russo One", 10, "bold"), text_color="#FFCC00",
+                            fg_color=C_ACCENT, hover_color=C_ACCENT2).pack(side="left")
+
         # BUTTONS — paling bawah
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=12, pady=(8, 12))
@@ -5206,9 +5223,11 @@ class DialogPaket(ctk.CTkToplevel):
             paket_menit = info.get("menit", 0)
             pesanan = {}  # Kosong - makanan/minuman di tab TV
             total = paket_harga
+            paid = getattr(self, 'paid_var', None)
+            paid = False if (paid is not None and paid.get() == "belum") else True
             
             print(f"[DEBUG] Calling on_confirm with: {paket_nm}, {paket_harga}, {paket_menit}")
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total)
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total, paid=paid)
             print(f"[DEBUG] Destroying dialog")
             self.destroy()
         except Exception as e:
@@ -5242,7 +5261,9 @@ class DialogPaket(ctk.CTkToplevel):
             
             # Selalu kirim food-only total sebagai arg ke-5 agar _on_paket_confirm
             # bisa memisahkan biaya_pesanan dari paket_harga dengan benar.
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni, diskoni_mode)
+            paid = getattr(self, 'paid_var', None)
+            paid = False if (paid is not None and paid.get() == "belum") else True
+            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni, diskoni_mode, paid)
             self.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"Terjadi kesalahan: {str(e)}")
@@ -6198,6 +6219,22 @@ class KartuTV(tk.Canvas):
             app._set_transaksi_paid(self._last_transaction_item, paid)
 
     # ── TV WebSocket Hub helpers (Overlay & Lockscreen Android TV) ──────────
+    def _split_payment(self):
+        """Split tagihan sesi jadi (lunas_total, tagihan_total) untuk kartu TV.
+
+        Sesi yang sudah ditandai bayar (paid=True)  -> semua total masuk LUNAS.
+        Sesi belum bayar                            -> seluruh jumlah jadi TAGIHAN.
+        """
+        try:
+            total = self._total_setelah_diskon()
+        except Exception:
+            total = getattr(self, "paket_harga_tetap", 0) + getattr(self, "biaya_pesanan", 0)
+        if self.sesi_kosong():
+            return 0, 0
+        if getattr(self, "paid", True):
+            return total, 0
+        return 0, total
+
     def _hub(self):
         app = self.winfo_toplevel()
         return getattr(app, 'tv_ws_hub', None)
@@ -6207,7 +6244,9 @@ class KartuTV(tk.Canvas):
         if not hub:
             return
         try:
-            hub.send_start_timer(self.label_tv, sisa_detik, self._total_setelah_diskon())
+            lunas, tagihan = self._split_payment()
+            hub.send_start_timer(self.label_tv, sisa_detik, self._total_setelah_diskon(),
+                                 lunas_total=lunas, tagihan_total=tagihan)
         except Exception as e:
             print(f"[TV WS HUB] send_start error {self.label_tv}: {e}")
         # Paket sah dibuka → batalkan hitungan auto-off & kembali ke 10 menit.
@@ -6219,7 +6258,9 @@ class KartuTV(tk.Canvas):
         if not hub:
             return
         try:
-            hub.send_update_total(self.label_tv, total)
+            lunas, tagihan = self._split_payment()
+            hub.send_update_total(self.label_tv, total,
+                                  lunas_total=lunas, tagihan_total=tagihan)
         except Exception as e:
             print(f"[TV WS HUB] send_update_total error {self.label_tv}: {e}")
 
@@ -6228,7 +6269,9 @@ class KartuTV(tk.Canvas):
         if not hub:
             return
         try:
-            hub.send_sync_timer(self.label_tv, self.sisa_waktu, self._total_setelah_diskon())
+            lunas, tagihan = self._split_payment()
+            hub.send_sync_timer(self.label_tv, self.sisa_waktu, self._total_setelah_diskon(),
+                                lunas_total=lunas, tagihan_total=tagihan)
         except Exception as e:
             print(f"[TV WS HUB] send_sync_timer error {self.label_tv}: {e}")
 
@@ -7077,7 +7120,7 @@ class KartuTV(tk.Canvas):
                     if hasattr(app, '_save_riwayat'):
                         app._save_riwayat()
 
-    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal"):
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True):
         previous_session = not self.sesi_kosong()
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
@@ -7196,11 +7239,14 @@ class KartuTV(tk.Canvas):
             self._disable_btn("bayar_belum")
         else:
             if not previous_session:
-                self.paid = True   # sesi baru dimulai dalam status lunas
+                self.paid = paid   # status bayar sesuai pilihan kasir di popup
             self._enable_btn("bayar_lunas", "black", "white")
             self._enable_btn("bayar_belum", "black", "white")
             self._update_bayar_buttons()
         self._update_paid_badge()
+
+        if not self.is_bebas and not previous_session:
+            self._ws_send_total(self._total_setelah_diskon())
 
         app = self.winfo_toplevel()
         if hasattr(app, '_refresh_dashboard_total_pesanan'):
@@ -8074,7 +8120,7 @@ class KartuWarnet(tk.Canvas):
         if hasattr(app, '_refresh_warnet_footer'):
             app._refresh_warnet_footer()
 
-    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal"):
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True):
         previous_session = not self.sesi_kosong()
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
@@ -8187,7 +8233,7 @@ class KartuWarnet(tk.Canvas):
             self._disable_btn("bayar_belum")
         else:
             if not previous_session:
-                self.paid = True   # sesi baru dimulai dalam status lunas
+                self.paid = paid   # status bayar sesuai pilihan kasir di popup
             self._enable_btn("bayar_lunas", "black", "white")
             self._enable_btn("bayar_belum", "black", "white")
             self._update_bayar_buttons()
