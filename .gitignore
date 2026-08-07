@@ -43,6 +43,9 @@ CLIENTPCWARNET/
 platform-tools/
 RRBillingPro_Package/android_tv_certs/
 
+# Folder kiriman deploy versi (exe/apk besar, bukan untuk repo)
+RR BILLING PRO V*/
+
 # Hasil ekstrak/inspeksi build
 RRBILLINGPRO.exe_extracted/
 
