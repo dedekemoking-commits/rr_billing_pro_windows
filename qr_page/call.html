@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panggil Kasir</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #001A2E; color: #eaf6ff; }
+  header { background: #00334d; padding: 18px 16px; text-align: center; }
+  header h1 { color: #00E5FF; font-size: 20px; }
+  header p { color: #9fb6c8; font-size: 13px; margin-top: 4px; }
+  main { padding: 16px; max-width: 520px; margin: 0 auto; }
+  .card { background: #0b2c42; border: 1px solid #14577a; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { color: #00E5FF; font-size: 14px; margin-bottom: 8px; }
+  label { display: block; font-size: 13px; color: #cfe6f5; margin: 8px 0 4px; }
+  textarea { width: 100%; padding: 9px; border-radius: 8px; border: 1px solid #14577a;
+    background: #071e2f; color: #eaf6ff; font-size: 15px; }
+  .menu-line { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #14577a; }
+  .menu-line .nm { flex: 1; font-size: 14px; }
+  .menu-line .hr { color: #8fd8ff; font-size: 13px; min-width: 80px; text-align: right; }
+  .qtyw { display: flex; align-items: center; gap: 4px; }
+  .qtyw .qbtn { width: 26px; height: 26px; border: 0; border-radius: 6px; font-size: 16px; font-weight: 700;
+    background: #0d4a6b; color: #eaf6ff; cursor: pointer; line-height: 1; }
+  .qtyw .qbtn:active { background: #00E5FF; color: #001A2E; }
+  .qtyw .qnum { min-width: 22px; text-align: center; font-size: 14px; color: #00E5FF; font-weight: 700; }
+  input[type=checkbox], input[type=radio] { width: 20px; height: 20px; accent-color: #00E5FF; }
+  button.big { width: 100%; padding: 14px; margin-top: 8px; border: 0; border-radius: 10px;
+    background: #00E5FF; color: #001A2E; font-size: 17px; font-weight: 700; }
+  button.big:active { opacity: .8; }
+  .status { padding: 18px; text-align: center; border-radius: 12px; margin-top: 10px; font-size: 15px; }
+  .err { color: #ff9999; }
+  .ok { color: #8dffb0; background: #06402a; border: 1px solid #175c3d; }
+  #pinInput { text-transform: uppercase; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔔 PANGGIL KASIR</h1>
+  <p id="tvLabel">TV …</p>
+</header>
+<main id="app">
+  <div class="card" id="card-keluhan">
+    <h2>💬 Keluhan / Butuh Bantuan</h2>
+    <label>Ceritakan masalah Anda (opsional)</label>
+    <textarea id="catatan" rows="2" placeholder="mis. remote tidak berfungsi…"></textarea>
+  </div>
+  <div class="card" id="card-paket"><h2>➕ Tambah Paket / Tambah Waktu</h2></div>
+  <div class="card" id="card-makanan"><h2>🍔 Pesan Makanan</h2></div>
+  <div class="card" id="card-minuman"><h2>🥤 Pesan Minuman</h2></div>
+  <button class="big" id="btnKirim" onclick="kirimPanggilan()">📨  KIRIM KE KASIR</button>
+  <div id="status"></div>
+</main>
+
+<div id="pinView" style="display:none; max-width:520px; margin:16px auto; padding:16px; text-align:center;">
+  <div class="card" style="margin: 0 auto;">
+    <h2 style="font-size:15px">🔐 Verifikasi Anda di Tempat</h2>
+    <div id="pinMsg" style="font-size:14px; color:#cfe6f5; margin:10px 0;"></div>
+    <div id="pinBox" style="display:none;">
+      <input id="pinInput" type="text" inputmode="text" maxlength="5" autocomplete="off" placeholder="ABCD1"
+        style="width:70%; padding:12px; font-size:26px; text-align:center; letter-spacing:8px; text-transform:uppercase;
+          border-radius:10px; border:1px solid #14577a; background:#071e2f; color:#eaf6ff;">
+      <br>
+      <button class="big" id="btnPin" onclick="kirimPin()" style="margin-top:10px">KIRIM PIN</button>
+    </div>
+    <div id="pinStatus"></div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore-compat.js"></script>
+<script>
+var params = new URLSearchParams(location.search);
+var TV = params.get('tv') || '';
+var KODE = params.get('k') || '';
+var OWNER = params.get('o') || '';
+var GRUP = params.get('g') || '';
+var SID = params.get('s') || '';
+
+var rupiah = function (n) { return 'Rp ' + Number(n || 0).toLocaleString('id-ID'); };
+var data = { nama_rental: '', paket_grup: {}, makanan: {}, minuman: {}, stok: {} };
+var piTimer = null;
+
+document.getElementById('tvLabel').textContent = 'TV ' + TV;
+
+function tampilStatus(msg, ok) {
+  document.getElementById('status').innerHTML =
+    '<div class="status' + (ok ? ' ok' : ' err') + '">' + msg + '</div>';
+}
+
+function tampilPinStatus(msg, ok) {
+  document.getElementById('pinStatus').innerHTML =
+    '<div class="status' + (ok ? ' ok' : ' err') + '">' + msg + '</div>';
+}
+
+function showPin() {
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('pinView').style.display = 'block';
+}
+
+if (!TV || !KODE) {
+  document.getElementById('app').innerHTML =
+    '<div class="card status err">QR tidak valid atau sudah kedaluwarsa.<br>Silakan hubungi kasir langsung.</div>';
+} else {
+  firebase.initializeApp({
+    apiKey: 'AIzaSyAqOxWEBD9_AqaMiMtFwbyTvh-d_mdVofQ',
+    authDomain: 'rrbillingpro.firebaseapp.com',
+    projectId: 'rrbillingpro'
+  });
+  firebase.auth().signInAnonymously()
+    .then(function () { showPin(); mulaiSesi(); })
+    .catch(function (e) { tampilStatus('Gagal terhubung: ' + e.message, false); });
+}
+
+function muatMenu() {
+  if (!OWNER || OWNER === '') return renderSemua();
+  return firebase.firestore().collection('call_meta').doc(OWNER).get()
+    .then(function (doc) {
+      if (doc.exists) {
+        var d = doc.data();
+        data.nama_rental = d.nama_rental || '';
+        data.paket_grup = d.paket_grup || {};
+        data.makanan = d.makanan || {};
+        data.minuman = d.minuman || {};
+        data.stok = d.stok || {};
+      }
+      renderSemua();
+    })
+    .catch(function () { renderSemua(); });
+}
+
+function renderSemua() {
+  if (data.nama_rental) {
+    document.getElementById('tvLabel').textContent = data.nama_rental + ' — TV ' + TV;
+  } else {
+    document.getElementById('tvLabel').textContent = 'RR Billing Pro — TV ' + TV;
+  }
+  renderPaket();
+  renderMenu('makanan', 'card-makanan');
+  renderMenu('minuman', 'card-minuman');
+}
+
+function renderPaket() {
+  var el = document.getElementById('card-paket');
+  var semua = data.paket_grup || {};
+  // Jika QR menyertakan grup kartu TV (param g=), tampilkan paket grup itu saja.
+  var g = {};
+  if (GRUP && semua[GRUP]) {
+    g[GRUP] = semua[GRUP];
+  } else if (!GRUP) {
+    g = semua;
+  }
+  var html = '<h2>➕ Tambah Paket / Tambah Waktu</h2>';
+  Object.keys(g).forEach(function (gr) {
+    html += '<label>' + esc(gr) + '</label>';
+    Object.keys(g[gr]).forEach(function (nm) {
+      var p = g[gr][nm] || {};
+      var menit = p.menit || 60;
+      // Tidak ada paket yang otomatis terpilih: pelanggan boleh mengirim
+      // panggilan tanpa paket (hanya pesan makanan/minuman / keluhan).
+      html += '<div class="menu-line">' +
+        '<input type="radio" name="paket" value="' + esc(nm) + '" data-g="' + esc(gr) + '" data-menit="' + menit + '" data-harga="' + (p.harga || 0) + '" onmousedown="paketMdo(this)" onclick="togglePaket(this)">' +
+        '<span class="nm">' + esc(nm) + ' (' + menit + ' menit)</span>' +
+        '<span class="hr">' + rupiah(p.harga || 0) + '</span></div>';
+    });
+  });
+  if (!Object.keys(g).length) {
+    html += '<p style="color:#9fb6c8;font-size:13px">(belum ada daftar paket)</p>';
+  }
+  el.innerHTML = html;
+}
+
+// Stok item (0 = tidak dilacak / tanpa batas). -1 = habis (blokir).
+function stokItem(type, nm) {
+  var m = (data.stok || {})[type] || {};
+  if (m[nm] === undefined || m[nm] === null) return 0;      // tidak dilacak → bebas
+  var v = parseInt(m[nm], 10) || 0;
+  return v <= 0 ? -1 : v;                                     // dilacak, habis → -1
+}
+
+function renderMenu(type, cardId) {
+  var el = document.getElementById(cardId);
+  var d = data[type] || {};
+  var judul = type === 'makanan' ? '🍔 Pesan Makanan' : '🥤 Pesan Minuman';
+  var html = '<h2>' + judul + '</h2>';
+  Object.keys(d).forEach(function (nm) {
+    var st = stokItem(type, nm);
+    if (st < 0) {
+      html += '<div class="menu-line" style="opacity:.45">' +
+        '<span class="nm">' + esc(nm) + '</span>' +
+        '<span class="hr" style="color:#ff8a80;min-width:80px;text-align:right">HABIS</span></div>';
+      return;
+    }
+    html += '<div class="menu-line">' +
+      '<input type="checkbox" class="chk" data-type="' + type + '" data-name="' + esc(nm) + '" data-harga="' + (d[nm] || 0) + '" data-qty="0" data-stok="' + st + '">' +
+      '<span class="nm">' + esc(nm) + '</span>' +
+      '<span class="qtyw">' +
+      '<button type="button" class="qbtn" onclick="qty(this,-1)">−</button>' +
+      '<span class="qnum">0</span>' +
+      '<button type="button" class="qbtn" onclick="qty(this,1)">+</button>' +
+      '</span>' +
+      '<span class="hr">' + rupiah(d[nm] || 0) + '</span></div>';
+  });
+  if (!Object.keys(d).length) {
+    html += '<p style="color:#9fb6c8;font-size:13px">belum ada menu</p>';
+  }
+  el.innerHTML = html;
+}
+
+// Ubah jumlah (qty) makanan/minuman: + / −. qty 0 = tidak dipesan.
+// Item dilacak stoknya → qty tidak boleh melebihi stok tersisa.
+function qty(btn, d) {
+  var line = btn.closest('.menu-line');
+  var ch = line.querySelector('.chk');
+  var q = (parseInt(ch.getAttribute('data-qty') || '0', 10) || 0) + d;
+  if (q < 0) q = 0;
+  var mx = 99;
+  var st = parseInt(ch.getAttribute('data-stok') || '0', 10) || 0;
+  if (st > 0 && q > st) q = st;
+  if (q > mx) q = mx;
+  ch.setAttribute('data-qty', q);
+  ch.checked = q > 0;
+  line.querySelector('.qnum').textContent = q;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ── Sesi PIN QR ────────────────────────────────────────────────────────────
+function mulaiSesi() {
+  if (SID) { cekSesi(SID); return; }
+  var fire = firebase.firestore();
+  fire.collection('qr_sessions').add({
+    tv: TV,
+    kode: KODE,
+    owner: OWNER || '',
+    uid: firebase.auth().currentUser.uid,
+    status: 'awaiting',
+    created: Date.now()
+  }).then(function (doc) {
+    SID = doc.id;
+    var u = new URLSearchParams(location.search);
+    u.set('s', SID);
+    history.replaceState(null, '', '?' + u.toString());
+    cekSesi(SID);
+  }).catch(function (e) {
+    tampilPinStatus('Gagal mulai sesi: ' + e.message, false);
+  });
+}
+
+function cekSesi(sid) {
+  var ref = firebase.firestore().collection('qr_sessions').doc(sid);
+  if (piTimer) clearInterval(piTimer);
+  piTimer = setInterval(function () {
+    ref.get().then(function (snap) {
+      if (!snap.exists) {
+        clearInterval(piTimer); piTimer = null;
+        document.getElementById('pinBox').style.display = 'none';
+        tampilPinStatus('Sesi tidak berlaku lagi. Ulangi scan QR.', false);
+        return;
+      }
+      var d = snap.data();
+      if (d.status === 'verified') {
+        clearInterval(piTimer); piTimer = null;
+        document.getElementById('pinView').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        var u = new URLSearchParams(location.search);
+        u.delete('s');
+        history.replaceState(null, '', '?' + u.toString());
+        muatMenu();
+        return;
+      }
+      if (d.status === 'blocked') {
+        clearInterval(piTimer); piTimer = null;
+        document.getElementById('pinBox').style.display = 'none';
+        tampilPinStatus('PIN salah 3 kali. Sesi diblokir.<br>Ambil QR baru ke kasir.', false);
+        return;
+      }
+      if (d.status === 'expired') {
+        clearInterval(piTimer); piTimer = null;
+        document.getElementById('pinBox').style.display = 'none';
+        tampilPinStatus('PIN kedaluwarsa.<br>Silakan scan QR ulang.', false);
+        return;
+      }
+      if (!d.pin) {
+        document.getElementById('pinBox').style.display = 'none';
+        document.getElementById('pinMsg').innerHTML = 'Scan diterima…<br>PIN sedang ditampilkan di layar TV.';
+        tampilPinStatus('', false);
+        return;
+      }
+      if (d.pin_user) {
+        document.getElementById('pinBox').style.display = 'none';
+        document.getElementById('pinMsg').innerHTML = 'PIN terkirim…<br>sedang diverifikasi kasir.';
+        tampilPinStatus('', false);
+        return;
+      }
+      document.getElementById('pinMsg').innerHTML = 'PIN tampil di layar TV.<br>Ketik persis (huruf + angka) lalu kirim.';
+      document.getElementById('pinBox').style.display = 'block';
+    }).catch(function (e) {
+      tampilPinStatus('Gagal baca sesi: ' + e.message, false);
+    });
+  }, 1500);
+}
+
+function kirimPin() {
+  var v = (document.getElementById('pinInput').value || '').trim().toUpperCase();
+  if (!v) {
+    tampilPinStatus('Masukkan PIN dari layar TV dulu.', false);
+    return;
+  }
+  document.getElementById('btnPin').disabled = true;
+  document.getElementById('btnPin').textContent = 'MEMVERIFIKASI …';
+  firebase.firestore().collection('qr_sessions').doc(SID).update({ pin_user: v })
+    .then(function () {
+      tampilPinStatus('PIN terkirim — menunggu verifikasi kasir…', false);
+    })
+    .catch(function (e) {
+      document.getElementById('btnPin').disabled = false;
+      document.getElementById('btnPin').textContent = 'KIRIM PIN';
+      tampilPinStatus('Gagal kirim PIN: ' + e.message, false);
+    });
+}
+
+// Paket bersifat toggle: klik lagi pada paket yang sama = BATAL pilih (tidak
+// mengunci). Sama seperti perilaku checkbox makanan/minuman.
+// onmousedown mencatat status SEBELUM klik; onclick baru menerjemahkannya.
+function paketMdo(rad) { rad.dataset.prev = rad.checked ? '1' : '0'; }
+function togglePaket(rad) {
+  var prev = rad.dataset.prev === '1';
+  if (prev) {
+    rad.checked = false;               // klik ulang paket terpilih → batalkan
+  } else {
+    document.querySelectorAll('input[name=paket]').forEach(function (x) { x.checked = false; });
+    rad.checked = true;                // pilih paket ini
+  }
+}
+
+function kirimPanggilan() {
+  var pk = document.querySelector('input[name=paket]:checked');
+  var catatan = document.getElementById('catatan').value.trim();
+  var item = [];
+  var items = [];
+
+  if (pk) {
+    item.push('Paket: ' + pk.value);
+    items.push({ t: 'paket', n: pk.value, q: 1,
+                 h: parseInt(pk.getAttribute('data-harga') || '0', 10) || 0,
+                 men: parseInt(pk.getAttribute('data-menit') || '0', 10) || 0,
+                 g: pk.getAttribute('data-g') || '' });
+  }
+
+  var chips = document.querySelectorAll('input.chk:checked');
+  var mkn = 0, min = 0;
+  chips.forEach(function (ch) {
+    var tipe = ch.getAttribute('data-type');
+    var qn = parseInt(ch.getAttribute('data-qty') || '1', 10) || 1;
+    if (tipe === 'makanan') mkn++; else min++;
+    var nm = ch.getAttribute('data-name');
+    var hr = ch.getAttribute('data-harga');
+    var teks = (tipe === 'makanan' ? '🍔 ' : '🥤 ') + (qn > 1 ? qn + ' ' : '') + nm +
+      ' (' + rupiah(hr) + ')';
+    item.push(teks);
+    items.push({ t: tipe, n: nm, q: qn, h: parseInt(hr || '0', 10) || 0 });
+  });
+
+  if (!item.length && !catatan) {
+    tampilStatus('Pilih paket / makanan minuman, atau tulis keluhan dulu.', false);
+    return;
+  }
+
+  var jenis;
+  if (pk) jenis = (mkn || min) ? 'pesanan' : 'paket';
+  else if (mkn && !min) jenis = 'makanan';
+  else if (min && !mkn) jenis = 'minuman';
+  else if (mkn && min) jenis = 'pesanan';
+  else jenis = 'keluhan';
+
+  document.getElementById('btnKirim').disabled = true;
+  document.getElementById('btnKirim').textContent = 'MENGIRIM …';
+
+  var payload = {
+    tv: TV,
+    kode: KODE,
+    jenis: jenis,
+    item: item,
+    items: items,
+    catatan: catatan,
+    ts: Date.now()
+  };
+  if (SID) payload.sid = SID;
+  firebase.firestore().collection('calls').add(payload).then(function () {
+    document.getElementById('app').innerHTML =
+      '<div class="card status ok" style="font-size:17px">✅ Panggilan terkirim!<br>' +
+      '<span style="font-size:14px;color:#9fe8c0">Kasir akan segera datang. Mohon tunggu.</span></div>';
+  }).catch(function (e) {
+    document.getElementById('btnKirim').disabled = false;
+    document.getElementById('btnKirim').textContent = '📨  KIRIM KE KASIR';
+    tampilStatus('Gagal terkirim: ' + e.message, false);
+  });
+}
+</script>
+</body>
+</html>

@@ -501,6 +501,18 @@ class TvWsHub:
     def send_hide_media(self, meja_id: str) -> bool:
         return self._send_to(meja_id, {"action": "HIDE_MEDIA", "meja_id": meja_id})
 
+    def send_show_pin(self, meja_id: str, pin: str) -> bool:
+        """Tampilkan PIN panggil operator/kasir di pojok KIRI atas layar TV."""
+        ok = self._send_to(meja_id, {"action": "SHOW_PIN", "meja_id": meja_id, "pin": pin})
+        print(f"[TV WS HUB] SHOW_PIN {meja_id}: {'terkirim' if ok else 'GAGAL (client tidak terhubung)'}")
+        return ok
+
+    def send_hide_pin(self, meja_id: str) -> bool:
+        """Sembunyikan PIN di layar TV (sesi selesai / PIN terpakai / user masuk web)."""
+        ok = self._send_to(meja_id, {"action": "HIDE_PIN", "meja_id": meja_id})
+        print(f"[TV WS HUB] HIDE_PIN {meja_id}: {'terkirim' if ok else 'GAGAL (client tidak terhubung)'}")
+        return ok
+
     def send_update_logo(self, meja_id: str, logo_url: str) -> bool:
         """Logo lock diganti kasir -> TV yang sedang terkunci refresh tampilannya."""
         return self._send_to(meja_id, {"action": "UPDATE_LOGO", "meja_id": meja_id,
@@ -553,6 +565,18 @@ class TvWsHub:
             return False
         with self._clients_lock:
             target = self.clients.get(meja_id)
+            if target is None:
+                # Label kartu "1" vs meja client "TV 1" / "MEJA 1" / "MEJA_1":
+                # fallback supaya perintah dari kasir tetap sampai ke client.
+                for cand in (f"TV {meja_id}", f"MEJA {meja_id}", f"MEJA_{meja_id}"):
+                    target = self.clients.get(cand)
+                    if target is not None:
+                        meja_id = cand
+                        break
+                if target is not None and "meja_id" in message:
+                    # Sesuaikan label di pesan (popup PIN / overlay) dengan
+                    # nama client yang sebenarnya ("TV 1"), bukan label kartu.
+                    message["meja_id"] = meja_id
         if not target:
             return False
         # Jujur: client yang tak membalas PONG dianggap tidak terhubung,

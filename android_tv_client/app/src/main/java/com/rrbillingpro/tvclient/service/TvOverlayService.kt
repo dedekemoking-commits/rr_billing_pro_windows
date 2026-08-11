@@ -27,6 +27,7 @@ import com.rrbillingpro.tvclient.model.ServerMessage
 import com.rrbillingpro.tvclient.net.TimerEngine
 import com.rrbillingpro.tvclient.net.WebSocketManager
 import com.rrbillingpro.tvclient.overlay.OverlayWidget
+import com.rrbillingpro.tvclient.overlay.PinOverlay
 import com.rrbillingpro.tvclient.util.Prefs
 import org.json.JSONObject
 
@@ -43,6 +44,7 @@ class TvOverlayService : Service() {
 
     private var ws: WebSocketManager? = null
     private var overlay: OverlayWidget? = null
+    private var pinOverlay: PinOverlay? = null
     private var timer: TimerEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -80,6 +82,15 @@ class TvOverlayService : Service() {
     private var lastPromoUrl: String = ""
     private var lastPromoType: String = "video"
 
+    // Cold boot: layar sudah nyala saat service mulai (ACTION_SCREEN_ON sudah
+    // lewat sebelum proses lahir) — promo tetap diputar 1x setelah boot.
+    private var coldBootPromoDone = false
+
+    // Kunci promo "1x per bangun": true saat SCREEN_OFF, false setelah promo
+    // diputar (atau dikonsumsi cold boot) — SCREEN_ON ganda/nyasar pasca-boot
+    // tidak menyebabkan dobel putar.
+    private var wakePromoArmed = true
+
     private var screenReceiver: BroadcastReceiver? = null
 
     private val listeners = mutableListOf<StateListener>()
@@ -93,6 +104,10 @@ class TvOverlayService : Service() {
         super.onCreate()
         instance = this
         lastMeja = Prefs.mejaId(this).ifBlank { "MEJA" }
+        // Restore promo terakhir agar tetap diputar 1x setelah TV reboot total
+        // (mati listrik / cold boot) — URL terakhir tersimpan di Prefs.
+        lastPromoUrl = Prefs.promoUrl(this)
+        lastPromoType = Prefs.promoType(this)
         startInForeground()
         registerScreenReceiver()
     }
@@ -100,7 +115,24 @@ class TvOverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startInForeground()
         ensureRunning()
+        maybePlayPromoOnColdBoot()
         return START_STICKY
+    }
+
+    // Saat app di-swipe dari recents / ditutup: mulai ulang service agar
+    // overlay timer & WebSocket tidak ikut mati (overlay tetap tampil).
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        try {
+            val restart = Intent(applicationContext, TvOverlayService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                applicationContext.startForegroundService(restart)
+            } else {
+                @Suppress("DEPRECATION")
+                applicationContext.startService(restart)
+            }
+        } catch (_: Exception) {
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -110,6 +142,7 @@ class TvOverlayService : Service() {
         releaseKeepAlive()
         stopTimerAndWs()
         overlay?.hide()
+        pinOverlay?.hide()
         super.onDestroy()
         if (instance === this) instance = null
     }
@@ -128,7 +161,10 @@ class TvOverlayService : Service() {
                             sendScreenState(true)
                             onScreenWake()
                         }
-                        Intent.ACTION_SCREEN_OFF -> sendScreenState(false)
+                        Intent.ACTION_SCREEN_OFF -> {
+                            wakePromoArmed = true
+                            sendScreenState(false)
+                        }
                     }
                 }
             }
@@ -162,12 +198,35 @@ class TvOverlayService : Service() {
      * Server TIDAK lagi mengirim ulang SHOW_MEDIA saat reconnect WS — jadi
      * tidak ada dobel putar dan tidak ada putar ulang saat blip/restart. */
     private fun onScreenWake() {
+        if (!wakePromoArmed) return
+        wakePromoArmed = false
         if (lastPromoUrl.isBlank()) return
         mainHandler.post {
             // MediaActivity memutar media sekali lalu otomatis switch ke
             // port/input terakhir yang dipakai (tv_last_used_input_id).
             MediaActivity.start(this, lastPromoType, lastPromoUrl)
         }
+    }
+
+    /** Cold boot / service mulai dengan layar sudah menyala: ACTION_SCREEN_ON
+     * tidak pernah diterima (event terjadi sebelum proses lahir), jadi promo
+     * terakhir (tersimpan di Prefs) diputar 1x di sini. Hanya sekali per
+     * proses — restart service dalam proses yang sama tidak memutar ulang. */
+    private fun maybePlayPromoOnColdBoot() {
+        if (coldBootPromoDone) return
+        if (lastPromoUrl.isBlank()) {
+            coldBootPromoDone = true
+            return
+        }
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!pm.isInteractive) return
+        coldBootPromoDone = true
+        wakePromoArmed = false
+        mainHandler.postDelayed({
+            if (lastPromoUrl.isNotBlank() && pm.isInteractive) {
+                MediaActivity.start(this, lastPromoType, lastPromoUrl)
+            }
+        }, 2000)
     }
 
     /** Kabari server kasir kondisi layar TV (untuk status HIDUP/MATI & auto-off). */
@@ -222,6 +281,7 @@ class TvOverlayService : Service() {
         val mejaId = Prefs.mejaId(this)
 
         overlay = OverlayWidget(this)
+        pinOverlay = PinOverlay(this)
 
         timer = TimerEngine(
             onTick = { remaining -> updateTimerUi(remaining) },
@@ -361,6 +421,7 @@ class TvOverlayService : Service() {
                 timer?.stop()
                 overlay?.hide()
                 lastPromoUrl = msg.detail?.promoUrl ?: ""
+                Prefs.savePromo(this, lastPromoUrl, lastPromoType)
                 setLocked(true, msg.detail ?: LockDetail(msg.mejaId, "-", "Rp 0", "Rp 0"))
             }
 
@@ -395,6 +456,7 @@ class TvOverlayService : Service() {
                     // (media terakhir, video ATAU gambar — sampai media baru).
                     lastPromoUrl = msg.mediaUrl
                     lastPromoType = msg.mediaType.ifBlank { "video" }
+                    Prefs.savePromo(this, lastPromoUrl, lastPromoType)
                     MediaActivity.start(this, msg.mediaType, msg.mediaUrl)
                     updateNotification("Media: ${msg.mediaType}")
                 }
@@ -402,6 +464,16 @@ class TvOverlayService : Service() {
 
             Actions.HIDE_MEDIA -> {
                 MediaActivity.finishInstance()
+            }
+
+            Actions.SHOW_PIN -> {
+                if (msg.pin.isNotBlank()) {
+                    pinOverlay?.show(msg.pin, msg.mejaId)
+                }
+            }
+
+            Actions.HIDE_PIN -> {
+                pinOverlay?.hide()
             }
 
             else -> Unit

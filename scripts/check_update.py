@@ -12,6 +12,7 @@ download_asset + launch_updater (so the UI can confirm before downloading).
 from __future__ import annotations
 import json
 import os
+import re
 import sys
 import subprocess
 import urllib.request
@@ -136,6 +137,91 @@ def verify_manifest(manifest: dict, pubkey_path: Optional[str]) -> bool:
         raise ValueError('Manifest missing required fields')
     msg = (version + "\n" + asset_url + "\n" + sha256).encode('utf-8')
     return _verify_signature(pk, msg, sig)
+
+
+def find_latest_apk_url(repo_url: str) -> Optional[str]:
+    """Cari asset .apk terbaru dari release GitHub 'latest' via API publik.
+
+    repo_url boleh URL repo penuh (mis. update_manifest_url); pasangan
+    owner/repo di-parse dari pola github.com/<owner>/<repo>. Preferensi asset
+    .apk dengan nama mengandung 'tv', dipilih yang paling baru (updated_at).
+    Return browser_download_url, atau None bila repo bukan GitHub /
+    API gagal / tidak ada asset .apk di release terbaru.
+    """
+    if not repo_url:
+        return None
+    m = re.search(r"github\.com/([^/]+)/([^/]+)", repo_url)
+    if not m:
+        return None
+    owner, repo = m.group(1), m.group(2)
+    api = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    try:
+        with urllib.request.urlopen(api, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    apk_assets = [
+        a for a in data.get("assets", [])
+        if str(a.get("name") or "").lower().endswith(".apk")
+    ]
+    if not apk_assets:
+        return None
+    apk_assets.sort(
+        key=lambda a: str(a.get("updated_at") or a.get("created_at") or ""),
+        reverse=True)
+    for a in apk_assets:
+        if "tv" in str(a.get("name") or "").lower():
+            return str(a.get("browser_download_url") or "")
+    return str(apk_assets[0].get("browser_download_url") or "")
+
+
+def find_aapt() -> Optional[str]:
+    """Lokasi aapt.exe (Android build-tools): PATH → ANDROID_HOME → LOCALAPPDATA.
+    Return path aapt.exe atau None bila tidak tersedia."""
+    import shutil
+    p = shutil.which("aapt")
+    if p:
+        return p
+    roots = []
+    if os.environ.get("ANDROID_HOME"):
+        roots.append(os.environ["ANDROID_HOME"])
+    if os.environ.get("LOCALAPPDATA"):
+        roots.append(os.path.join(os.environ["LOCALAPPDATA"], "Android", "Sdk"))
+    for root in roots:
+        bts = os.path.join(root, "build-tools")
+        try:
+            if not os.path.isdir(bts):
+                continue
+            for ver in sorted(os.listdir(bts), reverse=True):
+                cand = os.path.join(bts, ver, "aapt.exe")
+                if os.path.isfile(cand):
+                    return cand
+        except Exception:
+            continue
+    return None
+
+
+def read_apk_version(apk_path: str):
+    """Baca versionCode & versionName dari APK via aapt.
+
+    Return tuple (version_code: int|None, version_name: str|None).
+    None bila aapt tidak tersedia / APK tidak bisa dibaca.
+    """
+    aapt = find_aapt()
+    if not aapt or not apk_path or not os.path.isfile(apk_path):
+        return None, None
+    try:
+        out = subprocess.run(
+            [aapt, "dump", "badging", apk_path],
+            capture_output=True, text=True, timeout=60,
+            **_subprocess_no_window_kwargs()).stdout or ""
+    except Exception:
+        return None, None
+    m1 = re.search(r"versionCode='(\d+)'", out)
+    m2 = re.search(r"versionName='([^']*)'", out)
+    code = int(m1.group(1)) if m1 else None
+    name = m2.group(1) if m2 else None
+    return code, name
 
 
 def download_asset(asset_url: str, out_path: str, expected_sha256: Optional[str] = None,

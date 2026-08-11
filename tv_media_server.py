@@ -142,6 +142,27 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
         path = urlparse(self.path).path
+        # Halaman QR panggil kasir — di-host server lokal (bukan GitHub Pages)
+        # supaya QR tidak menampilkan alamat/identitas pihak ketiga.
+        qdir = (self.media.qr_page_dir or "") if self.media else ""
+        if qdir and path in ("/qr", "/qr/", "/qr/call.html", "/call.html"):
+            full = os.path.join(qdir, "call.html")
+            if os.path.isfile(full):
+                size = os.path.getsize(full)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.log_access("qr/call.html served")
+                if not head_only:
+                    with open(full, "rb") as f:
+                        self.wfile.write(f.read())
+                return
+            self.log_access("qr/call.html MISSING")
+            self.send_error(404, "Halaman QR tidak ditemukan")
+            return
+
         if path == "/health":
             body = (
                 '{"ok":true,"running":true,"media":"%s"}'
@@ -242,12 +263,13 @@ class TvMediaServer:
     """Server HTTP untuk media promosi client TV (port default 8082)."""
 
     def __init__(self, media_dir: str, port: int = 8082, host: str = "0.0.0.0",
-                 debug_log: bool = False):
+                 debug_log: bool = False, qr_page_dir: str = ""):
         self.media_dir = os.path.abspath(media_dir)
         os.makedirs(self.media_dir, exist_ok=True)
         self.port = int(port)
         self.host = host
         self.debug_log = debug_log
+        self.qr_page_dir = qr_page_dir or ""
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.running = False

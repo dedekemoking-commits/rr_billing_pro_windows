@@ -327,7 +327,7 @@ class WarnetClientApp(ctk.CTk):
             if not stored:
                 continue
 
-            if stored.startswith("bcrypt$$"):
+            if stored.startswith("bcrypt$"):
                 if bcrypt is None:
                     self._append_log("bcrypt belum tersedia untuk verifikasi admin.")
                     continue

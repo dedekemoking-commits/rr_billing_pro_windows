@@ -1,0 +1,113 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // All requests must be authenticated
+    function isAuth() { return request.auth != null; }
+    
+    // Check if the requesting user is a super admin
+    // The admin's Firebase Auth UID must exist as a document in /admins/{uid}
+    // with field isAdmin == true
+    function isSuperAdmin() {
+      return isAuth() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isAdmin == true
+      );
+    }
+
+    // Licenses collection
+    match /licenses/{docId} {
+      // Anyone authenticated can read licenses (for activation lookup)
+      allow read: if isAuth();
+      // Admin (RR Lisensi) creates/updates licenses; app signs in anonymously so can't use UID check
+      allow create: if isAuth();
+      allow update: if isAuth();
+      allow delete: if false;
+    }
+
+    // Invoices collection
+    match /invoices/{docId} {
+      // Anyone authenticated can read invoices (user invoices + admin license generator)
+      allow read: if isAuth();
+      // Users can create invoices; username is the app-internal username, not auth UID
+      allow create: if isAuth();
+      // Admin (RR Lisensi) confirms invoices; app signs in anonymously so can't use UID check
+      allow update: if isAuth();
+      allow delete: if false;
+    }
+
+    // Notifications collection
+    match /notifications/{docId} {
+      // Anyone authenticated can read and create notifications
+      allow read: if isAuth();
+      allow create: if isAuth();
+      // Admin (RR Lisensi) marks requests as read
+      allow update: if isAuth();
+      allow delete: if false;
+    }
+
+    // BillingPS Users collection — one document per username
+    match /billingps_users/{username} {
+      // Anyone authenticated can read user docs (for license lookup etc.)
+      allow read: if isAuth();
+      // Users can only write to their own document
+      // For now: require auth. In future: require request.auth.uid == username mapping
+      allow write: if isAuth();
+
+      // tvCommands subcollection — TV client heartbeat + billing commands
+      match /tvCommands/{tvId} {
+        allow read, write: if isAuth();
+      }
+    }
+
+    // BillingPS Devices collection — one document per device
+    match /billingps_devices/{deviceId} {
+      // Devices read/write by authenticated users
+      // Restrict to device owner when UID is known
+      allow read: if isAuth();
+      allow write: if isAuth();
+    }
+
+    // Global settings
+    match /settings/{docId} {
+      // Anyone authenticated can read settings
+      allow read: if isAuth();
+      // Only super admin can modify settings
+      allow write: if isSuperAdmin();
+    }
+
+    // Admins collection — stores admin UIDs
+    match /admins/{userId} {
+      // Anyone authenticated can read (to check if someone is admin)
+      allow read: if isAuth();
+      // Only the admin themselves or another super admin can write
+      allow write: if isSuperAdmin() || request.auth.uid == userId;
+    }
+
+    // ── TAMBAHAN: QR Panggil Kasir (BillingPS Desktop) ────────────────
+    // Panggilan dari halaman web pelanggan (auth anonim) boleh dibuat;
+    // kasir (akun ber-email) membaca & menghapus; panggilan tidak boleh diedit.
+    match /calls/{callId} {
+      allow create: if true;
+      allow read: if isAuth() && request.auth.token.email != null;
+      allow update: if false;
+      allow delete: if isAuth() && request.auth.token.email != null;
+    }
+    // Menu & nama rental untuk tampil di halaman web pelanggan:
+    // tampil publik (dibaca semua), ditulis hanya oleh kasir (akun ber-email).
+    match /call_meta/{owner} {
+      allow read: if true;
+      allow write: if isAuth() && request.auth.token.email != null;
+    }
+    // Sesi PIN QR: pelanggan (anonim) membuat & mengupdate dokumennya send
+    // (uid disimpan di field 'uid'); kasir (ber-email) mengelola semuanya.
+    match /qr_sessions/{sessionId} {
+      allow create: if true;
+      allow read: if isAuth();
+      allow update: if isAuth() && (
+        request.auth.token.email != null ||
+        request.auth.uid == resource.data.uid
+      );
+      allow delete: if isAuth() && request.auth.token.email != null;
+    }
+  }
+}

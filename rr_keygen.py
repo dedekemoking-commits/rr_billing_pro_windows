@@ -67,11 +67,13 @@ CONFIG_FILE  = os.path.join(APP_BASE_DIR, "rr_billing_config.json")
 KEYGEN_LOG   = os.path.join(APP_BASE_DIR, "rr_keygen_log.json")
 
 # --- PAKET LISENSI -------------------------------------------------
+# Durasi "hari" harus sama dengan EDITION_HARI di rr_license.py
+# (31/92/365/36500) — keygen & preview memakai angka itu, bukan 30/90/360.
 PAKET_INFO = {
-    "BULANAN":  {"hari": 30,  "maxTv": 5,      "harga": 99_000,  "char": "B", "color": C_ACCENT},
-    "3BULAN":   {"hari": 90,  "maxTv": 10,     "harga": 299_000, "char": "T", "color": C_GREEN},
-    "TAHUNAN":  {"hari": 360, "maxTv": 15,     "harga": 999_000, "char": "S", "color": C_YELLOW},
-    "LIFETIME": {"hari": 99999, "maxTv": 999999, "harga": 2_000_000, "char": "L", "color": C_RED},
+    "BULANAN":  {"hari": 31,  "maxTv": 5,      "harga": 99_000,  "char": "B", "color": C_ACCENT},
+    "3BULAN":   {"hari": 92,  "maxTv": 10,     "harga": 299_000, "char": "T", "color": C_GREEN},
+    "TAHUNAN":  {"hari": 365, "maxTv": 15,     "harga": 999_000, "char": "S", "color": C_YELLOW},
+    "LIFETIME": {"hari": 36500, "maxTv": 999999, "harga": 2_000_000, "char": "L", "color": C_RED},
 }
 
 # ─── PASSWORD SECURITY HELPERS ────────────────────────────────────────────────

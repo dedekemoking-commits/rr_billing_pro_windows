@@ -10,3 +10,4 @@ PyJWT
 androidtvremote2
 websockets
 paramiko
+qrcode

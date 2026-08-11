@@ -9,6 +9,8 @@ object Prefs {
     private const val KEY_PORT = "server_port"
     private const val KEY_MEJA = "meja_id"
     private const val KEY_AUTO_START = "auto_start"
+    private const val KEY_PROMO_URL = "promo_url"
+    private const val KEY_PROMO_TYPE = "promo_type"
 
     private fun sp(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -20,6 +22,17 @@ object Prefs {
     fun mejaId(ctx: Context): String = sp(ctx).getString(KEY_MEJA, "TV 1") ?: "TV 1"
 
     fun autoStart(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_AUTO_START, false)
+
+    fun promoUrl(ctx: Context): String = sp(ctx).getString(KEY_PROMO_URL, "") ?: ""
+
+    fun promoType(ctx: Context): String = sp(ctx).getString(KEY_PROMO_TYPE, "video") ?: "video"
+
+    fun savePromo(ctx: Context, url: String, type: String) {
+        sp(ctx).edit()
+            .putString(KEY_PROMO_URL, url.trim())
+            .putString(KEY_PROMO_TYPE, if (type.isBlank()) "video" else type)
+            .apply()
+    }
 
     fun save(ctx: Context, host: String, port: Int, mejaId: String, autoStart: Boolean) {
         sp(ctx).edit()

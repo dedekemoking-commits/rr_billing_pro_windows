@@ -19,6 +19,8 @@ object Actions {
     const val UPDATE_RENTAL = "UPDATE_RENTAL"
     const val SHOW_MEDIA = "SHOW_MEDIA"
     const val HIDE_MEDIA = "HIDE_MEDIA"
+    const val SHOW_PIN = "SHOW_PIN"
+    const val HIDE_PIN = "HIDE_PIN"
     const val PING = "PING"
 }
 
@@ -63,6 +65,7 @@ data class ServerMessage(
     val overlayMode: String,
     val overlayLastMinutes: Int,
     val logoUrl: String,
+    val pin: String = "",
 ) {
     companion object {
         fun fromJson(raw: String): ServerMessage? {
@@ -122,6 +125,7 @@ data class ServerMessage(
                         overlayMode = o.optString("overlay_mode", "always"),
                         overlayLastMinutes = o.optInt("overlay_last_minutes", 5),
                         logoUrl = o.optString("logo_url", ""),
+                        pin = o.optString("pin", ""),
                     )
                 }
             } catch (e: Exception) {

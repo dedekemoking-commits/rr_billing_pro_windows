@@ -413,8 +413,52 @@ class LicenseManager:
 
     @staticmethod
     def save(data: dict):
-        with open(LICENSE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        """Simpan license.json dengan file locking (msvcrt/flock) + tulis atomik
+        agar aman dari tulis bersamaan antara thread UI dan thread poller cloud."""
+        lock_file = LICENSE_FILE + ".lock"
+        max_retry = 10
+        retry_delay = 0.05
+        tmp_file = LICENSE_FILE + ".tmp"
+        for attempt in range(max_retry):
+            try:
+                with open(lock_file, "a") as lock:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                        try:
+                            with open(tmp_file, "w", encoding="utf-8") as f:
+                                json.dump(data, f, indent=2, ensure_ascii=False)
+                            os.replace(tmp_file, LICENSE_FILE)
+                        finally:
+                            try:
+                                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                            except OSError:
+                                pass
+                    else:
+                        if fcntl is not None:
+                            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            try:
+                                with open(tmp_file, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=2, ensure_ascii=False)
+                                os.replace(tmp_file, LICENSE_FILE)
+                            finally:
+                                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        else:
+                            with open(tmp_file, "w", encoding="utf-8") as f:
+                                json.dump(data, f, indent=2, ensure_ascii=False)
+                            os.replace(tmp_file, LICENSE_FILE)
+                return
+            except (IOError, OSError):
+                if attempt < max_retry - 1:
+                    time.sleep(retry_delay)
+                    continue
+                # Fallback: tulis tanpa lock (mis. lock file terkunci proses lain lama)
+                try:
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    os.replace(tmp_file, LICENSE_FILE)
+                except Exception as e:
+                    print(f"[LICENSE] Gagal simpan: {e}", flush=True)
 
     @staticmethod
     def get_machine_id() -> str:

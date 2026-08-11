@@ -629,7 +629,7 @@ class WarnetSocketServer:
                 if getattr(kursi, '_pc_id', None) == pc_id:
                     if kursi.paket_aktif:
                         billing_status["paket_aktif"] = kursi.paket_aktif
-                    elif getattr(kursi, '_last_transaction_item', None):
+                    elif getattr(kursi, '_last_transaction_item', None) or getattr(kursi, '_last_riwayat_idx', None) is not None:
                         # Session just ended — send "SELESAI" to trigger lock screen on client
                         billing_status["paket_aktif"] = "SELESAI"
                     if kursi.sisa_waktu > 0:
@@ -1039,7 +1039,10 @@ def fmt_durasi(menit):
     return f"{sisa} menit"
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.3"
+APP_VERSION = "2.4.7"
+# Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
+# dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
+PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1193,6 +1196,17 @@ class ConfigManager:
                         return data
                     except Exception:
                         time.sleep(0.05)
+                # JSON korup permanen (semua retry gagal): backup file dulu
+                # supaya isi lama tidak hilang saat save() menimpa dengan {}.
+                try:
+                    _bak = CONFIG_FILE + ".bak_corrupt"
+                    if not os.path.exists(_bak):
+                        import shutil
+                        shutil.copy2(CONFIG_FILE, _bak)
+                        print(f"[CONFIG] rr_billing_config.json korup — backup ke "
+                              f"{os.path.basename(_bak)}; data dipakai: kosong", flush=True)
+                except Exception:
+                    pass
             return {}
 
     @staticmethod
@@ -1342,8 +1356,10 @@ def _get_email_settings():
 
 def _email_configured() -> bool:
     settings = _get_email_settings()
-    required = ["smtp_server", "smtp_port", "smtp_username", "smtp_password_enc", "from_address"]
-    return all(str(settings.get(k, "")).strip() for k in required)
+    required = ["smtp_server", "smtp_port", "smtp_username", "from_address"]
+    # Password bisa berupa smtp_password_enc (terenkripsi) ATAU smtp_password (plaintext lama)
+    has_pass = str(settings.get("smtp_password_enc") or settings.get("smtp_password", "")).strip()
+    return all(str(settings.get(k, "")).strip() for k in required) and bool(has_pass)
 
 
 def _send_verification_email(to_email: str, username: str, code: str) -> tuple:
@@ -1386,6 +1402,10 @@ def _send_verification_email(to_email: str, username: str, code: str) -> tuple:
 
 # ─── AUDIT LOGGER ───────────────────────────────────────────────────────────
 AUDIT_FILE = app_path("rr_billing_audit.jsonl")
+
+# ─── RIWAYAT PESANAN WEB (QR CALL) ──────────────────────────────────────────
+QR_PESAN_LOG = os.path.join(APP_BASE_DIR, "qr_pesanan_log.json")
+QR_PESAN_LOG_LOCK = threading.Lock()
 
 
 class AuditLogger:
@@ -1528,9 +1548,13 @@ class TimerService:
                         "paket_harga_tetap": kartu.paket_harga_tetap,
                         "pesanan_aktif": dict(kartu.pesanan_aktif),
                         "daftar_paket_sesi": list(kartu.daftar_paket_sesi),
+                        "lunas_paket": list(kartu.lunas_paket),
+                        "harga_paket_sesi": list(kartu.harga_paket_sesi),
+                        "lunas_pesanan": dict(kartu.lunas_pesanan),
                         "menit_dipakai_awal": kartu.menit_dipakai_awal,
                         "diskoni": kartu.diskoni,
                         "diskoni_mode": kartu.diskoni_mode,
+                        "paid": kartu.paid,
                     }
             for kartu in getattr(self.app, '_semua_kartu_warnet', []):
                 if kartu.paket_aktif and kartu.sisa_waktu > 0:
@@ -1544,9 +1568,13 @@ class TimerService:
                         "paket_harga_tetap": kartu.paket_harga_tetap,
                         "pesanan_aktif": dict(kartu.pesanan_aktif),
                         "daftar_paket_sesi": list(kartu.daftar_paket_sesi),
+                        "lunas_paket": list(kartu.lunas_paket),
+                        "harga_paket_sesi": list(kartu.harga_paket_sesi),
+                        "lunas_pesanan": dict(kartu.lunas_pesanan),
                         "menit_dipakai_awal": kartu.menit_dipakai_awal,
                         "diskoni": kartu.diskoni,
                         "diskoni_mode": kartu.diskoni_mode,
+                        "paid": kartu.paid,
                     }
             try:
                 ConfigManager.update(lambda cfg: cfg.__setitem__("timer_state", state) or
@@ -1579,6 +1607,9 @@ class TimerService:
                         kartu.paket_harga_tetap = s.get("paket_harga_tetap", 0)
                         kartu.pesanan_aktif = dict(s.get("pesanan_aktif", {}))
                         kartu.daftar_paket_sesi = list(s.get("daftar_paket_sesi", []))
+                        kartu.lunas_paket = list(s.get("lunas_paket", []))
+                        kartu.harga_paket_sesi = list(s.get("harga_paket_sesi", []))
+                        kartu.lunas_pesanan = dict(s.get("lunas_pesanan", {}))
                         kartu.menit_dipakai_awal = s.get("menit_dipakai_awal", 0)
                         kartu.diskoni = s.get("diskoni", 0)
                         kartu.diskoni_mode = s.get("diskoni_mode", "nominal")
@@ -1588,6 +1619,7 @@ class TimerService:
                             except Exception:
                                 kartu.waktu_mulai = datetime.now()
                         kartu.is_on = True
+                        kartu.paid = s.get("paid", True)
                         restored_count += 1
             for kartu in getattr(app, '_semua_kartu_warnet', []):
                 key = str(getattr(kartu, '_pc_id', None) or kartu.nomor)
@@ -1601,6 +1633,9 @@ class TimerService:
                         kartu.paket_harga_tetap = s.get("paket_harga_tetap", 0)
                         kartu.pesanan_aktif = dict(s.get("pesanan_aktif", {}))
                         kartu.daftar_paket_sesi = list(s.get("daftar_paket_sesi", []))
+                        kartu.lunas_paket = list(s.get("lunas_paket", []))
+                        kartu.harga_paket_sesi = list(s.get("harga_paket_sesi", []))
+                        kartu.lunas_pesanan = dict(s.get("lunas_pesanan", {}))
                         kartu.menit_dipakai_awal = s.get("menit_dipakai_awal", 0)
                         kartu.diskoni = s.get("diskoni", 0)
                         kartu.diskoni_mode = s.get("diskoni_mode", "nominal")
@@ -1613,6 +1648,41 @@ class TimerService:
                         kartu.paid = s.get("paid", True)
                         restored_count += 1
                         print(f"[TIMER] Restored warnet {kartu.label_kursi}: {s.get('paket')} sisa {s.get('sisa_waktu')}s", flush=True)
+            # Relink kartu yang dipulihkan ke baris riwayat yang sudah tercatat
+            # (source+label) agar timer habis tidak membuat baris duplikat.
+            try:
+                for kartu in getattr(app, '_semua_kartu_tv', []):
+                    if not getattr(kartu, 'paket_aktif', None):
+                        continue
+                    for i, meta in enumerate(app.riwayat_meta):
+                        if not isinstance(meta, dict) or meta.get("source") != "tv":
+                            continue
+                        if meta.get("_linked"):
+                            continue
+                        row = app.riwayat_transaksi[i] if i < len(app.riwayat_transaksi) else ()
+                        if len(row) > 2 and row[2] == getattr(kartu, 'label_tv', None):
+                            kartu._last_riwayat_idx = i
+                            kartu._last_cloud_id = meta.get("cloud_id")
+                            kartu._last_transaction_item = None
+                            meta["_linked"] = True
+                            break
+                for kartu in getattr(app, '_semua_kartu_warnet', []):
+                    if not getattr(kartu, 'paket_aktif', None):
+                        continue
+                    for i, meta in enumerate(app.riwayat_meta):
+                        if not isinstance(meta, dict) or meta.get("source") != "warnet":
+                            continue
+                        if meta.get("_linked"):
+                            continue
+                        row = app.riwayat_transaksi[i] if i < len(app.riwayat_transaksi) else ()
+                        if len(row) > 2 and row[2] == getattr(kartu, 'label_kursi', None):
+                            kartu._last_riwayat_idx = i
+                            kartu._last_cloud_id = meta.get("cloud_id")
+                            kartu._last_transaction_item = None
+                            meta["_linked"] = True
+                            break
+            except Exception:
+                pass
             print(f"[TIMER] Restored {restored_count} active sessions")
         except Exception as e:
             print(f"[TIMER] Restore error: {e}")
@@ -1971,6 +2041,62 @@ class ADBHelper:
             return False, "adb.exe tidak ditemukan"
         except Exception as e:
             return False, str(e)
+
+    @classmethod
+    def adb_install_with_progress(cls, ip, apk_path, progress_cb=None):
+        """Install APK ke TV via ADB dengan status persentase.
+
+        Fase 1: push APK (0–80%) — persen di-parse dari output streaming adb.
+        Fase 2: pm install (85–100%) — tanpa persen, ditandai indeterminate.
+        progress_cb(persen: int, pesan: str) dipanggil dari thread ini.
+        """
+        def _set(pct, pesan):
+            if progress_cb:
+                try:
+                    progress_cb(pct, pesan)
+                except Exception:
+                    pass
+
+        if not os.path.isfile(apk_path):
+            return False, "File APK tidak ditemukan"
+        remote = "/sdcard/Download/rr_tv_client.apk"
+        _set(2, "Mengirim APK ke TV…")
+        try:
+            proc = subprocess.Popen(
+                ["adb", "-s", f"{ip}:5555", "push", apk_path, remote],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                **subprocess_no_window_kwargs())
+        except FileNotFoundError:
+            return False, "adb.exe tidak ditemukan"
+        except Exception as e:
+            return False, str(e)
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                m = re.search(r"\[\s*(\d+)\s*%\]", line or "")
+                if m:
+                    try:
+                        pct = max(0, min(100, int(m.group(1))))
+                        _set(pct * 8 // 10, f"Mengirim APK ke TV… {pct}%")
+                    except Exception:
+                        pass
+            proc.wait(timeout=120)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False, "Timeout — file APK terlalu besar"
+        if proc.returncode != 0:
+            return False, "Push APK ke TV gagal"
+        _set(85, "Memasang APK… mohon tunggu (bisa 1–3 menit).")
+        ok, out = cls.adb_shell(ip, "pm install -r " + remote, timeout=240)
+        if not ok:
+            return False, out or "pm install gagal"
+        if "Success" not in (out or ""):
+            return False, out or "Instalasi ditolak TV (hasil tidak jelas)"
+        _set(100, "✅ Selesai")
+        return True, out.strip()
 
     @classmethod
     def ping_host(cls, host, port=5555, timeout=3):
@@ -3625,7 +3751,7 @@ class LoginPage(ctk.CTkFrame):
             return False, "Username sudah terdaftar."
 
         users[username] = {
-            "password": data.get("password"),
+            "password_enc": data.get("password_enc") or data.get("password"),
             "role": data.get("role", "admin"),
         }
         cfg["users"] = users
@@ -3899,7 +4025,8 @@ class LoginPage(ctk.CTkFrame):
             with smtplib.SMTP(smtp_settings['smtp_server'], smtp_settings['smtp_port'], timeout=10) as smtp:
                 if smtp_settings.get("use_tls", True):
                     smtp.starttls(context=context)
-                smtp.login(smtp_settings['smtp_username'], smtp_settings['smtp_password'])
+                smtp.login(smtp_settings['smtp_username'],
+                           smtp_settings.get('smtp_password_enc') or smtp_settings.get('smtp_password', ""))
                 smtp.send_message(msg)
 
             self.after(0, lambda: self._show_forgot_password_verify_code_view())
@@ -4269,6 +4396,15 @@ class LoginPage(ctk.CTkFrame):
             self.lbl_kasir_status.configure(text="✖ Password salah.", text_color=C_RED)
 
     def _login_google(self):
+        # Aturan: login Google hanya 1x per hari (anti-spam auth ke Google/Firebase)
+        try:
+            if ConfigManager.get("google_login_date") == date.today().isoformat():
+                self.lbl_status.configure(
+                    text="✖ Login Google hanya 1x per hari — sudah login hari ini.",
+                    text_color=C_RED)
+                return
+        except Exception:
+            pass
         self.lbl_status.configure(text="⏳ Membuka browser untuk login Google...")
         self.update()
         auth = get_firebase_auth()
@@ -4304,7 +4440,18 @@ class LoginPage(ctk.CTkFrame):
                     uname = fc.find_username_by_email(email)
                 except Exception:
                     pass
+            # Sinkron email ke doc cloud agar login Gmail berikutnya langsung cocok
+            if uname and email:
+                try:
+                    fc = FirestoreClient()
+                    fc.set_user_doc(uname, {"email": email}, merge=True)
+                except Exception:
+                    pass
             if uname:
+                try:
+                    ConfigManager.set("google_login_date", date.today().isoformat())
+                except Exception:
+                    pass
                 self.on_login_success(uname, "admin")
             else:
                 self._show_register_google_dialog(email, nama)
@@ -4393,6 +4540,13 @@ class LoginPage(ctk.CTkFrame):
                 }
                 cfg["profil_rental"] = profil
                 ConfigManager.save(cfg)
+                ConfigManager.set("google_login_date", date.today().isoformat())
+                # Sinkron email ke doc cloud agar login Gmail berikutnya langsung cocok
+                try:
+                    from firestore_sync import FirestoreClient as _FC
+                    _FC().set_user_doc(uname, {"email": email}, merge=True)
+                except Exception:
+                    pass
                 AuditLogger.log(action="register_google", username=uname, status="success",
                                 details={"email": email, "sumber": "google"})
                 LicenseManager._set_trial_status_in_config(uname, date.today())
@@ -4681,6 +4835,93 @@ class DialogPinInput(ctk.CTkToplevel):
         self.destroy()
 
 
+class DialogKonfirmasiBayar(ctk.CTkToplevel):
+    """Konfirmasi status pembayaran (BAYAR=LUNAS / BELUM= TAGIHAN) yang muncul
+    setelah user menekan MULAI SESI / TAMBAHKAN PESANAN."""
+    def __init__(self, master, on_submit, judul="Status Pembayaran",
+                 rincian="", default_lunas=True):
+        super().__init__(master)
+        self.on_submit = on_submit
+        self.title("Konfirmasi Pembayaran")
+        center_window(self, master, width=400, height=280)
+        self.configure(fg_color=C_BG)
+        self.transient(master)
+        self.resizable(False, False)
+        ctk.CTkLabel(self, text=f"💳  {judul}",
+                     font=("Russo One", 14, "bold"), text_color=C_ACCENT).pack(pady=(16, 2))
+        if rincian:
+            ctk.CTkLabel(self, text=rincian, font=FONT_SMALL,
+                         text_color=C_MUTED, wraplength=340).pack(pady=(0, 10))
+        ctk.CTkLabel(self, text="Pilih status pembayaran:",
+                     font=FONT_BODY, text_color=C_TEXT).pack(pady=(0, 4))
+        btn_f = ctk.CTkFrame(self, fg_color="transparent")
+        btn_f.pack(pady=6)
+        ctk.CTkButton(btn_f, text="✅  BAYAR  (LUNAS)", width=170, height=46,
+                      fg_color=C_GREEN, hover_color="#2E7D32", text_color="white",
+                      font=("Russo One", 12, "bold"),
+                      command=lambda: self._finish(True)).pack(side="left", padx=8)
+        ctk.CTkButton(btn_f, text="⏳  TAGIHAN\n(BELUM BAYAR)", width=170, height=46,
+                      fg_color="#FFCC00", hover_color="#E6B800", text_color="black",
+                      font=("Russo One", 11, "bold"),
+                      command=lambda: self._finish(False)).pack(side="left", padx=8)
+        self.after(50, self.grab_set)
+        self.lift()
+
+    def _finish(self, paid):
+        try:
+            self.on_submit(paid)
+        finally:
+            self.destroy()
+
+
+class DialogPelangganAkhir(ctk.CTkToplevel):
+    """Input data pelanggan saat sesi selesai dan memilih TAGIHAN (belum bayar)."""
+    def __init__(self, master, on_submit):
+        super().__init__(master)
+        self.on_submit = on_submit
+        self.title("Data Pelanggan Tagihan")
+        center_window(self, master, width=380, height=260)
+        self.configure(fg_color=C_BG)
+        self.transient(master)
+        self.resizable(False, False)
+        ctk.CTkLabel(self, text="👤  Data Pelanggan (TAGIHAN)",
+                     font=("Russo One", 13, "bold"), text_color="#FFCC00").pack(pady=(14, 2))
+        ctk.CTkLabel(self, text="Transaksi dicatat sebagai TAGIHAN (belum bayar).\n"
+                                "Isi data pelanggan untuk pencatatan:",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
+        f1 = ctk.CTkFrame(self, fg_color="transparent")
+        f1.pack(fill="x", padx=24, pady=2)
+        ctk.CTkLabel(f1, text="Nama:", width=60, anchor="w", font=FONT_LABEL,
+                     text_color=C_MUTED).pack(side="left")
+        self.entry_nama = ctk.CTkEntry(f1, width=220, font=FONT_BODY,
+                                       fg_color=C_BTN, text_color=C_TEXT)
+        self.entry_nama.pack(side="left")
+        f2 = ctk.CTkFrame(self, fg_color="transparent")
+        f2.pack(fill="x", padx=24, pady=2)
+        ctk.CTkLabel(f2, text="No. HP:", width=90, anchor="w", font=FONT_LABEL,
+                     text_color=C_MUTED).pack(side="left")
+        self.entry_hp = ctk.CTkEntry(f2, width=220, font=FONT_BODY,
+                                     fg_color=C_BTN, text_color=C_TEXT)
+        self.entry_hp.pack(side="left")
+        btn_f = ctk.CTkFrame(self, fg_color="transparent")
+        btn_f.pack(pady=(10, 12))
+        ctk.CTkButton(btn_f, text="💾  SIMPAN TAGIHAN", width=150,
+                      fg_color="#FFCC00", hover_color="#E6B800", text_color="black",
+                      font=("Russo One", 11, "bold"), command=self._submit).pack(side="left", padx=6)
+        ctk.CTkButton(btn_f, text="✖ Batal", width=100, fg_color=C_RED,
+                      command=self.destroy).pack(side="left", padx=6)
+        self.after(50, self.grab_set)
+        self.entry_nama.focus_set()
+
+    def _submit(self):
+        nama = self.entry_nama.get().strip()
+        if not nama:
+            messagebox.showwarning("Nama Kosong", "Nama pelanggan wajib diisi.", parent=self)
+            return
+        self.on_submit(nama, self.entry_hp.get().strip())
+        self.destroy()
+
+
 class DialogTambahTV(ctk.CTkToplevel):
     """Form tambah TV: Grup Tarif, Nama, IP → langsung pairing + input PIN."""
     def __init__(self, master, nomor_tv, on_confirm, on_close_cb, daftar_grup=None):
@@ -4962,10 +5203,25 @@ class DialogTambahPesanan(ctk.CTkToplevel):
             self.lbl_paket_info.configure(text="")
     
     def _confirm(self):
-        """Confirm and return new order data."""
+        """Confirm and return new order data + status pembayaran popup."""
         pesanan_baru = {nm: v.get() for nm, v in self.order_qty.items() if v.get() > 0}
-        self.on_confirm(pesanan_baru)
-        self.destroy()
+        if not pesanan_baru:
+            messagebox.showwarning("Pesanan Kosong", "Pilih minimal satu item pesanan.", parent=self)
+            return
+        total = sum((self.makanan_data | self.minuman_data).get(nm, 0) * q
+                    for nm, q in pesanan_baru.items())
+        DialogKonfirmasiBayar(
+            self,
+            lambda paid, p=pesanan_baru: self._finish(p, paid),
+            judul="Tambah Pesanan — Status",
+            rincian=f"{', '.join(f'{q}x {n}' for n, q in pesanan_baru.items())}\n{fmt_rp(total)}",
+        ).lift()
+
+    def _finish(self, pesanan_baru, paid):
+        try:
+            self.on_confirm(pesanan_baru, paid)
+        finally:
+            self.destroy()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5039,22 +5295,8 @@ class DialogPaket(ctk.CTkToplevel):
                            font=("Courier New", 9), fg_color=C_ACCENT, hover_color=C_ACCENT2,
                            command=self._update_total).pack(side="left")
 
-        # STATUS PEMBAYARAN — LUNAS (bayar) / TAGIHAN (belum bayar)
-        bayar_frame = ctk.CTkFrame(self, fg_color="transparent")
-        bayar_frame.pack(fill="x", padx=12, pady=(2, 2))
-        ctk.CTkLabel(bayar_frame, text="Status Pembayaran:",
-                     font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(anchor="w", pady=(0, 4))
-        self.paid_var = ctk.StringVar(value="lunas")
-        row_bayar = ctk.CTkFrame(bayar_frame, fg_color="transparent")
-        row_bayar.pack(fill="x")
-        ctk.CTkRadioButton(row_bayar, text="✅  LUNAS / BAYAR",
-                            variable=self.paid_var, value="lunas",
-                            font=("Russo One", 10, "bold"), text_color=C_GREEN,
-                            fg_color=C_ACCENT, hover_color=C_ACCENT2).pack(side="left", padx=(0, 20))
-        ctk.CTkRadioButton(row_bayar, text="⏳  TAGIHAN / BELUM BAYAR",
-                            variable=self.paid_var, value="belum",
-                            font=("Russo One", 10, "bold"), text_color="#FFCC00",
-                            fg_color=C_ACCENT, hover_color=C_ACCENT2).pack(side="left")
+        # STATUS PEMBAYARAN — dipilih lewat DialogKonfirmasiBayar setelah
+        # user menekan MULAI SESI (bukan radio di sini).
 
         # BUTTONS — paling bawah
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -5222,26 +5464,26 @@ class DialogPaket(ctk.CTkToplevel):
             paket_harga = info.get("harga", 0)
             paket_menit = info.get("menit", 0)
             pesanan = {}  # Kosong - makanan/minuman di tab TV
-            total = paket_harga
-            paid = getattr(self, 'paid_var', None)
-            paid = False if (paid is not None and paid.get() == "belum") else True
-            
-            print(f"[DEBUG] Calling on_confirm with: {paket_nm}, {paket_harga}, {paket_menit}")
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total, paid=paid)
-            print(f"[DEBUG] Destroying dialog")
-            self.destroy()
+
+            print(f"[DEBUG] Asking payment status for: {paket_nm}")
+            DialogKonfirmasiBayar(
+                self, 
+                lambda paid: self._lanjutkan_konfirmasi(paket_nm, paket_harga, paket_menit, pesanan, 0, 0, "nominal", paid),
+                judul="Mulai Sesi — Pilih Status",
+                rincian=f"{paket_nm} • {fmt_rp(paket_harga)}",
+            ).lift()
         except Exception as e:
             print(f"[ERROR] Exception in _on_mulai_sesi: {e}")
             import traceback
             traceback.print_exc()
-    
+
     def _handle_mulai_sesi(self):
         """Actual handler - called via button command."""
         if messagebox.askyesno("Konfirmasi", "Mulai sesi sekarang?", parent=self):
             self._confirm()
-    
+
     def _confirm(self):
-        """Confirm order with discount."""
+        """Confirm with payment status popup."""
         try:
             paket_nm    = self.paket_var.get()
             info        = self.paket_data.get(paket_nm, {})
@@ -5249,24 +5491,36 @@ class DialogPaket(ctk.CTkToplevel):
             paket_menit = info.get("menit", 0)
             all_menu    = {**self.makanan_data, **self.minuman_data}
             pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
-            
-            # Hitung total pesanan (food/drinks only) — paket_harga dihitung terpisah di _on_paket_confirm
+
+            # Hitung total pesanan (makanan/minuman) — paket_harga dihitung terpisah
             total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
-            
+
             try:
                 diskoni = int(self.diskon_var.get())
             except ValueError:
                 diskoni = 0
             diskoni_mode = self.diskon_mode_var.get()
-            
-            # Selalu kirim food-only total sebagai arg ke-5 agar _on_paket_confirm
-            # bisa memisahkan biaya_pesanan dari paket_harga dengan benar.
-            paid = getattr(self, 'paid_var', None)
-            paid = False if (paid is not None and paid.get() == "belum") else True
-            self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni, diskoni_mode, paid)
-            self.destroy()
+
+            sub_total = paket_harga + total_pesanan
+            DialogKonfirmasiBayar(
+                self,
+                lambda paid, pp=paket_nm, ph=paket_harga, pm=paket_menit,
+                       p=pesanan, tp=total_pesanan, d=diskoni, dm=diskoni_mode:
+                    self._lanjutkan_konfirmasi(pp, ph, pm, p, tp, d, dm, paid),
+                judul="Konfirmasi Pembayaran",
+                rincian=f"{paket_nm} • {fmt_rp(paket_harga)}" +
+                        (f" + Pesanan {fmt_rp(total_pesanan)}" if total_pesanan else ""),
+            ).lift()
         except Exception as e:
             messagebox.showerror("Error", f"Terjadi kesalahan: {str(e)}")
+
+    def _lanjutkan_konfirmasi(self, paket_nm, paket_harga, paket_menit, pesanan,
+                              total_pesanan, diskoni, diskoni_mode, paid):
+        """Setelah user memilih BAYAR / TAGIHAN, teruskan ke on_confirm."""
+        self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan,
+                        total_pesanan, diskoni, diskoni_mode, paid)
+        print(f"[DEBUG] on_confirm dipanggil dengan paid={paid}")
+        self.destroy()
 
 
 def hitung_tarif_per_menit(paket_data):
@@ -5685,8 +5939,16 @@ class VirtualRemoteDialog(ctk.CTkToplevel):
 
         File disimpan sebagai logo_lock.png di folder media_promo; client TV
         mengambilnya via TvMediaServer saat LOCK_SCREEN (waktu sewa habis).
-        """
+        Hanya tersedia untuk lisensi LIFETIME."""
         app = self.winfo_toplevel()
+        if not app._lisensi_lifetime():
+            messagebox.showwarning(
+                "Fitur Lisensi LIFETIME",
+                "Fitur logo lock TV hanya tersedia untuk lisensi LIFETIME.\n\n"
+                "Logo tetap memakai RR BILLING PRO.\n"
+                "Lakukan aktivasi lisensi LIFETIME untuk mengganti logo.",
+                parent=self)
+            return
         ms = getattr(app, 'tv_media_server', None)
         if not ms or not ms.running:
             messagebox.showwarning(
@@ -5722,6 +5984,114 @@ class VirtualRemoteDialog(ctk.CTkToplevel):
             parent=self)
 
 
+class DialogQrKartu(ctk.CTkToplevel):
+    """Preview QR panggil kasir untuk satu TV + simpan PNG / salin link."""
+
+    def __init__(self, master, label_tv, url, path_png):
+        super().__init__(master)
+        self.title(f"QR Panggil Kasir — {label_tv}")
+        self.geometry("420x560")
+        self.configure(fg_color=C_BG)
+        self.resizable(False, False)
+        self.transient(master)
+        self._url = url
+
+        ctk.CTkLabel(self, text="📱  QR PANGGIL KASIR",
+                     font=("Russo One", 14, "bold"),
+                     text_color=C_ACCENT).pack(pady=(16, 2))
+        ctk.CTkLabel(self, text=f"{label_tv} — kode unik (QR TV lain tidak berfungsi di TV ini)",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 8))
+
+        qr_img = None
+        try:
+            from PIL import Image
+            if path_png and os.path.isfile(path_png):
+                img = Image.open(path_png)
+                img.thumbnail((280, 280), Image.LANCZOS)
+                qr_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+        except Exception:
+            qr_img = None
+
+        if qr_img:
+            box = ctk.CTkFrame(self, fg_color="white", corner_radius=12,
+                               width=300, height=300)
+            box.pack(pady=6)
+            box.pack_propagate(False)
+            ctk.CTkLabel(box, text="", image=qr_img).place(relx=0.5, rely=0.5,
+                                                           anchor="center")
+        else:
+            ctk.CTkLabel(self, text="(Gagal membuat gambar QR)",
+                         font=FONT_BODY, text_color=C_RED).pack(pady=20)
+
+        ctk.CTkLabel(self, text=url, font=("Courier New", 9),
+                     text_color=C_TEXT, wraplength=380, justify="center").pack(
+            padx=14, pady=(8, 2))
+        ctk.CTkLabel(self, text="Pelanggan scan → pilih layanan/keluhan → kasir dapat notif",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 8))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(2, 4))
+        ctk.CTkButton(btn_row, text="💾 Simpan PNG", width=120, height=36,
+                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                      text_color="white",
+                      command=self._simpan_png).pack(side="left", padx=4)
+        ctk.CTkButton(btn_row, text="📋 Salin Link", width=110, height=36,
+                      fg_color=C_BTN, font=("Russo One", 9, "bold"),
+                      text_color="white",
+                      command=self._salin_link).pack(side="left", padx=4)
+        ctk.CTkButton(btn_row, text="🌐 Buka", width=80, height=36,
+                      fg_color=C_BTN, font=("Russo One", 9, "bold"),
+                      text_color="white",
+                      command=self._buka_web).pack(side="left", padx=4)
+        ctk.CTkButton(self, text="✖ Tutup", height=30,
+                      fg_color=C_BTN, font=FONT_SMALL, text_color="white",
+                      command=self.destroy).pack(pady=(0, 10), padx=14, fill="x")
+
+        # Perbaiki jenis font Tk yang salah jika perlu (konsistensi)
+        self._qr_path = path_png
+
+    def _qrcode_src(self):
+        src = self._qr_path
+        if src and os.path.isfile(src):
+            return src
+        import qrcode
+        folder = os.path.join(APP_BASE_DIR, "qr_panggilan")
+        os.makedirs(folder, exist_ok=True)
+        src = os.path.join(folder, "qr_temp.png")
+        qrcode.make(self._url).save(src)
+        return src
+
+    def _simpan_png(self):
+        try:
+            src = self._qrcode_src()
+            dest = filedialog.asksaveasfilename(
+                parent=self, title="Simpan QR sebagai PNG",
+                defaultextension=".png", filetypes=[("PNG", "*.png")],
+                initialfile="qr_panggil.png")
+            if not dest:
+                return
+            import shutil
+            shutil.copyfile(src, dest)
+            messagebox.showinfo("✅ QR Tersimpan",
+                                f"QR tersimpan di:\n{dest}\n\nCetak lalu "
+                                "tempel di dekat TV.", parent=self)
+        except Exception as e:
+            messagebox.showerror("Simpan QR", f"Gagal: {e}", parent=self)
+
+    def _salin_link(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self._url)
+            self.update()
+            messagebox.showinfo("📋 Link Tersalin", self._url, parent=self)
+        except Exception as e:
+            messagebox.showerror("Salin Link", str(e), parent=self)
+
+    def _buka_web(self):
+        import webbrowser
+        webbrowser.open(self._url)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  KARTU TV
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5729,16 +6099,17 @@ class DialogStatusClient(ctk.CTkToplevel):
     """Dialog status APK client TV (terpasang/belum) + install."""
     PACKAGE = "com.rrbillingpro.tvclient"
 
-    def __init__(self, master, label_tv, ip, on_install):
+    def __init__(self, master, label_tv, ip, on_install, role="admin"):
         super().__init__(master)
         self.title(f"Status Client TV — {label_tv}")
-        self.geometry("480x310")
+        self.geometry("480x360")
         self.configure(fg_color=C_BG)
         self.resizable(False, False)
         self.transient(master)
         self._ip = ip
         self._on_install = on_install
         self._label_tv = label_tv
+        self._is_admin = (role or "admin") == "admin"
         # Hub WebSocket untuk fallback: APK bisa aktif walau ADB port 5555 mati.
         self._hub = getattr(master.winfo_toplevel(), 'tv_ws_hub', None)
         self._busy = False
@@ -5756,6 +6127,14 @@ class DialogStatusClient(ctk.CTkToplevel):
         self.lbl_info = ctk.CTkLabel(self, text="",
                                      font=FONT_SMALL, text_color=C_MUTED)
         self.lbl_info.pack(pady=2)
+        self.progress = ctk.CTkProgressBar(self, height=8, fg_color=C_BTN,
+                                           progress_color=C_ACCENT)
+        self.progress.pack(fill="x", padx=18, pady=(4, 2))
+        self.progress.set(0)
+        self.lbl_progress = ctk.CTkLabel(self, text="",
+                                         font=("Courier New", 9),
+                                         text_color=C_MUTED)
+        self.lbl_progress.pack(pady=(0, 2))
 
         self.btn_install = ctk.CTkButton(self, text="🔧 INSTALL APK", height=38,
                                          fg_color=C_ACCENT2,
@@ -5763,6 +6142,15 @@ class DialogStatusClient(ctk.CTkToplevel):
                                          command=self._pilih_apk)
         self.btn_install.pack(pady=(18, 4))
         self.btn_install.configure(state="disabled")
+        self.btn_upgrade = None
+        if self._is_admin:
+            self.btn_upgrade = ctk.CTkButton(self, text="⬆ UPGRADE APK (Unduh & Pasang Versi Baru)",
+                                             height=38, fg_color=C_ACCENT,
+                                             hover_color="#0F766E",
+                                             font=("Russo One", 11, "bold"),
+                                             command=self._upgrade_apk)
+            self.btn_upgrade.pack(pady=(6, 4))
+            self.btn_upgrade.configure(state="disabled")
         ctk.CTkButton(self, text="Tutup", height=32, fg_color=C_BTN,
                       text_color=C_MUTED, font=("Russo One", 10, "bold"),
                       command=self.destroy).pack(pady=4)
@@ -5800,6 +6188,10 @@ class DialogStatusClient(ctk.CTkToplevel):
 
     def _tampilkan(self, hasil):
         self._busy = False
+        self.progress.set(0)
+        self.lbl_progress.configure(text="")
+        if self.btn_upgrade:
+            self.btn_upgrade.configure(state="disabled")
         if not hasil.get("adb"):
             self.lbl_adb.configure(text="ADB: ❌ GAGAL", text_color=C_RED)
             if hasil.get("ws"):
@@ -5825,6 +6217,8 @@ class DialogStatusClient(ctk.CTkToplevel):
             self.lbl_apk.configure(text="APK client: ❌ BELUM TERPASANG",
                                    text_color=C_RED)
             self.btn_install.configure(state="normal")
+        if self.btn_upgrade:
+            self.btn_upgrade.configure(state="normal")
 
     def _pilih_apk(self):
         if self._busy:
@@ -5842,17 +6236,33 @@ class DialogStatusClient(ctk.CTkToplevel):
             return
         self._busy = True
         self.btn_install.configure(state="disabled", text="⏳ Menginstall…")
+        if self.btn_upgrade:
+            self.btn_upgrade.configure(state="disabled")
+        self.progress.set(0)
+        self.lbl_progress.configure(text="")
         self.lbl_info.configure(text="Mengirim APK via ADB… mohon tunggu.")
         threading.Thread(target=self._install_thread, args=(path,), daemon=True).start()
 
+    def _set_progress(self, pct, pesan=""):
+        try:
+            self.after(0, lambda: (self.progress.set(max(0.0, min(1.0, int(pct) / 100.0))),
+                                   self.lbl_progress.configure(text=pesan)))
+        except Exception:
+            pass
+
     def _install_thread(self, path):
-        ok, pesan = ADBHelper.adb_install(self._ip, path)
+        ok, pesan = ADBHelper.adb_install_with_progress(
+            self._ip, path, self._set_progress)
         self.after(0, self._install_selesai, ok, pesan)
 
     def _install_selesai(self, ok, pesan):
         self._busy = False
         self.btn_install.configure(text="🔧 INSTALL APK")
         self.lbl_info.configure(text="")
+        self.progress.set(1 if ok else 0)
+        self.lbl_progress.configure(text="✅ 100% — Install selesai" if ok else "✖ Gagal")
+        if self.btn_upgrade:
+            self.btn_upgrade.configure(state="normal")
         if ok:
             self.lbl_apk.configure(text="APK client: ✅ TERPASANG", text_color=C_GREEN)
             messagebox.showinfo("✅ Install Berhasil",
@@ -5861,14 +6271,177 @@ class DialogStatusClient(ctk.CTkToplevel):
             self.lbl_apk.configure(text="APK client: ❌ GAGAL DIPASANG", text_color=C_RED)
             messagebox.showerror("❌ Install Gagal", str(pesan), parent=self)
 
+    # ── Upgrade APK versi terbaru (unduh dari URL → pasang via ADB) ─────────
+    def _upgrade_apk(self):
+        """Unduh APK client terbaru lalu pasang via ADB.
+
+        Sumber URL (prioritas):
+        1. Auto-detect: asset .apk pada release GitHub terbaru (dari
+           'update_manifest_url', pola github.com/<owner>/<repo>).
+        2. Config 'apk_tv_url' (URL APK langsung atau manifest.json).
+        3. Dialog manual bila keduanya tidak tersedia.
+        """
+        if self._busy:
+            return
+        url = ""
+        source = ""
+        # 1) Auto-detect dari GitHub release terbaru
+        manifest_url = str(ConfigManager.get("update_manifest_url") or "").strip()
+        if manifest_url:
+            try:
+                from scripts import check_update
+                found = check_update.find_latest_apk_url(manifest_url)
+                if found:
+                    url = found
+                    source = "GitHub release terbaru"
+            except Exception:
+                pass
+        # 2) Fallback: URL yang sudah diatur manual di config
+        if not url:
+            cfg_url = str(ConfigManager.get("apk_tv_url") or "").strip()
+            if cfg_url:
+                url = cfg_url
+                source = "config 'apk_tv_url'"
+        # 3) Fallback: minta URL manual
+        if not url:
+            dlg = ctk.CTkInputDialog(
+                text="URL APK client TV belum diatur (auto-detect GitHub tidak\n"
+                     "menemukan asset .apk di release terbaru).\n\n"
+                     "Tempel URL APK versi terbaru (atau manifest.json yang\n"
+                     "berisi asset_url / sha256), contoh:\n"
+                     "https://github.com/<user>/<repo>/releases/latest/download/tv_client.apk",
+                title="⬆ Upgrade APK TV — URL APK")
+            u = dlg.get_input()
+            if not u or not u.strip():
+                return
+            u = u.strip()
+            source = "URL manual"
+            url = u
+        if url:
+            try:
+                ConfigManager.set("apk_tv_url", url)
+            except Exception:
+                pass
+        self._busy = True
+        self.btn_upgrade.configure(state="disabled", text="⏳ Mengunduh…")
+        self.btn_install.configure(state="disabled")
+        self.progress.set(0)
+        self.lbl_progress.configure(text="")
+        self.lbl_info.configure(text=f"Mengunduh APK… ({source}) mohon tunggu.")
+        threading.Thread(target=self._upgrade_thread,
+                         args=(str(url).strip(),), daemon=True).start()
+
+    def _upgrade_thread(self, url):
+        def _ui(fn):
+            try:
+                self.after(0, fn)
+            except Exception:
+                pass
+
+        def _dl_progress(d, t):
+            pct = int(d * 80 // max(t, 1)) if t else 0
+            self._set_progress(pct, f"Mengunduh APK… {pct}%")
+
+        tmpdir = tempfile.mkdtemp(prefix="rr_tv_apk_")
+        try:
+            from scripts import check_update
+            apk_path = None
+            if url.lower().endswith((".json",)):
+                # Manifest JSON (opsional): asset_url + sha256 untuk verifikasi
+                try:
+                    import urllib.request as _ur
+                    with _ur.urlopen(url, timeout=30) as r:
+                        mf = json.loads(r.read().decode("utf-8"))
+                except Exception as e:
+                    raise ValueError(f"Gagal baca manifest: {e}")
+                asset = str(mf.get("asset_url") or "").strip()
+                if not asset:
+                    raise ValueError("Manifest tidak punya field asset_url")
+                apk_path = os.path.join(
+                    tmpdir, os.path.basename(asset.split("?")[0]) or "tv_client.apk")
+                check_update.download_asset(
+                    asset, apk_path, mf.get("sha256") or None,
+                    progress_cb=_dl_progress)
+            else:
+                apk_path = os.path.join(tmpdir, "tv_client.apk")
+                check_update.download_asset(
+                    url, apk_path, None, progress_cb=_dl_progress)
+
+            # Cegah downgrade: bandingkan versi APK baru vs yang terpasang di TV
+            try:
+                new_code, new_name = check_update.read_apk_version(apk_path)
+            except Exception:
+                new_code, new_name = None, None
+            if new_code is not None:
+                ok3, out3 = ADBHelper.adb_shell(
+                    self._ip, "dumpsys package " + self.PACKAGE)
+                m = re.search(r"versionCode=(\d+)", out3 or "")
+                cur_code = int(m.group(1)) if m else None
+                if cur_code is not None and new_code <= cur_code:
+                    _ui(lambda: self._upgrade_selesai(
+                        True,
+                        f"APK di sumber (v{new_name or new_code}) tidak lebih baru "
+                        f"dari yang terpasang di TV (v{cur_code}).\n\n"
+                        "Tidak perlu upgrade. Pastikan APK versi terbaru sudah "
+                        "di-upload ke GitHub release."))
+                    return
+
+            self._set_progress(82, "Memasang APK via ADB…")
+            ok, pesan = ADBHelper.adb_install_with_progress(
+                self._ip, apk_path, self._set_progress)
+            if not ok:
+                if "INSTALL_FAILED_VERSION_DOWNGRADE" in (pesan or ""):
+                    pesan = ("Versi APK lebih lama dari yang terpasang di TV — "
+                             "upgrade ditolak (downgrade).\n\n"
+                             "Upload APK versi terbaru ke GitHub release, lalu "
+                             "coba lagi.")
+                _ui(lambda: self._upgrade_selesai(False, pesan))
+                return
+            versi = ""
+            ok2, out2 = ADBHelper.adb_shell(self._ip,
+                                            "dumpsys package " + self.PACKAGE)
+            m = re.search(r"versionName=([0-9.]+)", out2 or "")
+            if m:
+                versi = m.group(1)
+            pesan_akhir = f"APK terpasang di {self._ip}."
+            if versi:
+                pesan_akhir += f"\nVersi baru: v{versi}"
+            _ui(lambda: self._upgrade_selesai(True, pesan_akhir))
+        except Exception as e:
+            _ui(lambda: self._upgrade_selesai(False, str(e)))
+        finally:
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _upgrade_selesai(self, ok, pesan):
+        self._busy = False
+        self.lbl_info.configure(text="")
+        self.progress.set(1 if ok else 0)
+        self.lbl_progress.configure(text="✅ 100% — Upgrade selesai" if ok else "✖ Gagal")
+        if self.btn_upgrade:
+            self.btn_upgrade.configure(
+                state="normal", text="⬆ UPGRADE APK (Unduh & Pasang Versi Baru)")
+        if ok:
+            self.lbl_apk.configure(text="APK client: ✅ TERPASANG", text_color=C_GREEN)
+            messagebox.showinfo("✅ Upgrade APK Berhasil",
+                                f"{self._label_tv} ({self._ip})\n{pesan}",
+                                parent=self)
+        else:
+            self.lbl_apk.configure(text="APK client: ❌ UPGRADE GAGAL", text_color=C_RED)
+            messagebox.showerror("❌ Upgrade APK Gagal", str(pesan), parent=self)
+
 
 class KartuTV(tk.Canvas):
     def __init__(self, master, nomor, ip, port, label_tv, on_transaksi,
                  get_paket_data, get_makanan_data, get_minuman_data,
                  get_semua_kartu, nama_grup="Reguler", is_first=False,
-                 get_daftar_grup=None, on_ganti_grup=None, on_hapus=None, **kwargs):
+                 get_daftar_grup=None, on_ganti_grup=None, on_hapus=None,
+                 role="admin", **kwargs):
         super().__init__(master, highlightthickness=0, bd=0,
                          bg="white", **kwargs)
+        self.role         = role or "admin"
         self.nomor        = nomor
         self.ip           = ip
         self.port         = port
@@ -5895,10 +6468,17 @@ class KartuTV(tk.Canvas):
         self.biaya_pesanan = 0
         self.paket_harga_tetap = 0
         self.daftar_paket_sesi = []
+        # Status pembayaran per item: lunas_paket[i] sejajar daftar_paket_sesi[i],
+        # harga_paket_sesi[i] = harga paket ke-i, lunas_pesanan[nm] = status item pesanan.
+        self.lunas_paket = []
+        self.harga_paket_sesi = []
+        self.lunas_pesanan = {}
         self.diskoni       = 0
         self.diskoni_mode  = "nominal"
         self._timer_job    = None
         self._last_transaction_item = None
+        self._last_riwayat_idx = None
+        self._last_cloud_id = None
         self.paid          = True   # status pembayaran sesi (sinkron ke riwayat)
         self._warning_blink_on = False
         self._timer_paused = False
@@ -5910,8 +6490,7 @@ class KartuTV(tk.Canvas):
         self._BLACK_BTNS = frozenset({
             "vol_up", "vol_dn", "home", "remote", "apk",
             "shop", "paket", "pause", "ip", "pindah",
-            "video", "gambar", "logo", "ganti_nama", "hapus",
-            "bayar_lunas", "bayar_belum",
+            "video", "gambar", "logo", "qr", "ganti_nama", "hapus",
         })
 
         self._build()
@@ -6065,36 +6644,24 @@ class KartuTV(tk.Canvas):
                 self._disable_btn(key)
         y = r2y + btn_h + 4
 
-        # ── Button Row 3 (Media promosi) ────────────────────────────────────
+        # ── Button Row 3 (Media promosi + QR) ─────────────────────────────
         r3y = y
-        n_btn3, btn_cols3 = 3, 3
+        n_btn3, btn_cols3 = 4, 4
         avail3 = W - 8 - (n_btn3 - 1) * gap_b
         bw3 = avail3 // btn_cols3
         btn_defs3 = [
             ("video", "🎬 VIDEO", "black", "white", self._buka_media_video),
             ("gambar", "🖼 GAMBAR", "black", "white", self._buka_media_gambar),
             ("logo", "🖼 LOGO", "black", "white", self._ganti_logo_kartu),
+            ("qr", "📱 QR", "black", "white", self._buka_qr_kartu),
         ]
         for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
             self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
-        y = r3y + btn_h + 4
-
-        # ── Button Row 4 (Status pembayaran) ────────────────────────────────
-        r4y = y
-        n_btn4, btn_cols4 = 2, 2
-        avail4 = W - 8 - (n_btn4 - 1) * gap_b
-        bw4 = avail4 // btn_cols4
-        btn_defs4 = [
-            ("bayar_lunas", "✅ SUDAH BAYAR", "black", "white", lambda: self._set_paid(True)),
-            ("bayar_belum", "⏳ BELUM BAYAR", "black", "white", lambda: self._set_paid(False)),
-        ]
-        for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs4):
-            self._draw_canvas_btn(key, bx + i*(bw4+gap_b), r4y, bw4, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
-            self._disable_btn(key)
-            # Hover tombol bayar: re-apply state aktif (jangan timpa warna state)
-            self.tag_bind(f"btn_{key}", "<Enter>", lambda e, k=key: self._update_bayar_buttons())
-            self.tag_bind(f"btn_{key}", "<Leave>", lambda e, k=key: self._update_bayar_buttons())
-        y = r4y + btn_h + 6
+        y = r3y + btn_h + 6
+        # Kasir tidak boleh mengubah IP TV / media promosi / logo
+        if self.role != "admin":
+            for k in ("ip", "video", "gambar", "logo"):
+                self._disable_btn(k)
         self._update_paid_badge()
 
         # Update card background height
@@ -6118,7 +6685,7 @@ class KartuTV(tk.Canvas):
         self._ids[f'btn_{key}'] = rect
         self._ids[f'btn_{key}_txt'] = txt_id
         self._btn_states[key] = "normal"
-        self.tag_bind(f"btn_{key}", "<Button-1>", lambda e, c=cmd: c())
+        self.tag_bind(f"btn_{key}", "<Button-1>", lambda e, k=key, c=cmd: c() if self._btn_states.get(k) != "disabled" else None)
         self.tag_bind(f"btn_{key}", "<Enter>", lambda e, k=key, bg=bg: self._btn_hover(k, bg))
         self.tag_bind(f"btn_{key}", "<Leave>", lambda e, k=key, bg=bg: self._btn_leave(k, bg))
         return rect, txt_id
@@ -6171,7 +6738,7 @@ class KartuTV(tk.Canvas):
 
     # ── Status pembayaran (sinkron ke riwayat) ───────────────────────────────
     def _update_paid_badge(self):
-        """Update badge '● LUNAS' / '⏳ BELUM' di header, tepat di sebelah nama."""
+        """Update badge 'LUNAS' / 'TAGIHAN' (atau gabungan) di header, tepat di sebelah nama."""
         if 'paid_badge' not in self._ids:
             return
         display_label = self.label_tv
@@ -6179,20 +6746,32 @@ class KartuTV(tk.Canvas):
             display_label = display_label[3:]
         # Estimasi lebar nama (Russo One 11 bold ≈ 7.5px/char) + jarak 6px
         name_w = len(display_label) * 7 + 6
-        if self.sesi_kosong() or self.is_bebas:
+        if self.sesi_kosong():
             text, color = "", C_GREEN
-        elif self.paid:
-            text, color = "● LUNAS", C_GREEN
+        elif self.is_bebas:
+            text, color = "⏳ TAGIHAN", "#FFCC00"
         else:
-            text, color = "⏳ BELUM", "#FFCC00"
+            lunas, tagihan = self._split_payment()
+            if lunas > 0 and tagihan > 0:
+                text, color = "LUNAS + TAGIHAN", "#FF9933"
+            elif lunas > 0:
+                text, color = "● LUNAS", C_GREEN
+            else:
+                text, color = "⏳ TAGIHAN", "#FFCC00"
         self.itemconfig(self._ids['paid_badge'], text=text, fill=color)
-        self.coords(self._ids['paid_badge'], 10 + name_w, self.coords(self._ids['tv_name'])[1])
+        try:
+            # Lebarkan sedikit saat teks gabungan agar tidak tumpang tindih
+            cur_x, cur_y = self.coords(self._ids['tv_name'])
+        except Exception:
+            cur_x, cur_y = 10, 5
+        self.coords(self._ids['paid_badge'], cur_x + len(display_label) * 7 + 6, cur_y)
 
     def _update_bayar_buttons(self):
         """Warna tombol SUDAH/BELUM BAYAR sesuai state aktif (lunas = hijau)."""
         if 'btn_bayar_lunas' not in self._ids:
             return
-        if self.paid:
+        lunas, tagihan = self._split_payment()
+        if tagihan <= 0:
             self.itemconfig(self._ids['btn_bayar_lunas'], fill=C_GREEN, outline=C_GREEN)
             self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill="white")
             self.itemconfig(self._ids['btn_bayar_belum'], fill="black", outline=C_BORDER)
@@ -6203,27 +6782,52 @@ class KartuTV(tk.Canvas):
             self.itemconfig(self._ids['btn_bayar_lunas'], fill="black", outline=C_BORDER)
             self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill=C_MUTED)
 
+    def _bind_last_transaction(self):
+        """Simpan referensi index/cloud_id baris riwayat milik sesi ini."""
+        try:
+            app = self.winfo_toplevel()
+            item_id = getattr(self, '_last_transaction_item', None)
+            idx = app._tree_item_to_index.get(item_id, -1)
+            if idx < 0:
+                idx = getattr(app, "_last_catat_idx", -1)
+            self._last_riwayat_idx = idx
+            if 0 <= idx < len(app.riwayat_meta):
+                self._last_cloud_id = app.riwayat_meta[idx].get("cloud_id")
+        except Exception:
+            pass
+
     def _set_paid(self, paid):
         """Tandai sesi lunas/belum lunas, sinkronkan ke baris riwayat terkait."""
         if self.sesi_kosong() or self.is_bebas:
             return
-        if self._last_transaction_item is None:
+        if self._last_transaction_item is None and self._last_riwayat_idx is None:
             return
-        if self.paid == paid:
+        app = self.winfo_toplevel()
+        idx = app._resolve_session_idx(self)
+        row_needs_sync = False
+        if 0 <= idx < len(app.riwayat_meta):
+            row_needs_sync = bool(app.riwayat_meta[idx].get('paid', True)) != bool(paid)
+        if self.paid == paid and not row_needs_sync:
             return
         self.paid = paid
+        # Semua item ikut memilih tombol
+        self.lunas_paket = [paid] * (len(self.daftar_paket_sesi or []) or 1)
+        if self.pesanan_aktif:
+            self.lunas_pesanan = {nm: paid for nm in self.pesanan_aktif}
         self._update_paid_badge()
         self._update_bayar_buttons()
-        app = self.winfo_toplevel()
-        if hasattr(app, '_set_transaksi_paid'):
+        if idx >= 0 and hasattr(app, '_set_transaksi_paid_idx'):
+            app._set_transaksi_paid_idx(idx, paid)
+        elif hasattr(app, '_set_transaksi_paid'):
             app._set_transaksi_paid(self._last_transaction_item, paid)
 
     # ── TV WebSocket Hub helpers (Overlay & Lockscreen Android TV) ──────────
     def _split_payment(self):
-        """Split tagihan sesi jadi (lunas_total, tagihan_total) untuk kartu TV.
+        """Split tagihan sesi jadi (lunas_total, tagihan_total) PER ITEM.
 
-        Sesi yang sudah ditandai bayar (paid=True)  -> semua total masuk LUNAS.
-        Sesi belum bayar                            -> seluruh jumlah jadi TAGIHAN.
+        Status dihitung granular per paket (sejajar daftar_paket_sesi) dan
+        per item pesanan (lunas_pesanan). Diskon dialokasikan proporsional
+        terhadap subtotal lunas/tagihan.
         """
         try:
             total = self._total_setelah_diskon()
@@ -6231,9 +6835,50 @@ class KartuTV(tk.Canvas):
             total = getattr(self, "paket_harga_tetap", 0) + getattr(self, "biaya_pesanan", 0)
         if self.sesi_kosong():
             return 0, 0
-        if getattr(self, "paid", True):
+        try:
+            subtotal = self.paket_harga_tetap + self.biaya_pesanan
+        except Exception:
+            subtotal = 0
+        if subtotal <= 0:
+            if getattr(self, "paid", True):
+                return total, 0
+            return 0, total
+
+        # ── subtotal LUNAS per item ──
+        lunas_sub = 0
+        # paket per segmen sesi
+        harga_paket = getattr(self, "harga_paket_sesi", None) or []
+        lunas_paket = getattr(self, "lunas_paket", None) or []
+        if harga_paket:
+            for i, h in enumerate(harga_paket):
+                paid_i = lunas_paket[i] if i < len(lunas_paket) else getattr(self, "paid", True)
+                if paid_i:
+                    lunas_sub += h
+        else:
+            # fallback sesi lama (tanpa data per item): pakai paid keseluruhan
+            if getattr(self, "paid", True):
+                lunas_sub += self.paket_harga_tetap
+
+        # pesanan per item
+        lunas_pesanan = getattr(self, "lunas_pesanan", None) or {}
+        all_menu = {}
+        try:
+            all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+        except Exception:
+            pass
+        for nm, qty in (self.pesanan_aktif or {}).items():
+            paid_i = lunas_pesanan.get(nm, getattr(self, "paid", True))
+            if paid_i:
+                lunas_sub += all_menu.get(nm, 0) * qty
+
+        lunas_sub = min(lunas_sub, subtotal)
+        if lunas_sub >= subtotal:
             return total, 0
-        return 0, total
+        if lunas_sub <= 0:
+            return 0, total
+        # diskon proporsional terhadap subtotal lunas
+        lunas = round(total * lunas_sub / subtotal)
+        return lunas, max(0, total - lunas)
 
     def _hub(self):
         app = self.winfo_toplevel()
@@ -6404,17 +7049,11 @@ class KartuTV(tk.Canvas):
         threading.Thread(target=runner, daemon=True).start()
 
     def _tv_lock_media_urls(self, app):
-        """URL logo lock (global) + video promosi aktif untuk detail LOCK_SCREEN."""
-        ms = getattr(app, 'tv_media_server', None)
-        if not ms or not ms.running:
-            return "", ""
-        base = f"http://{app._get_lan_ip()}:{ms.port}/media/"
-        logo_url = app._tv_logo_url()
-        promo_url = ""
-        cur = getattr(ms, 'current_media', None) or {}
-        if cur.get("type") == "video" and cur.get("filename"):
-            promo_url = base + quote(cur["filename"])
-        return logo_url, promo_url
+        """URL logo lock (global) + video promosi aktif untuk detail LOCK_SCREEN.
+
+        User NON-LIFETIME: logo default client (drawable bawaan) + video promosi
+        BAWAAN (PROMO_VIDEO_DEFAULT) — media custom tidak pernah terpakai."""
+        return app._tv_media_urls_now()
 
     def _ws_send_pause(self, paused):
         hub = self._hub()
@@ -6717,7 +7356,7 @@ class KartuTV(tk.Canvas):
     # ── Status APK client TV (badge CLI + cek/install) ──────────────────────
     def _buka_status_client(self):
         DialogStatusClient(self.winfo_toplevel(), self.label_tv, self.ip,
-                           self._install_apk_client)
+                           self._install_apk_client, role=self.role)
 
     # ── Media promosi (video/gambar) ke client TV ───────────────────────────
     def _get_media_server(self):
@@ -6725,6 +7364,16 @@ class KartuTV(tk.Canvas):
         return getattr(app, 'tv_media_server', None)
 
     def _pilih_media(self, kategori, filetypes, judul):
+        app = self.winfo_toplevel()
+        if not app._lisensi_lifetime():
+            messagebox.showwarning(
+                "Fitur Lisensi LIFETIME",
+                f"Fitur {('video' if kategori == 'video' else 'gambar')} promosi "
+                "hanya tersedia untuk lisensi LIFETIME.\n\n"
+                "TV tetap memutar video promosi bawaan.\n"
+                "Lakukan aktivasi lisensi LIFETIME untuk mengganti media promosi.",
+                parent=app)
+            return
         ms = self._get_media_server()
         if not ms or not ms.running:
             messagebox.showwarning("Media Server Mati",
@@ -6737,6 +7386,12 @@ class KartuTV(tk.Canvas):
             initialdir=os.path.join(APP_BASE_DIR, "media_promo"),
             filetypes=filetypes)
         if not path:
+            return
+        if os.path.basename(path).lower() == PROMO_VIDEO_DEFAULT.lower():
+            messagebox.showwarning(
+                "Video Promosi Bawaan",
+                "Video promosi bawaan tidak dapat dipilih/diganti.",
+                parent=self.winfo_toplevel())
             return
         app = self.winfo_toplevel()
         hub = getattr(app, 'tv_ws_hub', None)
@@ -6968,8 +7623,17 @@ class KartuTV(tk.Canvas):
 
         Koneksi sama seperti tombol VIDEO/GAMBAR — tanpa ADB/port 5555: file
         disalin ke media_promo/logo_lock.png via TvMediaServer (HTTP 8082);
-        client TV memakainya saat LOCK_SCREEN (waktu sewa habis)."""
+        client TV memakainya saat LOCK_SCREEN (waktu sewa habis).
+        Hanya tersedia untuk lisensi LIFETIME."""
         app = self.winfo_toplevel()
+        if not app._lisensi_lifetime():
+            messagebox.showwarning(
+                "Fitur Lisensi LIFETIME",
+                "Fitur logo kartu TV hanya tersedia untuk lisensi LIFETIME.\n\n"
+                "Logo tetap memakai RR BILLING PRO.\n"
+                "Lakukan aktivasi lisensi LIFETIME untuk mengganti logo.",
+                parent=app)
+            return
         ms = self._get_media_server()
         if not ms or not ms.running:
             messagebox.showwarning("Media Server Mati",
@@ -7001,6 +7665,20 @@ class KartuTV(tk.Canvas):
                             "Logo lock berhasil diganti.\n"
                             "Berlaku untuk semua TV saat waktu sewa habis.",
                             parent=app)
+
+    def _buka_qr_kartu(self):
+        """Buka dialog QR panggil kasir untuk TV ini (QR unik per TV)."""
+        app = self.winfo_toplevel()
+        kode = app._qr_generate_untuk(self.label_tv)
+        if not kode:
+            messagebox.showwarning(
+                "QR Gagal Dibuat",
+                "Gagal membuat kode QR untuk TV ini.\nPeriksa file rr_billing_config.json.",
+                parent=app)
+            return
+        url = app._qr_url(self.label_tv, kode, self.nama_grup)
+        path = app._qr_simpan_png(self.label_tv, url)
+        DialogQrKartu(app, self.label_tv, url, path)
 
     def _refresh_client_badge(self):
         try:
@@ -7066,14 +7744,25 @@ class KartuTV(tk.Canvas):
                            pesanan_aktif=self.pesanan_aktif.copy(),
                            paket_harga=self.paket_harga_tetap, paket_label=self.paket_aktif)
 
-    def _on_tambah_pesanan_confirm(self, pesanan_baru):
+    def _on_tambah_pesanan_confirm(self, pesanan_baru, paid=True, _stok_delta=None):
         """Callback saat user confirm tambah pesanan."""
+        app = self.winfo_toplevel()
+        # Validasi stok sebelum pesanan diterima (blokir kalau tidak cukup)
+        if hasattr(app, '_stok_validate_orders'):
+            stok_check = pesanan_baru if _stok_delta is None else {
+                k: v for k, v in _stok_delta.items() if int(v or 0) > 0}
+            ok, pesan, nm, sisa = app._stok_validate_orders(stok_check)
+            if not ok:
+                messagebox.showwarning("⚠ Stok Tidak Mencukupi", pesan, parent=app)
+                return
+        old_pesanan = dict(getattr(self, 'pesanan_aktif', {}) or {})
         # Merge pesanan baru ke pesanan_aktif
         all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
         total_baru = 0
         
         for nama, qty in pesanan_baru.items():
             self.pesanan_aktif[nama] = qty
+            self.lunas_pesanan[nama] = paid  # status per item sesuai popup
         
         # Hitung ulang total berdasarkan semua pesanan aktif
         total_baru = sum(all_menu.get(nama, 0) * qty for nama, qty in self.pesanan_aktif.items())
@@ -7087,18 +7776,23 @@ class KartuTV(tk.Canvas):
         else:
             self.itemconfig(self._ids['lbl_paket'], text=f"{self.paket_aktif} | {fmt_rp(total_semua)}")
         self._ws_send_total(total_semua if not self.is_bebas else total_baru)
+        self._update_paid_badge()
+        self._update_bayar_buttons()
 
         # Update recorded transaction row if this fixed package session already has one.
-        if not self.is_bebas and getattr(self, '_last_transaction_item', None):
+        if not self.is_bebas and (getattr(self, '_last_transaction_item', None) or getattr(self, '_last_riwayat_idx', None) is not None):
             app = self.winfo_toplevel()
-            item_id = self._last_transaction_item
-            if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                idx = app._tree_item_to_index.get(item_id)
-                if idx is not None and idx < len(app.riwayat_transaksi):
-                    waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+            idx = app._resolve_session_idx(self)
+            if idx >= 0 and hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                item_id = app._tree_item_for_idx(idx)
+                if item_id is None:
+                    item_id = self._last_transaction_item
+                if idx < len(app.riwayat_transaksi):
+                    waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
                     updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua, paid=self.paid)
                     app.riwayat_transaksi[idx] = updated_row
-                    app.tree.item(item_id, values=updated_row)
+                    if item_id is not None and app.tree.exists(item_id):
+                        app.tree.item(item_id, values=updated_row)
                     try:
                         all_menu_app = {**app.menu_makanan, **app.menu_minuman}
                         pesanan_total_baru = sum(all_menu_app.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
@@ -7120,8 +7814,31 @@ class KartuTV(tk.Canvas):
                     if hasattr(app, '_save_riwayat'):
                         app._save_riwayat()
 
+        # Terapkan perubahan stok (selisih qty lama → baru; QR pakai delta eksplisit)
+        try:
+            if hasattr(app, '_stok_terapkan'):
+                if _stok_delta is not None:
+                    app._stok_terapkan(_stok_delta)
+                else:
+                    delta = {}
+                    for nama, qty in pesanan_baru.items():
+                        d = int(qty or 0) - int(old_pesanan.get(nama, 0) or 0)
+                        if d:
+                            delta[nama] = d
+                    app._stok_terapkan(delta)
+        except Exception:
+            pass
+
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True):
+        app = self.winfo_toplevel()
+        # Validasi stok makanan/minuman sebelum paket+pesanan diterima
+        if pesanan and hasattr(app, '_stok_validate_orders'):
+            ok, pesan, nm, sisa = app._stok_validate_orders(pesanan)
+            if not ok:
+                messagebox.showwarning("⚠ Stok Tidak Mencukupi", pesan, parent=app)
+                return
         previous_session = not self.sesi_kosong()
+        old_pesanan = dict(getattr(self, 'pesanan_aktif', {}) or {})
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
@@ -7129,14 +7846,20 @@ class KartuTV(tk.Canvas):
         if not previous_session:
             # Sesi baru: reset pesanan dan biaya
             self.daftar_paket_sesi = [paket_nm]
+            self.harga_paket_sesi = [paket_harga]
+            self.lunas_paket = [paid]
             self.pesanan_aktif = pesanan
             all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+            self.lunas_pesanan = {nm: paid for nm in pesanan}
             self.biaya_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
         else:
             # Tambah paket ke sesi aktif: pertahankan pesanan lama, merge pesanan baru (jika ada)
             self.daftar_paket_sesi.append(paket_nm)
+            self.harga_paket_sesi.append(paket_harga)
+            self.lunas_paket.append(paid)
             for nm, qty in pesanan.items():
                 self.pesanan_aktif[nm] = qty
+                self.lunas_pesanan[nm] = paid
             if pesanan:
                 all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
                 self.biaya_pesanan += sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
@@ -7192,17 +7915,20 @@ class KartuTV(tk.Canvas):
         self._ws_send_total(self._total_setelah_diskon())
 
         if not self.is_bebas:
-            if self._last_transaction_item and previous_session:
+            if (self._last_transaction_item or self._last_riwayat_idx is not None) and previous_session:
                 app = self.winfo_toplevel()
-                item_id = self._last_transaction_item
+                idx = app._resolve_session_idx(self)
                 total_int = self._total_setelah_diskon()
-                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                    idx = app._tree_item_to_index.get(item_id)
-                    if idx is not None and idx < len(app.riwayat_transaksi):
-                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+                if idx >= 0 and hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                    item_id = app._tree_item_for_idx(idx)
+                    if item_id is None:
+                        item_id = self._last_transaction_item
+                    if idx < len(app.riwayat_transaksi):
+                        waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
                         updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
                         app.riwayat_transaksi[idx] = updated_row
-                        app.tree.item(item_id, values=updated_row)
+                        if item_id is not None and app.tree.exists(item_id):
+                            app.tree.item(item_id, values=updated_row)
                         try:
                             all_menu = {**app.menu_makanan, **app.menu_minuman}
                             pesanan_total_baru = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
@@ -7228,20 +7954,21 @@ class KartuTV(tk.Canvas):
             else:
                 total_int_baru = self._total_setelah_diskon(self.paket_harga_tetap + total_pesanan)
                 self._last_transaction_item = self.on_transaksi(
-                    self.label_tv, paket_nm, pesanan, total_int_baru)
+                    self.label_tv, paket_nm, pesanan, total_int_baru, paid=paid)
+                self._bind_last_transaction()
         else:
             self._last_transaction_item = None
+            self._last_riwayat_idx = None
+            self._last_cloud_id = None
 
         # Status pembayaran: hanya untuk paket berwaktu (bukan Main Bebas)
         if self.is_bebas:
             self.paid = True
-            self._disable_btn("bayar_lunas")
-            self._disable_btn("bayar_belum")
+            self.lunas_paket = [True] * (len(self.daftar_paket_sesi or []) or 1)
+            self.lunas_pesanan = {nm: True for nm in self.pesanan_aktif}
         else:
             if not previous_session:
                 self.paid = paid   # status bayar sesuai pilihan kasir di popup
-            self._enable_btn("bayar_lunas", "black", "white")
-            self._enable_btn("bayar_belum", "black", "white")
             self._update_bayar_buttons()
         self._update_paid_badge()
 
@@ -7257,6 +7984,18 @@ class KartuTV(tk.Canvas):
             self._ws_send_start(-1)
         else:
             self._ws_send_start(self.sisa_waktu)
+
+        # Terapkan perubahan stok (selisih qty lama → baru)
+        try:
+            if pesanan and hasattr(app, '_stok_terapkan'):
+                delta = {}
+                for nm, qty in pesanan.items():
+                    d = int(qty or 0) - int(old_pesanan.get(nm, 0) or 0)
+                    if d:
+                        delta[nm] = d
+                app._stok_terapkan(delta)
+        except Exception:
+            pass
 
     # ── Timer paket berwaktu (mundur) ───────────────────────────────────────
     # Decrement sisa_waktu kini dikelola TimerService (thread background);
@@ -7331,37 +8070,39 @@ class KartuTV(tk.Canvas):
         total_akhir = self._total_setelah_diskon()
         pesanan_txt = ", ".join(f"{nm}\u00d7{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
         paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
-        if getattr(self, '_last_transaction_item', None):
-            app = self.winfo_toplevel()
-            item_id = self._last_transaction_item
-            if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                idx = app._tree_item_to_index.get(item_id)
-                if idx is not None and idx < len(app.riwayat_transaksi):
-                    waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
-                    app.riwayat_transaksi[idx] = updated_row
+        app = self.winfo_toplevel()
+        idx = app._resolve_session_idx(self)
+        if idx >= 0 and hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+            item_id = app._tree_item_for_idx(idx)
+            if item_id is None:
+                item_id = self._last_transaction_item
+            if idx < len(app.riwayat_transaksi):
+                waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
+                updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
+                app.riwayat_transaksi[idx] = updated_row
+                if item_id is not None and app.tree.exists(item_id):
                     app.tree.item(item_id, values=updated_row)
-                    try:
-                        all_menu = {**app.menu_makanan, **app.menu_minuman}
-                        pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
-                        paket_harga = total_akhir - pesanan_total
-                        if paket_harga < 0:
-                            paket_harga = 0
-                        app.riwayat_meta[idx]['paket_harga'] = paket_harga
-                        app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
-                        app.riwayat_meta[idx]['total'] = total_akhir
-                        app.riwayat_meta[idx]['diskoni'] = self.diskoni
-                        app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
-                        app.riwayat_meta[idx]['pesanan'] = {
-                            str(k): int(v) for k, v in self.pesanan_aktif.items()}
-                        threading.Thread(
-                            target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
-                    except Exception:
-                        pass
-                    if hasattr(app, '_refresh_riwayat_summary'):
-                        app._refresh_riwayat_summary()
-                    if hasattr(app, '_save_riwayat'):
-                        app._save_riwayat()
+                try:
+                    all_menu = {**app.menu_makanan, **app.menu_minuman}
+                    pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                    paket_harga = total_akhir - pesanan_total
+                    if paket_harga < 0:
+                        paket_harga = 0
+                    app.riwayat_meta[idx]['paket_harga'] = paket_harga
+                    app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
+                    app.riwayat_meta[idx]['total'] = total_akhir
+                    app.riwayat_meta[idx]['diskoni'] = self.diskoni
+                    app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                    app.riwayat_meta[idx]['pesanan'] = {
+                        str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                    threading.Thread(
+                        target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
+                except Exception:
+                    pass
+                if hasattr(app, '_refresh_riwayat_summary'):
+                    app._refresh_riwayat_summary()
+                if hasattr(app, '_save_riwayat'):
+                    app._save_riwayat()
         else:
             self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir,
                               diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
@@ -7373,23 +8114,29 @@ class KartuTV(tk.Canvas):
         app_menu = self.winfo_toplevel()
         menu_makanan = getattr(app_menu, 'menu_makanan', {}) or {}
         menu_minuman = getattr(app_menu, 'menu_minuman', {}) or {}
-        makanan = [
-            {"item": f"{qty}x {nm}", "harga": fmt_rp(menu_makanan.get(nm, 0) * qty)}
-            for nm, qty in self.pesanan_aktif.items() if nm in menu_makanan
-        ]
-        minuman = [
-            {"item": f"{qty}x {nm}", "harga": fmt_rp(menu_minuman.get(nm, 0) * qty)}
-            for nm, qty in self.pesanan_aktif.items() if nm in menu_minuman
-        ]
         logo_url, promo_url = self._tv_lock_media_urls(app_menu)
+        lunas_now, tagihan_now = self._split_payment()
+        sewa_lunas = all(self.lunas_paket) if getattr(self, "lunas_paket", None) else (
+            True if getattr(self, "paid", True) else False)
         print(f"[TV TIMER] {self.label_tv}: WAKTU HABIS -> kirim LOCK_SCREEN "
               f"logo={logo_url!r} promo={promo_url!r}")
         self._ws_send_lock("WAKTU SEWA HABIS", {
             "meja": self.label_tv,
             "sewa": daftar_sewa,
             "sewa_harga": fmt_rp(self.paket_harga_tetap),
-            "makanan": makanan,
-            "minuman": minuman,
+            "sewa_lunas": sewa_lunas,
+            "lunas_total": fmt_rp(lunas_now),
+            "tagihan_total": fmt_rp(tagihan_now),
+            "makanan": [
+                {"item": f"{qty}x {nm}", "harga": fmt_rp(menu_makanan.get(nm, 0) * qty),
+                 "lunas": (getattr(self, "lunas_pesanan", {}).get(nm, getattr(self, "paid", True)))}
+                for nm, qty in self.pesanan_aktif.items() if nm in menu_makanan
+            ],
+            "minuman": [
+                {"item": f"{qty}x {nm}", "harga": fmt_rp(menu_minuman.get(nm, 0) * qty),
+                 "lunas": (getattr(self, "lunas_pesanan", {}).get(nm, getattr(self, "paid", True)))}
+                for nm, qty in self.pesanan_aktif.items() if nm in menu_minuman
+            ],
             "fnb": fmt_rp(self.biaya_pesanan),
             "total": fmt_rp(total_akhir),
             "logo_url": logo_url,
@@ -7405,17 +8152,61 @@ class KartuTV(tk.Canvas):
             parent=self.winfo_toplevel(),
         )
 
-        # Buka kunci TV setelah kasir konfirmasi (sama seperti tombol SELESAI):
-        # lockscreen "WAKTU SEWA HABIS" ditutup. Saat TV dibangunkan nanti hanya
-        # promo diputar 1x lalu masuk ke port terakhir — tanpa lockscreen.
-        # (Kalau kasir belum klik OK, TV tetap terkunci.)
+        # Jika masih ada sisa TAGIHAN, kasir diminta konfirmasi:
+        #  - BAYAR   -> sesi ditandai lunas (riwayat jadi LUNAS).
+        #  - TAGIHAN -> input nama + no HP pelanggan untuk catatan.
+        if tagihan_now > 0:
+            DialogKonfirmasiBayar(
+                self.winfo_toplevel(),
+                lambda paid: self._akhir_sesi_setelah_konfirmasi(paid),
+                judul="Selesaikan Tagihan",
+                rincian=f"Tagihan belum terbayar: {fmt_rp(tagihan_now)}\n"
+                        f"Sudah terbayar (LUNAS): {fmt_rp(lunas_now)}",
+            ).lift()
+        else:
+            self._akhir_sesi_tanpa_tagih()
+
+    def _akhir_sesi_setelah_konfirmasi(self, paid):
+        """Lanjutan sesi habis setelah konfirmasi BAYAR / TAGIHAN:
+        BAYAR -> semua item ditandai lunas (riwayat jadi LUNAS);
+        TAGIHAN -> isi nama & no HP pelanggan untuk catatan tagihan.
+        """
+        if paid:
+            self._set_paid(True)
+            self._akhir_sesi_tanpa_tagih()
+        else:
+            DialogPelangganAkhir(
+                self.winfo_toplevel(),
+                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+            ).lift()
+
+    def _simpan_pelanggan_tagihan(self, nama, hp):
+        """Catat nama & no HP pelanggan (kasus TAGIHAN) ke baris riwayat."""
+        try:
+            app = self.winfo_toplevel()
+            idx = app._resolve_session_idx(self)
+            if idx >= 0 and hasattr(app, '_tree_item_to_index'):
+                if idx < len(app.riwayat_meta):
+                    app.riwayat_meta[idx]['nama_pelanggan'] = nama
+                    app.riwayat_meta[idx]['no_hp'] = hp
+                    threading.Thread(
+                        target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
+                if hasattr(app, '_save_riwayat'):
+                    app._save_riwayat()
+                if hasattr(app, '_refresh_riwayat_summary'):
+                    app._refresh_riwayat_summary()
+                # Status riwayat tetap BELUM LUNAS (tagihan)
+                if hasattr(app, '_set_transaksi_paid_idx'):
+                    app._set_transaksi_paid_idx(idx, False)
+        except Exception as e:
+            print(f"[TAGIHAN] Gagal simpan pelanggan {self.label_tv}: {e}")
+        self._akhir_sesi_tanpa_tagih()
+
+    def _akhir_sesi_tanpa_tagih(self):
+        """Tutup sesi: unlock TV, sleep 2 dtk, reset kartu."""
         print(f"[TV TIMER] {self.label_tv}: dialog kasir OK -> UNLOCK + sleep 2dtk")
         self._ws_send_stop()
-
-        # TV masuk mode sleep 2 detik SETELAH unlock — jeda supaya perintah
-        # UNLOCK_SCREEN pasti sampai ke TV sebelum TV tidur.
         self._tv_sleep_now(2, alasan="Waktu habis - kasir klik OK (sleep 2 dtk)")
-
         self._reset_sesi()
 
     # ── Pause/Resume timer untuk virtual scroll ────────────────────────────
@@ -7463,20 +8254,15 @@ class KartuTV(tk.Canvas):
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             biaya_waktu = tarif_menit * menit_total
             total_akhir = self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan)
-            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
-            konfirmasi = messagebox.askyesno(
-                "⏹ Selesai — Main Bebas",
-                f"TV: {self.label_tv}\n"
-                f"Lama main: {fmt_durasi(round(menit_total))}\n"
-                f"Biaya waktu: {fmt_rp(biaya_waktu)}\n"
-                f"Biaya pesanan: {fmt_rp(self.biaya_pesanan)}\n"
-                f"TOTAL: {fmt_rp(total_akhir)}\n\n"
-                f"Rincian pesanan: {pesanan_txt}\n\n"
-                f"Catat transaksi & akhiri sesi ini?")
-            if not konfirmasi:
-                return
-            self.on_transaksi(self.label_tv, "Main Bebas", self.pesanan_aktif, total_akhir,
-                              diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
+            self._last_transaction_item = self.on_transaksi(
+                self.label_tv, "Main Bebas", self.pesanan_aktif, total_akhir,
+                diskoni=self.diskoni, diskoni_mode=self.diskoni_mode, paid=False)
+            self._bind_last_transaction()
+            DialogPelangganAkhir(
+                self.winfo_toplevel(),
+                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+            ).lift()
+            return
         else:
             total_akhir = self._total_setelah_diskon()
             pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
@@ -7491,6 +8277,16 @@ class KartuTV(tk.Canvas):
                 return
             # Transaksi paket berwaktu sudah dicatat saat konfirmasi awal,
             # jadi di sini tidak dicatat ulang — cukup tutup sesi.
+            lunas_now, tagihan_now = self._split_payment()
+            if tagihan_now > 0:
+                DialogKonfirmasiBayar(
+                    self.winfo_toplevel(),
+                    lambda paid: self._klik_selesai_tutup_sesi(paid),
+                    judul="Selesaikan Tagihan",
+                    rincian=f"Tagihan belum terbayar: {fmt_rp(tagihan_now)}\n"
+                            f"Sudah terbayar (LUNAS): {fmt_rp(lunas_now)}",
+                ).lift()
+                return
 
         self.itemconfig(self._ids['lbl_timer'], text="SELESAI \u23f9", fill=C_MUTED)
         self.itemconfig(self._ids['lbl_estimasi'], text="")
@@ -7503,6 +8299,24 @@ class KartuTV(tk.Canvas):
         self._tv_sleep_now(2, alasan="Kasir klik SELESAI (sleep 2 dtk)")
 
         self._reset_sesi()
+
+    def _klik_selesai_tutup_sesi(self, paid):
+        """Konfirmasi tagihan di tombol SELESAI: BAYAR -> riwayat lunas;
+        TAGIHAN -> dialog data pelanggan, lalu tetap tutup sesi."""
+        if paid:
+            self._set_paid(True)
+        else:
+            DialogPelangganAkhir(
+                self.winfo_toplevel(),
+                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+            ).lift()
+        # bukan -> sudah disimpan di _simpan_pelanggan_tagihan
+        if paid:
+            self.itemconfig(self._ids['lbl_timer'], text="SELESAI \u23f9", fill=C_MUTED)
+            self.itemconfig(self._ids['lbl_estimasi'], text="")
+            self._ws_send_stop()
+            self._tv_sleep_now(2, alasan="Kasir klik SELESAI (sleep 2 dtk)")
+            self._reset_sesi()
 
     def _reset_sesi(self):
         if self._timer_job:
@@ -7517,6 +8331,9 @@ class KartuTV(tk.Canvas):
         self.biaya_pesanan = 0
         self.paket_harga_tetap = 0
         self.daftar_paket_sesi = []
+        self.lunas_paket = []
+        self.harga_paket_sesi = []
+        self.lunas_pesanan = {}
         self.diskoni       = 0
         self.diskoni_mode  = "nominal"
         self._billing_paused = False
@@ -7528,8 +8345,6 @@ class KartuTV(tk.Canvas):
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         self._disable_btn("selesai")
         self._disable_btn("shop")
-        self._disable_btn("bayar_lunas")
-        self._disable_btn("bayar_belum")
         self._enable_btn("paket", "black", "white")
         if "pause" in self._ids:
             self._disable_btn("pause")
@@ -7625,13 +8440,6 @@ class KartuTV(tk.Canvas):
             target.itemconfig(target._ids['lbl_timer'], text="\u221e BEBAS", fill=C_GREEN)
         target._enable_btn("selesai", C_BTN, C_RED)
         target._enable_btn("shop", "black", "white")
-        if target.is_bebas:
-            target._disable_btn("bayar_lunas")
-            target._disable_btn("bayar_belum")
-        else:
-            target._enable_btn("bayar_lunas", "black", "white")
-            target._enable_btn("bayar_belum", "black", "white")
-            target._update_bayar_buttons()
         target._update_paid_badge()
 
         # ── Kosongkan TV asal ────────────────────────────────────────────────
@@ -7672,12 +8480,18 @@ class KartuWarnet(tk.Canvas):
         self.pesanan_aktif     = {}
         self.biaya_pesanan     = 0
         self.paket_harga_tetap = 0
+        self.daftar_paket_sesi = []
+        self.lunas_paket       = []
+        self.harga_paket_sesi  = []
+        self.lunas_pesanan     = {}
         self.diskoni           = 0
         self.diskoni_mode      = "nominal"
         self._timer_job        = None
         self._timer_paused = False
         self._timer_was_running = False
         self._last_transaction_item = None
+        self._last_riwayat_idx = None
+        self._last_cloud_id = None
         self.paid             = True   # status pembayaran sesi (sinkron ke riwayat)
         self.is_on            = False
         self.pc_locked        = False   # LOCK terakhir yang dikirim ke client (persisten lintas reconnect)
@@ -7883,24 +8697,78 @@ class KartuWarnet(tk.Canvas):
 
     # ── Status pembayaran (sinkron ke riwayat) ───────────────────────────────
     def _update_paid_badge(self):
-        """Update badge '● LUNAS' / '⏳ BELUM' di header, tepat di sebelah nama."""
+        """Update badge 'LUNAS' / 'TAGIHAN' (atau gabungan) di header."""
         if 'paid_badge' not in self._ids:
             return
         name_w = len(self.label_kursi) * 7 + 6
-        if self.sesi_kosong() or self.is_bebas:
+        if self.sesi_kosong():
             text, color = "", C_GREEN
-        elif self.paid:
-            text, color = "● LUNAS", C_GREEN
+        elif self.is_bebas:
+            text, color = "⏳ TAGIHAN", "#FFCC00"
         else:
-            text, color = "⏳ BELUM", "#FFCC00"
+            lunas, tagihan = self._split_payment()
+            if lunas > 0 and tagihan > 0:
+                text, color = "LUNAS + TAGIHAN", "#FF9933"
+            elif lunas > 0:
+                text, color = "● LUNAS", C_GREEN
+            else:
+                text, color = "⏳ TAGIHAN", "#FFCC00"
         self.itemconfig(self._ids['paid_badge'], text=text, fill=color)
-        self.coords(self._ids['paid_badge'], 10 + name_w, self.coords(self._ids['lbl_kursi'])[1])
+        try:
+            cur_x, cur_y = self.coords(self._ids['lbl_kursi'])
+        except Exception:
+            cur_x, cur_y = 10, 5
+        self.coords(self._ids['paid_badge'], cur_x + len(self.label_kursi) * 7 + 6, cur_y)
+
+    def _split_payment(self):
+        """Split total sesi jadi (lunas_total, tagihan_total) per item status."""
+        try:
+            subtotal = self.paket_harga_tetap + self.biaya_pesanan
+            total = self._total_setelah_diskon()
+        except Exception:
+            total = getattr(self, "paket_harga_tetap", 0) + getattr(self, "biaya_pesanan", 0)
+            subtotal = total
+        if self.sesi_kosong():
+            return 0, 0
+        if subtotal <= 0:
+            if getattr(self, "paid", True):
+                return total, 0
+            return 0, total
+        lunas_sub = 0
+        harga_paket = getattr(self, "harga_paket_sesi", None) or []
+        lunas_paket = getattr(self, "lunas_paket", None) or []
+        if harga_paket:
+            for i, h in enumerate(harga_paket):
+                paid_i = lunas_paket[i] if i < len(lunas_paket) else getattr(self, "paid", True)
+                if paid_i:
+                    lunas_sub += h
+        else:
+            if getattr(self, "paid", True):
+                lunas_sub += self.paket_harga_tetap
+        lunas_pesanan = getattr(self, "lunas_pesanan", None) or {}
+        all_menu = {}
+        try:
+            all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
+        except Exception:
+            pass
+        for nm, qty in (self.pesanan_aktif or {}).items():
+            paid_i = lunas_pesanan.get(nm, getattr(self, "paid", True))
+            if paid_i:
+                lunas_sub += all_menu.get(nm, 0) * qty
+        lunas_sub = min(lunas_sub, subtotal)
+        if lunas_sub >= subtotal:
+            return total, 0
+        if lunas_sub <= 0:
+            return 0, total
+        lunas = round(total * lunas_sub / subtotal)
+        return lunas, max(0, total - lunas)
 
     def _update_bayar_buttons(self):
         """Warna tombol SUDAH/BELUM BAYAR sesuai state aktif (lunas = hijau)."""
         if 'btn_bayar_lunas' not in self._ids:
             return
-        if self.paid:
+        lunas, tagihan = self._split_payment()
+        if tagihan <= 0:
             self.itemconfig(self._ids['btn_bayar_lunas'], fill=C_GREEN, outline=C_GREEN)
             self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill="white")
             self.itemconfig(self._ids['btn_bayar_belum'], fill="black", outline=C_BORDER)
@@ -7911,19 +8779,43 @@ class KartuWarnet(tk.Canvas):
             self.itemconfig(self._ids['btn_bayar_lunas'], fill="black", outline=C_BORDER)
             self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill=C_MUTED)
 
+    def _bind_last_transaction(self):
+        """Simpan referensi index/cloud_id baris riwayat milik sesi ini."""
+        try:
+            app = self.winfo_toplevel()
+            item_id = getattr(self, '_last_transaction_item', None)
+            idx = app._tree_item_to_index.get(item_id, -1)
+            if idx < 0:
+                idx = getattr(app, "_last_catat_idx", -1)
+            self._last_riwayat_idx = idx
+            if 0 <= idx < len(app.riwayat_meta):
+                self._last_cloud_id = app.riwayat_meta[idx].get("cloud_id")
+        except Exception:
+            pass
+
     def _set_paid(self, paid):
         """Tandai sesi lunas/belum lunas, sinkronkan ke baris riwayat terkait."""
         if self.sesi_kosong() or self.is_bebas:
             return
-        if self._last_transaction_item is None:
+        if self._last_transaction_item is None and self._last_riwayat_idx is None:
             return
-        if self.paid == paid:
+        app = self.winfo_toplevel()
+        idx = app._resolve_session_idx(self)
+        row_needs_sync = False
+        if 0 <= idx < len(app.riwayat_meta):
+            row_needs_sync = bool(app.riwayat_meta[idx].get('paid', True)) != bool(paid)
+        if self.paid == paid and not row_needs_sync:
             return
         self.paid = paid
+        # Semua item ikut memilih tombol
+        self.lunas_paket = [paid] * (len(self.daftar_paket_sesi or []) or 1)
+        if self.pesanan_aktif:
+            self.lunas_pesanan = {nm: paid for nm in self.pesanan_aktif}
         self._update_paid_badge()
         self._update_bayar_buttons()
-        app = self.winfo_toplevel()
-        if hasattr(app, '_set_transaksi_paid'):
+        if idx >= 0 and hasattr(app, '_set_transaksi_paid_idx'):
+            app._set_transaksi_paid_idx(idx, paid)
+        elif hasattr(app, '_set_transaksi_paid'):
             app._set_transaksi_paid(self._last_transaction_item, paid)
 
     def _update_pc_status(self):
@@ -8070,10 +8962,21 @@ class KartuWarnet(tk.Canvas):
                             pesanan_aktif=self.pesanan_aktif.copy(),
                             paket_harga=self.paket_harga_tetap, paket_label=self.paket_aktif)
 
-    def _on_tambah_pesanan_confirm(self, pesanan_baru):
+    def _on_tambah_pesanan_confirm(self, pesanan_baru, paid=True, _stok_delta=None):
+        app = self.winfo_toplevel()
+        # Validasi stok sebelum pesanan diterima (blokir kalau tidak cukup)
+        if hasattr(app, '_stok_validate_orders'):
+            stok_check = pesanan_baru if _stok_delta is None else {
+                k: v for k, v in _stok_delta.items() if int(v or 0) > 0}
+            ok, pesan, nm, sisa = app._stok_validate_orders(stok_check)
+            if not ok:
+                messagebox.showwarning("⚠ Stok Tidak Mencukupi", pesan, parent=app)
+                return
+        old_pesanan = dict(getattr(self, 'pesanan_aktif', {}) or {})
         all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
         for nama, qty in pesanan_baru.items():
             self.pesanan_aktif[nama] = qty
+            self.lunas_pesanan[nama] = paid
         total_baru = sum(all_menu.get(nama, 0) * qty for nama, qty in self.pesanan_aktif.items())
         self.biaya_pesanan = total_baru
 
@@ -8082,18 +8985,23 @@ class KartuWarnet(tk.Canvas):
         else:
             total_semua = self._total_setelah_diskon(self.paket_harga_tetap + total_baru)
             self.itemconfig(self._ids['lbl_paket'], text=f"{self.paket_aktif} | {fmt_rp(total_semua)}")
+        self._update_paid_badge()
+        self._update_bayar_buttons()
 
-        if not self.is_bebas and getattr(self, '_last_transaction_item', None):
+        if not self.is_bebas and (getattr(self, '_last_transaction_item', None) or getattr(self, '_last_riwayat_idx', None) is not None):
             app = self.winfo_toplevel()
-            item_id = self._last_transaction_item
+            idx = app._resolve_session_idx(self)
             total_int = self._total_setelah_diskon()
-            if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                idx = app._tree_item_to_index.get(item_id)
-                if idx is not None and idx < len(app.riwayat_transaksi):
-                    waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+            if idx >= 0 and hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                item_id = app._tree_item_for_idx(idx)
+                if item_id is None:
+                    item_id = self._last_transaction_item
+                if idx < len(app.riwayat_transaksi):
+                    waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
                     updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
                     app.riwayat_transaksi[idx] = updated_row
-                    app.tree.item(item_id, values=updated_row)
+                    if item_id is not None and app.tree.exists(item_id):
+                        app.tree.item(item_id, values=updated_row)
                     try:
                         all_menu = {**app.menu_makanan, **app.menu_minuman}
                         pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
@@ -8120,8 +9028,31 @@ class KartuWarnet(tk.Canvas):
         if hasattr(app, '_refresh_warnet_footer'):
             app._refresh_warnet_footer()
 
+        # Terapkan perubahan stok (selisih qty lama → baru; QR pakai delta eksplisit)
+        try:
+            if hasattr(app, '_stok_terapkan'):
+                if _stok_delta is not None:
+                    app._stok_terapkan(_stok_delta)
+                else:
+                    delta = {}
+                    for nama, qty in pesanan_baru.items():
+                        d = int(qty or 0) - int(old_pesanan.get(nama, 0) or 0)
+                        if d:
+                            delta[nama] = d
+                    app._stok_terapkan(delta)
+        except Exception:
+            pass
+
     def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True):
+        app = self.winfo_toplevel()
+        # Validasi stok makanan/minuman sebelum paket+pesanan diterima
+        if pesanan and hasattr(app, '_stok_validate_orders'):
+            ok, pesan, nm, sisa = app._stok_validate_orders(pesanan)
+            if not ok:
+                messagebox.showwarning("⚠ Stok Tidak Mencukupi", pesan, parent=app)
+                return
         previous_session = not self.sesi_kosong()
+        old_pesanan = dict(getattr(self, 'pesanan_aktif', {}) or {})
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
@@ -8130,12 +9061,20 @@ class KartuWarnet(tk.Canvas):
             self.pesanan_aktif = pesanan
             all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
             self.biaya_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            self.daftar_paket_sesi = [paket_nm]
+            self.harga_paket_sesi = [paket_harga]
+            self.lunas_paket = [paid]
+            self.lunas_pesanan = {nm: paid for nm in pesanan}
         else:
             for nm, qty in pesanan.items():
                 self.pesanan_aktif[nm] = qty
+                self.lunas_pesanan[nm] = paid
             if pesanan:
                 all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
                 self.biaya_pesanan += sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            self.daftar_paket_sesi.append(paket_nm)
+            self.harga_paket_sesi.append(paket_harga)
+            self.lunas_paket.append(paid)
 
         if paket_nm == "Main Bebas":
             self.is_bebas = True
@@ -8185,17 +9124,20 @@ class KartuWarnet(tk.Canvas):
             self.itemconfig(self._ids['lbl_timer'], text="\u221e BEBAS", fill=C_GREEN)
 
         if not self.is_bebas:
-            if self._last_transaction_item and previous_session:
+            if (self._last_transaction_item or self._last_riwayat_idx is not None) and previous_session:
                 app = self.winfo_toplevel()
-                item_id = self._last_transaction_item
+                idx = app._resolve_session_idx(self)
                 total_int = self._total_setelah_diskon()
-                if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                    idx = app._tree_item_to_index.get(item_id)
-                    if idx is not None and idx < len(app.riwayat_transaksi):
-                        waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
+                if idx >= 0 and hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+                    item_id = app._tree_item_for_idx(idx)
+                    if item_id is None:
+                        item_id = self._last_transaction_item
+                    if idx < len(app.riwayat_transaksi):
+                        waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
                         updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
                         app.riwayat_transaksi[idx] = updated_row
-                        app.tree.item(item_id, values=updated_row)
+                        if item_id is not None and app.tree.exists(item_id):
+                            app.tree.item(item_id, values=updated_row)
                         try:
                             all_menu = {**app.menu_makanan, **app.menu_minuman}
                             pesanan_total_baru = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
@@ -8222,13 +9164,18 @@ class KartuWarnet(tk.Canvas):
                 total_int_baru = self._total_setelah_diskon(self.paket_harga_tetap + total_pesanan)
                 self._last_transaction_item = self.on_transaksi(
                     self.label_kursi, paket_nm, pesanan, total_int_baru, source='warnet',
-                    diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
+                    diskoni=self.diskoni, diskoni_mode=self.diskoni_mode, paid=paid)
+                self._bind_last_transaction()
         else:
             self._last_transaction_item = None
+            self._last_riwayat_idx = None
+            self._last_cloud_id = None
 
         # Status pembayaran: hanya untuk paket berwaktu (bukan Main Bebas)
         if self.is_bebas:
             self.paid = True
+            self.lunas_paket = [True] * (len(self.daftar_paket_sesi or []) or 1)
+            self.lunas_pesanan = {nm: True for nm in self.pesanan_aktif}
             self._disable_btn("bayar_lunas")
             self._disable_btn("bayar_belum")
         else:
@@ -8251,6 +9198,18 @@ class KartuWarnet(tk.Canvas):
             )
         if hasattr(app, '_refresh_warnet_footer'):
             app._refresh_warnet_footer()
+
+        # Terapkan perubahan stok (selisih qty lama → baru)
+        try:
+            if pesanan and hasattr(app, '_stok_terapkan'):
+                delta = {}
+                for nm, qty in pesanan.items():
+                    d = int(qty or 0) - int(old_pesanan.get(nm, 0) or 0)
+                    if d:
+                        delta[nm] = d
+                app._stok_terapkan(delta)
+        except Exception:
+            pass
 
     def _tick_waktu(self):
         if self._timer_paused:
@@ -8315,37 +9274,39 @@ class KartuWarnet(tk.Canvas):
         pesanan_txt = ", ".join(f"{nm}\u00d7{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
         paket_txt = f"{self.paket_aktif or '-'} ({fmt_rp(self.paket_harga_tetap)})"
         app = self.winfo_toplevel()
-        if getattr(self, '_last_transaction_item', None):
-            item_id = self._last_transaction_item
-            if hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
-                idx = app._tree_item_to_index.get(item_id)
-                if idx is not None and idx < len(app.riwayat_transaksi):
-                    waktu = app.tree.item(item_id, 'values')[0] if app.tree.item(item_id, 'values') else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
-                    app.riwayat_transaksi[idx] = updated_row
+        idx = app._resolve_session_idx(self)
+        if idx >= 0 and hasattr(app, 'tree') and hasattr(app, '_tree_item_to_index'):
+            item_id = app._tree_item_for_idx(idx)
+            if item_id is None:
+                item_id = self._last_transaction_item
+            if idx < len(app.riwayat_transaksi):
+                waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
+                updated_row = app._format_riwayat_row(waktu, self.label_kursi, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
+                app.riwayat_transaksi[idx] = updated_row
+                if item_id is not None and app.tree.exists(item_id):
                     app.tree.item(item_id, values=updated_row)
-                    try:
-                        all_menu = {**app.menu_makanan, **app.menu_minuman}
-                        pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
-                        paket_harga = total_akhir - pesanan_total
-                        if paket_harga < 0:
-                            paket_harga = 0
-                        if idx < len(app.riwayat_meta):
-                            app.riwayat_meta[idx]['paket_harga'] = paket_harga
-                            app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
-                            app.riwayat_meta[idx]['total'] = total_akhir
-                            app.riwayat_meta[idx]['diskoni'] = self.diskoni
-                            app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
-                            app.riwayat_meta[idx]['pesanan'] = {
-                                str(k): int(v) for k, v in self.pesanan_aktif.items()}
-                            threading.Thread(
-                                target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
-                    except Exception:
-                        pass
-                    if hasattr(app, '_refresh_riwayat_summary'):
-                        app._refresh_riwayat_summary()
-                    if hasattr(app, '_save_riwayat'):
-                        app._save_riwayat()
+                try:
+                    all_menu = {**app.menu_makanan, **app.menu_minuman}
+                    pesanan_total = sum(all_menu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                    paket_harga = total_akhir - pesanan_total
+                    if paket_harga < 0:
+                        paket_harga = 0
+                    if idx < len(app.riwayat_meta):
+                        app.riwayat_meta[idx]['paket_harga'] = paket_harga
+                        app.riwayat_meta[idx]['pesanan_total'] = pesanan_total
+                        app.riwayat_meta[idx]['total'] = total_akhir
+                        app.riwayat_meta[idx]['diskoni'] = self.diskoni
+                        app.riwayat_meta[idx]['diskoni_mode'] = self.diskoni_mode
+                        app.riwayat_meta[idx]['pesanan'] = {
+                            str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                        threading.Thread(
+                            target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
+                except Exception:
+                    pass
+                if hasattr(app, '_refresh_riwayat_summary'):
+                    app._refresh_riwayat_summary()
+                if hasattr(app, '_save_riwayat'):
+                    app._save_riwayat()
         else:
             self.on_transaksi(self.label_kursi, self.paket_aktif or '-', self.pesanan_aktif, total_akhir, source='warnet',
                               diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
@@ -8373,6 +9334,52 @@ class KartuWarnet(tk.Canvas):
             f"TOTAL: {fmt_rp(total_akhir)}",
             parent=self.winfo_toplevel(),
         )
+        # Jika masih ada sisa TAGIHAN, kasir diminta konfirmasi (BAYAR/TAGIHAN).
+        lunas_now, tagihan_now = self._split_payment()
+        if tagihan_now > 0:
+            DialogKonfirmasiBayar(
+                self.winfo_toplevel(),
+                lambda paid: self._warnet_akhir_sesi_setelah_konfirmasi(paid),
+                judul="Selesaikan Tagihan",
+                rincian=f"Tagihan belum terbayar: {fmt_rp(tagihan_now)}\n"
+                        f"Sudah terbayar (LUNAS): {fmt_rp(lunas_now)}",
+            ).lift()
+        else:
+            self._reset_sesi()
+
+    def _warnet_akhir_sesi_setelah_konfirmasi(self, paid):
+        """Konfirmasi tagihan sesi habis warnet: BAYAR -> riwayat lunas;
+        TAGIHAN -> isi nama & no HP pelanggan, riwayat tetap belum lunas."""
+        if paid:
+            self._set_paid(True)
+        else:
+            DialogPelangganAkhir(
+                self.winfo_toplevel(),
+                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+            ).lift()
+            return
+        self._reset_sesi()
+
+    def _simpan_pelanggan_tagihan(self, nama, hp):
+        """Catat nama & no HP pelanggan (kasus TAGIHAN) ke baris riwayat."""
+        try:
+            app = self.winfo_toplevel()
+            idx = app._resolve_session_idx(self)
+            if idx >= 0 and hasattr(app, '_tree_item_to_index'):
+                if idx < len(app.riwayat_meta):
+                    app.riwayat_meta[idx]['nama_pelanggan'] = nama
+                    app.riwayat_meta[idx]['no_hp'] = hp
+                    threading.Thread(
+                        target=app._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
+                if hasattr(app, '_save_riwayat'):
+                    app._save_riwayat()
+                if hasattr(app, '_refresh_riwayat_summary'):
+                    app._refresh_riwayat_summary()
+                # Status riwayat tetap BELUM LUNAS (tagihan)
+                if hasattr(app, '_set_transaksi_paid_idx'):
+                    app._set_transaksi_paid_idx(idx, False)
+        except Exception as e:
+            print(f"[TAGIHAN] Gagal simpan pelanggan {self.label_kursi}: {e}")
         self._reset_sesi()
 
     def _pause_timer(self):
@@ -8418,19 +9425,15 @@ class KartuWarnet(tk.Canvas):
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             biaya_waktu = tarif_menit * menit_total
             total_akhir = self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan)
-            pesanan_txt = ", ".join(f"{nm}\u00d7{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
-            if not messagebox.askyesno(
-                    "Selesai \u2014 Main Bebas",
-                    f"Kursi: {self.label_kursi}\n"
-                    f"Lama main: {fmt_durasi(round(menit_total))}\n"
-                    f"Biaya waktu: {fmt_rp(biaya_waktu)}\n"
-                    f"Biaya pesanan: {fmt_rp(self.biaya_pesanan)}\n"
-                    f"TOTAL: {fmt_rp(total_akhir)}\n\n"
-                    f"Rincian pesanan: {pesanan_txt}\n\n"
-                    f"Catat transaksi & akhiri sesi ini?"):
-                return
-            self.on_transaksi(self.label_kursi, "Main Bebas", self.pesanan_aktif, total_akhir, source='warnet',
-                              diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
+            self._last_transaction_item = self.on_transaksi(
+                self.label_kursi, "Main Bebas", self.pesanan_aktif, total_akhir, source='warnet',
+                diskoni=self.diskoni, diskoni_mode=self.diskoni_mode, paid=False)
+            self._bind_last_transaction()
+            DialogPelangganAkhir(
+                self.winfo_toplevel(),
+                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+            ).lift()
+            return
         else:
             total_akhir = self._total_setelah_diskon()
             pesanan_txt = ", ".join(f"{nm}\u00d7{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
@@ -8443,6 +9446,31 @@ class KartuWarnet(tk.Canvas):
                     f"TOTAL: {fmt_rp(total_akhir)}\n\n"
                     f"Akhiri sesi ini?"):
                 return
+            lunas_now, tagihan_now = self._split_payment()
+            if tagihan_now > 0:
+                DialogKonfirmasiBayar(
+                    self.winfo_toplevel(),
+                    lambda paid: self._warnet_selesai_tutup_sesi(paid),
+                    judul="Selesaikan Tagihan",
+                    rincian=f"Tagihan belum terbayar: {fmt_rp(tagihan_now)}\n"
+                            f"Sudah terbayar (LUNAS): {fmt_rp(lunas_now)}",
+                ).lift()
+                return
+        self._warnet_tutup_sesi_final()
+
+    def _warnet_selesai_tutup_sesi(self, paid):
+        """Konfirmasi tagihan tombol SELESAI warnet: BAYAR -> riwayat lunas;
+        TAGIHAN -> dialog data pelanggan; lalu tutup sesi."""
+        if paid:
+            self._set_paid(True)
+            self._warnet_tutup_sesi_final()
+        else:
+            DialogPelangganAkhir(
+                self.winfo_toplevel(),
+                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+            ).lift()
+
+    def _warnet_tutup_sesi_final(self):
         self.itemconfig(self._ids['lbl_timer'], text="SELESAI", fill=C_MUTED)
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         app = self.winfo_toplevel()
@@ -8469,6 +9497,10 @@ class KartuWarnet(tk.Canvas):
         self.pesanan_aktif = {}
         self.biaya_pesanan = 0
         self.paket_harga_tetap = 0
+        self.daftar_paket_sesi = []
+        self.lunas_paket = []
+        self.harga_paket_sesi = []
+        self.lunas_pesanan = {}
         self.diskoni           = 0
         self.diskoni_mode      = "nominal"
         self.paid              = True
@@ -8544,6 +9576,8 @@ class KartuWarnet(tk.Canvas):
         target.diskoni = self.diskoni
         target.diskoni_mode = self.diskoni_mode
         target._last_transaction_item = self._last_transaction_item
+        target._last_riwayat_idx = self._last_riwayat_idx
+        target._last_cloud_id = self._last_cloud_id
         target.paid = self.paid
 
         if self.is_bebas:
@@ -8620,6 +9654,15 @@ class AutoRentApp(ctk.CTk):
         self.grup_tarif   = self._migrasi_grup_tarif(cfg.get("grup_tarif"), cfg.get("paket_main"))
         self.menu_makanan = cfg.get("menu_makanan",  dict(DEFAULT_MENU_MAKANAN))
         self.menu_minuman = cfg.get("menu_minuman",  dict(DEFAULT_MENU_MINUMAN))
+        # Stok makanan/minuman: {"makanan": {nama: qty}, "minuman": {nama: qty}}.
+        # Item TANPA entri stok = tidak dilacak (backward compatible, tanpa blokir).
+        self.stok     = cfg.get("stok",     {})
+        self.stok_min = cfg.get("stok_min", {})
+        if not isinstance(self.stok, dict):
+            self.stok = {}
+        if not isinstance(self.stok_min, dict):
+            self.stok_min = {}
+        self._stok_tracked_lbl = None  # label badge stok menipis di dashboard
         self.current_tab  = None
         self._bg_image_path = cfg.get("app_bg_image", "")
         self._bersihkan_grup_warnet_bocor()
@@ -8652,8 +9695,11 @@ class AutoRentApp(ctk.CTk):
                 self.tv_media_server = TvMediaServer(
                     media_dir=os.path.join(APP_BASE_DIR, "media_promo"),
                     port=cfg.get("warnet_media_port", 8082),
+                    qr_page_dir=os.path.join(APP_BASE_DIR, "qr_page"),
                 )
                 self.tv_media_server.start()
+                self._ensure_default_promo()
+                self._set_media_default_promo()
             except Exception as e:
                 print(f"[TV WS HUB] Gagal start: {e}")
                 self.tv_ws_hub = None
@@ -8676,6 +9722,8 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             self.tv_auto_off_sec = 300
         self.after(30000, self._tv_idle_guard)
+        self.after(20000, self._stok_poll_badge)
+        self.after(10000, self._tv_ip_watcher_tick)
 
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
@@ -8717,8 +9765,13 @@ class AutoRentApp(ctk.CTk):
         self.destroy()
 
     def _get_nama_rental_dinamis(self) -> str:
-        """Nama rental dari profil user aktif untuk dikirim ke overlay TV."""
+        """Nama rental dari profil user aktif untuk dikirim ke overlay TV.
+
+        User NON-LIFETIME: selalu RR Billing Pro (nama rental baru tampil
+        setelah aktivasi lisensi LIFETIME)."""
         try:
+            if not self._lisensi_lifetime():
+                return "RR Billing Pro"
             cfg = ConfigManager.load()
             uname = getattr(self, 'current_user', None) or ""
             profil = cfg.get("profil_rental", {})
@@ -8729,6 +9782,77 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
         return "RR Billing Pro"
+
+    # ── Watcher IP LAN untuk URL media TV ────────────────────────────────────
+    def _tv_media_urls_now(self):
+        """URL logo lock (global) + video promosi aktif untuk detail LOCK_SCREEN.
+
+        User NON-LIFETIME: logo default client (drawable bawaan) + video promosi
+        BAWAAN (PROMO_VIDEO_DEFAULT) — media custom tidak pernah terpakai."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            return "", ""
+        base = f"http://{self._get_lan_ip()}:{ms.port}/media/"
+        if not self._lisensi_lifetime():
+            logo_url = ""
+            promo_url = ""
+            default_path = os.path.join(ms.media_dir, PROMO_VIDEO_DEFAULT)
+            if os.path.isfile(default_path):
+                promo_url = base + quote(PROMO_VIDEO_DEFAULT)
+            return logo_url, promo_url
+        logo_url = self._tv_logo_url()
+        promo_url = ""
+        cur = getattr(ms, 'current_media', None) or {}
+        if cur.get("type") == "video" and cur.get("filename"):
+            promo_url = base + quote(cur["filename"])
+        return logo_url, promo_url
+
+    def _tv_ip_watcher_tick(self):
+        """Pantau perubahan IP LAN (dipanggil tiap 30 detik via self.after).
+
+        IP mesin kasir bisa berubah (DHCP/NIC). URL logo/promo yang tersimpan
+        di Prefs client TV jadi basi — promo gagal diputar saat TV bangun.
+        Bila IP berubah, kirim ulang LOCK_SCREEN dengan URL segar ke semua TV
+        yang terkunci (client menyimpan promo_url dari LOCK_SCREEN tanpa
+        memutar); TV tidak terkunci memakai URL baru saat lock berikutnya."""
+        try:
+            self._tv_ip_watcher_check()
+        except Exception as e:
+            print(f"[TV IP] watcher error: {e}", flush=True)
+        try:
+            self.after(30000, self._tv_ip_watcher_tick)
+        except Exception:
+            pass
+
+    def _tv_ip_watcher_check(self):
+        try:
+            ip = self._get_lan_ip()
+            prev = getattr(self, "_tv_ip_watcher_last_ip", None)
+            if prev is not None and ip and ip != prev:
+                print(f"[TV IP] LAN IP berubah {prev} -> {ip}; refresh URL media TV terkunci",
+                      flush=True)
+                self._refresh_locked_tv_media_urls()
+            self._tv_ip_watcher_last_ip = ip
+        except Exception as e:
+            print(f"[TV IP] watcher check error: {e}", flush=True)
+
+    def _refresh_locked_tv_media_urls(self):
+        hub = self.tv_ws_hub
+        if not hub or not hub.running:
+            return
+        try:
+            logo_url, promo_url = self._tv_media_urls_now()
+            if not promo_url and not logo_url:
+                return
+            for mid in hub.get_connected_ids():
+                if not hub.is_locked(mid):
+                    continue
+                detail = dict(hub.locked_summary().get(mid, {}) or {})
+                detail["logo_url"] = logo_url
+                detail["promo_url"] = promo_url
+                hub.send_lock_screen(mid, "WAKTU SEWA HABIS", detail)
+        except Exception as e:
+            print(f"[TV IP] refresh media error: {e}", flush=True)
 
     def _get_lan_ip(self) -> str:
         """IP LAN mesin kasir untuk URL media client TV.
@@ -8848,7 +9972,12 @@ class AutoRentApp(ctk.CTk):
 
     def _tv_logo_url(self) -> str:
         """URL logo lock dengan cache-buster (mtime file) — URL berubah setiap
-        file diganti supaya client selalu mengunduh versi terbaru."""
+        file diganti supaya client selalu mengunduh versi terbaru.
+
+        User NON-LIFETIME: logo_url kosong -> client TV memakai drawable
+        bawaan (RR BILLING PRO)."""
+        if not self._lisensi_lifetime():
+            return ""
         ms = getattr(self, 'tv_media_server', None)
         if not ms or not ms.running:
             return ""
@@ -8889,6 +10018,1233 @@ class AutoRentApp(ctk.CTk):
             import shutil
             shutil.copyfile(path, dest)
         return dest
+
+    def _sembunyikan_file(self, path: str) -> None:
+        """Set atribut hidden Windows (tidak terlihat di Explorer) — dipakai
+        untuk melindungi video promosi bawaan dari penghapusan."""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            FILE_ATTRIBUTE_HIDDEN = 0x2
+            ctypes.windll.kernel32.SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN)
+        except Exception:
+            pass
+
+    def _ensure_default_promo(self) -> None:
+        """Pastikan video promosi bawaan (pilihan user NON-LIFETIME) SELALU ada
+        di media_promo. Jika tidak ada, salin dari bundle PyInstaller
+        (folder mode / _MEIPASS) supaya user tanpa lisensi LIFETIME tetap
+        mendapat video default."""
+        try:
+            media_dir = os.path.join(APP_BASE_DIR, "media_promo")
+            dest = os.path.join(media_dir, PROMO_VIDEO_DEFAULT)
+            if os.path.isfile(dest):
+                self._sembunyikan_file(dest)
+                return
+            sumber = []
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                sumber.append(os.path.join(meipass, "media_promo", PROMO_VIDEO_DEFAULT))
+            sumber.append(os.path.join(media_dir, PROMO_VIDEO_DEFAULT))
+            for path in sumber:
+                if os.path.isfile(path):
+                    os.makedirs(media_dir, exist_ok=True)
+                    with open(path, "rb") as src_f:
+                        data = src_f.read()
+                    with open(dest, "wb") as dst_f:
+                        dst_f.write(data)
+                    self._sembunyikan_file(dest)
+                    print(f"[MEDIA] Default promo disalin dari bundle: {PROMO_VIDEO_DEFAULT} ({len(data)} byte)")
+                    return
+            print(f"[MEDIA] PERINGATAN: default promo {PROMO_VIDEO_DEFAULT} tidak ada di bundle")
+        except Exception as e:
+            print(f"[MEDIA] ensure default promo gagal: {e}")
+
+    def _set_media_default_promo(self) -> None:
+        """Sembunyikan video promosi bawaan; user NON-LIFETIME dikunci memakai
+        video default itu (media custom tidak dipakai)."""
+        try:
+            default_path = os.path.join(APP_BASE_DIR, "media_promo", PROMO_VIDEO_DEFAULT)
+            if os.path.isfile(default_path):
+                self._sembunyikan_file(default_path)
+            if (not self._lisensi_lifetime()
+                    and getattr(self, 'tv_media_server', None) is not None):
+                self.tv_media_server.set_current("video", PROMO_VIDEO_DEFAULT)
+        except Exception as e:
+            print(f"[MEDIA] set media default gagal: {e}")
+
+    def _simpan_profil_rental(self, data: dict) -> None:
+        """Simpan profil rental user aktif; LIFETIME -> broadcast UPDATE_RENTAL
+        ke semua TV (popup kanan atas). Non-LIFETIME -> tersimpan tapi TV
+        tetap 'RR Billing Pro'."""
+        try:
+            cfg = ConfigManager.load()
+            profil = cfg.get("profil_rental", {}) or {}
+            if not isinstance(profil, dict):
+                profil = {}
+            lama = profil.get(self.current_user, {}) or {}
+            if not isinstance(lama, dict):
+                lama = {}
+            lama.update(data)
+            profil[self.current_user] = lama
+            cfg["profil_rental"] = profil
+            ConfigManager.save(cfg)
+        except Exception as e:
+            messagebox.showerror("Gagal Simpan Profil", str(e), parent=self)
+            return
+        if self._lisensi_lifetime():
+            hub = getattr(self, 'tv_ws_hub', None)
+            if hub:
+                try:
+                    n = hub.broadcast_update_rental(data.get("nama_rental", ""))
+                    print(f"[TV RENTAL] broadcast UPDATE_RENTAL ke {n} TV")
+                except Exception as e:
+                    print(f"[TV RENTAL] gagal broadcast: {e}")
+            pesan = ("Profil rental tersimpan.\n"
+                     f"Popup TV kini menampilkan: {data.get('nama_rental')}")
+        else:
+            pesan = ("Profil rental tersimpan.\n"
+                     "Popup kanan atas TV tetap menampilkan 'RR BILLING PRO'.\n"
+                     "Aktifkan lisensi LIFETIME untuk mengganti nama popup TV.")
+        messagebox.showinfo("✅ Profil Tersimpan", pesan, parent=self)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  QR PANGGIL KASIR (halaman web pelanggan -> Firestore -> popup kasir)
+    # ══════════════════════════════════════════════════════════════════════════
+    # Halaman QR di-host di Firebase Hosting (rrbillingpro.web.app) —
+    # bisa diakses pelanggan dari jaringan MANA PUN (internet), bukan cuma
+    # Wi-Fi kasir. Override via config qr_page_url bila mau host lain.
+    # Local server (TvMediaServer /qr/) tetap melayani sebagai cadangan.
+    QR_PAGE_BASE = "https://rrbillingpro.web.app/call.html"
+    QR_RATE_LIMIT = 90  # detik antar panggilan per TV
+    QR_PIN_TTL = 240  # detik PIN berlaku (sejak ditulis kasir)
+
+    def _qr_token_baru(self) -> str:
+        import secrets
+        return secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:8].upper()
+
+    def _qr_host_web(self) -> str:
+        """Base URL halaman QR (default Firebase Hosting — internet)."""
+        try:
+            cfg = ConfigManager.load()
+            return str(cfg.get("qr_page_url", "") or "").strip() or self.QR_PAGE_BASE
+        except Exception:
+            return self.QR_PAGE_BASE
+
+    def _qr_url(self, nama_tv: str, kode: str, nama_grup: str = "") -> str:
+        from urllib.parse import quote
+        owner = self._resolve_license_user() or ""
+        url = (f"{self._qr_host_web()}?tv={quote(nama_tv)}&k={kode}"
+               f"&o={quote(owner)}")
+        if nama_grup:
+            url += f"&g={quote(nama_grup)}"
+        return url
+
+    def _qr_grup_tv(self, nama_tv: str) -> str:
+        """Grup tarif kartu TV (untuk QR web: daftar paket sesuai grup)."""
+        try:
+            for kartu in list(getattr(self, "_semua_kartu_tv", []) or []):
+                if getattr(kartu, "label_tv", "") == nama_tv:
+                    return getattr(kartu, "nama_grup", "") or ""
+        except Exception:
+            pass
+        return ""
+
+    def _qr_simpan_png(self, nama_tv: str, url: str) -> str:
+        """Simpan QR PNG ke folder qr_panggilan/<TV>.png. Return path ("" gagal)."""
+        try:
+            import qrcode
+            folder = os.path.join(APP_BASE_DIR, "qr_panggilan")
+            os.makedirs(folder, exist_ok=True)
+            aman = "".join(c if c.isalnum() or c in " -_" else "_" for c in nama_tv).strip()
+            path = os.path.join(folder, f"{aman or 'TV'}.png")
+            qrcode.make(url).save(path)
+            return path
+        except Exception as e:
+            self._qr_log(f"simpan png gagal: {e}")
+            return ""
+
+    def _qr_ip_tv(self, nama_tv: str) -> str:
+        try:
+            for item in (ConfigManager.load().get("daftar_tv", []) or []):
+                if str(item.get("nama", "")) == nama_tv:
+                    return str(item.get("ip", "")).strip()
+        except Exception:
+            pass
+        return ""
+
+    def _qr_generate_untuk(self, nama_tv: str) -> str:
+        """Ambil kode unik TV; jika belum ada ATAU IP TV berubah -> kode BARU
+        (QR lama tidak berlaku lagi). Return kode; "" bila gagal."""
+        try:
+            cfg = ConfigManager.load()
+            peta = cfg.get("qr_call", {}) or {}
+            if not isinstance(peta, dict):
+                peta = {}
+            lama = peta.get(nama_tv) or {}
+            if isinstance(lama, dict):
+                kode_lama = str(lama.get("kode", ""))
+                ip_lama = str(lama.get("ip", ""))
+            else:
+                kode_lama, ip_lama = "", ""
+            ip_kini = self._qr_ip_tv(nama_tv)
+            if kode_lama and (not ip_kini or ip_kini == ip_lama):
+                # QR lama tetap berlaku — namun PNG di-refresh agar URL terkini
+                # (termasuk param grup g= & host server) ikut tercetak ulang.
+                self._qr_simpan_png(nama_tv,
+                                    self._qr_url(nama_tv, kode_lama,
+                                                 self._qr_grup_tv(nama_tv)))
+                return kode_lama
+            kode = self._qr_token_baru()
+            peta[nama_tv] = {"kode": kode, "ip": ip_kini}
+            cfg["qr_call"] = peta
+            ConfigManager.save(cfg)
+            self._qr_simpan_png(nama_tv,
+                                self._qr_url(nama_tv, kode, self._qr_grup_tv(nama_tv)))
+            self._qr_log(f"{nama_tv}: kode baru ({ip_kini})")
+            return kode
+        except Exception as e:
+            self._qr_log(f"generate gagal: {e}")
+            return ""
+
+    def _qr_selaras_semua(self):
+        """Auto-generate QR untuk SEMUA kartu TV (saat login/pairing) —
+        termasuk deteksi IP berubah -> QR baru. Halaman QR di-host Firebase
+        (internet) jadi host stabil — refresh PNG tetap jalan tiap login."""
+        for kartu in list(getattr(self, "_semua_kartu_tv", []) or []):
+            try:
+                self._qr_generate_untuk(kartu.label_tv)
+            except Exception:
+                pass
+
+    def _qr_log(self, msg: str):
+        """Log QR/PIN ke console (jika ada) DAN ke file qr_debug.log —
+        exe di-build tanpa console, jadi file ini satu-satunya jejak
+        di PC kasir untuk diagnosa dari jarak jauh."""
+        try:
+            line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+            print(line, flush=True)
+            with open(os.path.join(APP_BASE_DIR, "qr_debug.log"), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            try:
+                print(msg, flush=True)
+            except Exception:
+                pass
+
+    def _qr_pastikan_halaman(self) -> str:
+        """Jamin qr_page/call.html ada di sebelah app. Untuk EXE (frozen):
+        file di-bundle via spec datas (masuk _MEIPASS) — diekstrak ke
+        APP_BASE_DIR/qr_page/ sekali, supaya bisa diedit oleh kasir."""
+        try:
+            folder = os.path.join(APP_BASE_DIR, "qr_page")
+            dst = os.path.join(folder, "call.html")
+            if os.path.isfile(dst):
+                return dst
+            src = ""
+            if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", ""):
+                cand = os.path.join(sys._MEIPASS, "qr_page", "call.html")
+                if os.path.isfile(cand):
+                    src = cand
+            if not src:
+                cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qr_page", "call.html")
+                if os.path.isfile(cand):
+                    src = cand
+            if src:
+                import shutil
+                os.makedirs(folder, exist_ok=True)
+                shutil.copyfile(src, dst)
+                self._qr_log(f"qr_page/call.html diekstrak ke {dst}")
+            return dst if os.path.isfile(dst) else ""
+        except Exception as e:
+            self._qr_log(f"qr_page ekstrak gagal: {e}")
+            return ""
+
+    def _start_call_poller(self):
+        try:
+            self._qr_pastikan_halaman()
+        except Exception:
+            pass
+        # Bersihkan dokumen basi (lebih dari 24 jam) dari calls & qr_sessions —
+        # menekan biaya read poller (Firestore tagih 1 read per dokumen yang
+        # dikembalikan). Best-effort: di-throttle otomatis saat 429.
+        try:
+            import time as _t
+            fs = get_firestore_client()
+            potong = _t.time() - 86400
+            for koleksi, field_ts in (("calls", "ts"), ("qr_sessions", "created")):
+                try:
+                    for d in fs.query_all(koleksi, limit=100):
+                        ts = d.get(field_ts)
+                        try:
+                            ts = float(ts) / 1000.0 if ts and float(ts) > 1e12 else (float(ts) if ts else 0)
+                        except Exception:
+                            ts = 0
+                        if ts and ts < potong:
+                            fs.delete_document(f"{koleksi}/{d.get('_id', '')}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            from firestore_sync import CallPoller
+            self._call_poller = CallPoller(interval=6.0, limit=5, order_field="ts")
+            self._call_poller.start(self._qr_panggilan_masuk)
+            self._qr_log("CallPoller dimulai (calls, order ts DESC)")
+        except Exception as e:
+            self._qr_log(f"CallPoller gagal start: {e}")
+        # PIN sesi QR (qr_sessions) — verifikasi kehadiran pelanggan di depan TV
+        try:
+            from firestore_sync import CallPoller
+            self._pin_actif = {}          # tv -> {'sid','pin','t0','owner'}
+            self._pin_hide_last = {}      # tv -> ts HIDE_PIN terakhir (kooldown)
+            self._pin_loop_stop = threading.Event()
+            self._pin_poller = CallPoller(collection="qr_sessions", interval=4.0, limit=10,
+                                          order_field="created")
+            self._pin_poller.start(self._qr_pin_proses)
+            t = threading.Thread(target=self._qr_pin_loop, daemon=True)
+            t.start()
+            self._pin_loop_thread = t
+            self._qr_log("PinPoller dimulai (qr_sessions, order created DESC)")
+        except Exception as e:
+            self._qr_log(f"PinPoller gagal start: {e}")
+
+    def _stop_call_poller(self):
+        p = getattr(self, "_call_poller", None)
+        if p:
+            try:
+                p.stop()
+            except Exception:
+                pass
+        self._call_poller = None
+        p = getattr(self, "_pin_poller", None)
+        if p:
+            try:
+                p.stop()
+            except Exception:
+                pass
+        self._pin_poller = None
+        ev = getattr(self, "_pin_loop_stop", None)
+        if ev:
+            ev.set()
+        self._pin_loop_stop = None
+        try:
+            self.after(0, self._qr_pin_hapus_popup)
+        except Exception:
+            pass
+        self._pin_actif = {}
+        self._pin_hide_last = {}
+
+    # ── PIN Sesi QR ──────────────────────────────────────────────────────────
+    _PIN_HURUF = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    _PIN_ANGKA = "23456789"
+
+    def _qr_pin_baru(self) -> str:
+        """PIN 5 karakter alfanumerik: 2 huruf + 3 angka (tanpa 0/O/1/I).
+        Selalu BERUBAH setiap kali QR discan (satu PIN per sesi)."""
+        import random
+        h = [random.choice(self._PIN_HURUF) for _ in range(2)]
+        a = [random.choice(self._PIN_ANGKA) for _ in range(3)]
+        pin = list(h + a)
+        random.shuffle(pin)
+        return "".join(pin)
+
+    def _qr_cari_tv_oleh_kode(self, kode: str):
+        """Cari nama TV di config qr_call yang kodenya cocok — untuk QR lama
+        yang nama TV-nya sudah berubah (mis. 'TV 1' -> '1') tapi kodenya
+        masih tercatat. Return (tv, pi) atau (None, None)."""
+        try:
+            peta = (ConfigManager.load().get("qr_call", {}) or {})
+            for tv, pi in peta.items():
+                if isinstance(pi, dict) and str(pi.get("kode", "") or "") == str(kode):
+                    return tv, pi
+        except Exception:
+            pass
+        return None, None
+
+    def _qr_pin_proses(self, doc: dict):
+        """Thread PinPoller: state machine sesi PIN (dipanggil di thread).
+
+        Catatan: TIDAK memakai guard _pin_seen — dokumen yang sama wajib
+        diproses berulang setiap poll, karena alur verifikasi PIN (pin_user
+        dari web) hanya bisa dilihat pada poll berikutnya setelah web
+        menulis pin_user. Guard lama justru memblokir verifikasi selamanya.
+        """
+        try:
+            did = str(doc.get("_id", ""))
+            if not did:
+                return
+            tv = str(doc.get("tv", ""))
+            kode = str(doc.get("kode", ""))
+            if not tv or not kode:
+                return
+            peta = (ConfigManager.load().get("qr_call", {}) or {})
+            pi = peta.get(tv) if isinstance(peta, dict) else None
+            if not isinstance(pi, dict) or kode != str(pi.get("kode", "")):
+                # QR lama / nama TV berubah: coba cocokkan lewat kode dulu.
+                tv2, pi2 = self._qr_cari_tv_oleh_kode(kode)
+                if tv2 is not None and isinstance(pi2, dict):
+                    tv, pi = tv2, pi2
+                    self._qr_log(f"PIN: sesi {did} tv={doc.get('tv')!r} dipetakan ke {tv!r} via kode")
+                else:
+                    self._qr_log(f"PIN tolak: tv={tv!r} kode={kode!r} tidak dikenal di qr_call")
+                    return  # QR TV lain / kedaluwarsa — tolak
+            import time as _t
+            now = _t.time()
+            status = str(doc.get("status", "awaiting"))
+            owner = str(doc.get("owner", "")).strip()
+            aktif = self._pin_actif.get(tv)
+            sid_sekarang = (aktif or {}).get("sid")
+
+            if status == "awaiting":
+                pin = str(doc.get("pin", "") or "")
+                if not pin:
+                    # PIN sudah di memori untuk sesi yang sama (write Firestore
+                    # tertunda) -> pakai ulang, jangan generate PIN baru.
+                    if aktif and sid_sekarang == did and (aktif or {}).get("pin"):
+                        pin = (aktif or {}).get("pin")
+                        self._set_pin_doc(did, {"pin": pin, "pin_set_at": int(now * 1000)})
+                        self._qr_pin_set_tv(owner, tv, pin)
+                        return
+                    # Satu sesi aktif per TV: sesi lama hangus diganti yang baru
+                    if aktif and sid_sekarang and sid_sekarang != did:
+                        self._qr_pin_selesai(tv, sid_sekarang, reason="diganti")
+                    pin = self._qr_pin_baru()
+                    self._set_pin_doc(did, {"pin": pin, "pin_set_at": int(now * 1000)})
+                    self._pin_actif[tv] = {"sid": did, "pin": pin, "t0": now, "owner": owner}
+                    self._qr_pin_set_tv(owner, tv, pin)
+                    return
+                # PIN sudah terpasang (sinkronisasi lintas-restart)
+                self._pin_actif[tv] = {"sid": did, "pin": pin, "t0": now, "owner": owner}
+                pin_set_at = float(doc.get("pin_set_at", 0) or 0) / 1000.0
+                if pin_set_at and now - pin_set_at > self.QR_PIN_TTL:
+                    self._set_pin_doc(did, {"status": "expired", "reason": "ttl"})
+                    self._qr_pin_selesai(tv, did, reason="expired")
+                    return
+                pin_user = str(doc.get("pin_user", "") or "").strip().upper()
+                if pin_user:
+                    if pin_user == str(pin).strip().upper():
+                        self._set_pin_doc(did, {"status": "verified", "pin_user": ""})
+                        self._qr_pin_selesai(tv, did, reason="ok", hapus_doc=False)
+                    else:
+                        tries = int(doc.get("tries", 0) or 0) + 1
+                        if tries >= 3:
+                            self._set_pin_doc(did, {"status": "blocked", "pin_user": "", "tries": tries})
+                            self._qr_pin_selesai(tv, did, reason="blocked")
+                        else:
+                            self._set_pin_doc(did, {"tries": tries, "pin_user": ""})
+            elif status in ("blocked", "expired"):
+                self._qr_pin_selesai(tv, did, reason=status)
+            elif status == "verified":
+                self._qr_pin_selesai(tv, did, reason="ok", hapus_doc=False)
+                created_ms = float(doc.get("created", 0) or 0)
+                if created_ms and now - created_ms / 1000.0 > 300:
+                    try:
+                        from firestore_sync import get_firestore_client
+                        get_firestore_client().delete_document(f"qr_sessions/{did}")
+                    except Exception:
+                        pass
+        except Exception as e:
+            self._qr_log(f"pin proses error: {e}")
+
+    def _set_pin_doc(self, did: str, data: dict):
+        try:
+            from firestore_sync import get_firestore_client
+            get_firestore_client().set_document(f"qr_sessions/{did}", data, merge=True)
+        except Exception as e:
+            self._qr_log(f"update sesi {did} gagal: {e}")
+
+    def _qr_pin_set_tv(self, owner: str, tv: str, pin: str):
+        """Tampilkan PIN di layar TV (kiri atas) via WebSocket hub (app RR Billing TV)."""
+        try:
+            hub = getattr(self, "tv_ws_hub", None)
+            if hub is not None:
+                hub.send_show_pin(tv, pin)
+            else:
+                self._qr_log(f"tampil PIN TV {tv} gagal: hub WS tidak aktif")
+        except Exception as e:
+            self._qr_log(f"tampil PIN TV {tv} gagal: {e}")
+
+    def _qr_pin_clear_tv(self, owner: str, tv: str):
+        """Sembunyikan PIN di TV — idempotent dengan kooldown 10 dtk supaya
+        HIDE_PIN yang gagal (WS putus sesaat) tertolong kiriman berikutnya
+        (dokumen verified dipoll sampai ~900 dtk)."""
+        if not tv:
+            return
+        try:
+            import time as _t
+            last = getattr(self, "_pin_hide_last", {}).get(tv, 0)
+            if _t.time() - last < 10:
+                return
+            self._pin_hide_last[tv] = _t.time()
+            hub = getattr(self, "tv_ws_hub", None)
+            if hub is not None:
+                hub.send_hide_pin(tv)
+            else:
+                self._qr_log(f"sembunyi PIN TV {tv} gagal (hub WS tidak aktif)")
+        except Exception as e:
+            self._qr_log(f"sembunyi PIN TV {tv} gagal: {e}")
+
+    def _qr_pin_selesai(self, tv: str, sid: str, reason: str = "", hapus_doc: bool = True):
+        """Akhiri sesi PIN: sembunyikan overlay TV, hapus dokumen sesi
+        (kecuali status verified yang butuh dibaca web). HIDE_PIN dikirim
+        SELALU untuk alasan terminal — bukan hanya saat entry masih ada —
+        karena sesi bisa berakhir setelah entry-nya dipop."""
+        akt = self._pin_actif.get(tv)
+        if akt and (not sid or akt.get("sid") == sid):
+            self._pin_actif.pop(tv, None)
+        if reason:
+            self._qr_log(f"sesi PIN {tv}: {reason}")
+            self._qr_pin_clear_tv("", tv)
+        if hapus_doc and sid:
+            try:
+                from firestore_sync import get_firestore_client
+                get_firestore_client().delete_document(f"qr_sessions/{sid}")
+            except Exception as e:
+                self._qr_log(f"hapus sesi {sid} gagal: {e}")
+
+    def _qr_pin_loop(self):
+        """Re-trigger overlay PIN di TV tiap ~6 detik selama sesi aktif,
+        karena overlay app TV auto-hilang 8 detik. Sesi lewat TTL dihanguskan."""
+        import time as _t
+        while True:
+            ev = getattr(self, "_pin_loop_stop", None)
+            if ev is None or ev.is_set():
+                break
+            now = _t.time()
+            for tv, akt in list((self._pin_actif or {}).items()):
+                try:
+                    sid = akt.get("sid")
+                    # Kalau dokumen sesi sudah hilang (dihapus lewat jalur lain /
+                    # sesi web dibatalkan), entry memori ini YATIM: loop bakal
+                    # terus menampilkan PIN selamanya. Cek keberadaan dokumen
+                    # tiap tayang — 2 kali berturut-turut hilang = hangus.
+                    if sid and (akt.get("doc_none") or 0) < 2:
+                        try:
+                            from firestore_sync import get_firestore_client
+                            d = get_firestore_client().get_document(f"qr_sessions/{sid}")
+                            if d is None:
+                                akt["doc_none"] = (akt.get("doc_none") or 0) + 1
+                                if akt["doc_none"] >= 2:
+                                    self._qr_pin_selesai(tv, sid, reason="hilang", hapus_doc=False)
+                                    continue
+                            else:
+                                akt["doc_none"] = 0
+                        except Exception:
+                            pass
+                    if now - (akt.get("t0") or now) > self.QR_PIN_TTL:
+                        self._set_pin_doc(sid, {"status": "expired", "reason": "ttl"})
+                        self._qr_pin_selesai(tv, sid, reason="expired")
+                        continue
+                    self._qr_pin_set_tv(akt.get("owner", ""), tv, akt.get("pin", ""))
+                    # Sesi bisa berakhir TEPAT saat SHOW ini dikirim (verifikasi
+                    # PIN lewat poller) — SHOW terakhir bisa mendarat di TV
+                    # SETELAH HIDE dari _qr_pin_selesai. Cek ulang & balas HIDE
+                    # kalau entry sesi sudah tidak aktif lagi.
+                    if (self._pin_actif.get(tv) or {}).get("sid") != akt.get("sid"):
+                        self._qr_pin_clear_tv("", tv)
+                except Exception as e:
+                    self._qr_log(f"pin loop {tv}: {e}")
+            _t.sleep(6)
+
+    def _qr_parse_item_text(self, s):
+        """Parse string item lama (dari call.html versi lama / keluhan) jadi
+        struktur item: {tipe, nama, qty, harga, menit, status}."""
+        s = str(s or "").strip()
+        tipe, nama, harga, qty, menit = "makanan", s, 0, 1, 0
+        m = re.search(r"\(\s*Rp\s*([\d.,]+)\s*\)", s, re.I)
+        if m:
+            try:
+                harga = int(re.sub(r"[^\d]", "", m.group(1)) or 0)
+            except Exception:
+                harga = 0
+            nama = s[:m.start()].strip().lstrip("•·—").strip()
+        nama = nama.replace("🍔", "").replace("🥤", "").replace("➕", "").strip()
+        low = nama.lower()
+        if low.startswith("paket"):
+            tipe = "paket"
+            if ":" in nama:
+                nama = nama.split(":", 1)[1].strip()
+        elif "🥤" in s:
+            tipe = "minuman"
+        elif "🍔" in s:
+            tipe = "makanan"
+        if not nama:
+            nama = str(s or "?").strip() or "?"
+        return {"tipe": tipe, "nama": nama, "qty": qty, "harga": harga,
+                "menit": menit, "status": "baru"}
+
+    def _qr_parse_items(self, doc: dict) -> list:
+        """Kumpulkan item terstruktur dari dokumen calls. Format BARU (`items`)
+        dikirim web (t: paket|makanan|minuman, n, q, h, men, g); format LAMA
+        (`item` string) dijadikan fallback lewat _qr_parse_item_text."""
+        raw = doc.get("items")
+        if isinstance(raw, list) and raw:
+            out = []
+            for x in raw:
+                try:
+                    if isinstance(x, dict):
+                        tipe = str(x.get("t") or x.get("tipe") or "makanan")
+                        if tipe not in ("paket", "makanan", "minuman"):
+                            tipe = "makanan"
+                        out.append({
+                            "tipe": tipe,
+                            "nama": str(x.get("n") or x.get("nama") or "?"),
+                            "qty": int(x.get("q") or x.get("qty") or 1),
+                            "harga": int(x.get("h") or x.get("harga") or 0),
+                            "menit": int(x.get("men") or x.get("menit") or 0),
+                            "status": "baru",
+                        })
+                    else:
+                        out.append(self._qr_parse_item_text(x))
+                except Exception:
+                    continue
+            return out
+        item_str = doc.get("item")
+        if isinstance(item_str, list) and item_str:
+            return [self._qr_parse_item_text(x) for x in item_str]
+        return []
+
+    def _qr_pesan_log_load(self) -> list:
+        try:
+            with QR_PESAN_LOG_LOCK:
+                if os.path.exists(QR_PESAN_LOG):
+                    with open(QR_PESAN_LOG, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    return data if isinstance(data, list) else []
+        except Exception as e:
+            print(f"[QR] gagal baca riwayat pesanan: {e}")
+        return []
+
+    def _qr_pesan_log_save(self, rows: list):
+        try:
+            with QR_PESAN_LOG_LOCK:
+                with open(QR_PESAN_LOG, "w", encoding="utf-8") as f:
+                    json.dump(rows, f, ensure_ascii=False, indent=1)
+        except Exception as e:
+            print(f"[QR] gagal simpan riwayat pesanan: {e}")
+
+    def _qr_pesan_log_append(self, order: dict):
+        rows = [r for r in self._qr_pesan_log_load() if r.get("id") != order.get("id")]
+        rows.append(order)
+        self._qr_pesan_log_save(rows)
+
+    def _qr_pesan_log_update(self, oid: str, items, status=None):
+        """Perbarui item-status (dan opsional status order) di riwayat lokal."""
+        rows = self._qr_pesan_log_load()
+        for r in rows:
+            if r.get("id") != oid:
+                continue
+            if items is not None:
+                r["items"] = items
+            if status:
+                r["status"] = status
+            break
+        self._qr_pesan_log_save(rows)
+
+    def _qr_cari_kartu(self, tv):
+        """Cari kartu TV di dashboard berdasar nama (label) dari QR call."""
+        tv_s = str(tv or "").strip()
+        if not tv_s:
+            return None
+        bagi = tv_s.upper()
+        for k in getattr(self, "_semua_kartu_tv", []):
+            lt = str(getattr(k, "label_tv", "") or "").strip()
+            lu = lt.upper()
+            if lu == bagi:
+                return k
+            if tv_s.isdigit():
+                if lu == f"TV {tv_s}" or lu == f"TV{tv_s}":
+                    return k
+        return None
+
+    def _qr_panggilan_masuk(self, doc: dict):
+        """Dipanggil thread CallPoller — validasi, simpan ke riwayat lokal
+        (SEBELUM dokumen dihapus), lalu tampilkan di main thread.
+
+        Catatan: panggilan yang masuk dalam jendela rate-limit TIDAK dibuang —
+        tetap dicatat di riwayat (agar tidak hilang) dan dokumennya dihapus."""
+        try:
+            did = str(doc.get("_id", ""))
+            if not did or did in self._qr_seen:
+                return
+            kode = str(doc.get("kode", ""))
+            tv = str(doc.get("tv", ""))
+            if not tv or not kode:
+                return
+            peta = (ConfigManager.load().get("qr_call", {}) or {})
+            pi = peta.get(tv) if isinstance(peta, dict) else None
+            if not isinstance(pi, dict) or kode != str(pi.get("kode", "")):
+                tv2, pi2 = self._qr_cari_tv_oleh_kode(kode)
+                if tv2 is not None and isinstance(pi2, dict):
+                    tv, pi = tv2, pi2
+                    self._qr_log(f"panggilan {did}: tv={doc.get('tv')!r} dipetakan ke {tv!r} via kode")
+                else:
+                    self._qr_log(f"panggilan {did} diabaikan: tv={tv!r} kode={kode!r} tak dikenal")
+                    return  # milik kasir/QR lain — biarkan, pemiliknya yang menghapus
+            self._qr_seen.add(did)
+            import time as _t
+            now = _t.time()
+            rate_ok = now - self._qr_last_call.get(tv, 0) >= self.QR_RATE_LIMIT
+            if rate_ok:
+                self._qr_last_call[tv] = now
+            jenis = str(doc.get("jenis", "keluhan"))
+            item_text = doc.get("item") or []
+            items = self._qr_parse_items(doc) or []
+            catatan = str(doc.get("catatan", ""))
+            # ══ RIWAYAT LOKAL — disimpan SEBELUM dokumen calls dihapus ══
+            order = {
+                "id": did,
+                "waktu": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "tv": tv,
+                "jenis": jenis,
+                "item": [str(x) for x in item_text],
+                "items": items,
+                "catatan": catatan,
+                "status": "baru",
+            }
+            self._qr_pesan_log_append(order)
+            self.after(0, self._qr_riwayat_refresh)
+            try:
+                from firestore_sync import get_firestore_client
+                get_firestore_client().delete_document(f"calls/{did}")
+            except Exception as e:
+                self._qr_log(f"gagal hapus panggilan {did}: {e}")
+            if not rate_ok:
+                self._qr_log(f"panggilan {did} masuk jendela rate-limit — dicatat di riwayat")
+                return
+            self._qr_log(f"panggilan masuk: tv={tv} did={did} jenis={jenis} item={len(items)}")
+            payload = {"tv": tv, "jenis": jenis, "item": item_text,
+                       "items": items, "catatan": catatan, "id": did}
+            self.after(0, lambda p=payload: self._qr_tampil_panggilan(p))
+        except Exception as e:
+            self._qr_log(f"panggilan masuk error: {e}")
+
+    def _qr_bel(self):
+        try:
+            import winsound
+            for _ in range(3):
+                winsound.Beep(1400, 180)
+                import time as _t
+                _t.sleep(0.08)
+        except Exception:
+            pass
+
+    def _qr_tampil_panggilan(self, p: dict):
+        """Popup panggilan (per TV). Tidak modal & bisa di-minimize — operator
+        tetap bisa membuka sesi/aktivitas lain sambil pesanan menunggu."""
+        try:
+            threading.Thread(target=self._qr_bel, daemon=True).start()
+        except Exception:
+            pass
+        tv = str(p.get("tv", "?"))
+        tv_label = f"TV {tv}" if tv.isdigit() else tv
+        jenis = str(p.get("jenis", "keluhan"))
+        catatan = str(p.get("catatan", ""))
+        oid = str(p.get("id") or "")
+        items = p.get("items") or []
+
+        popups = getattr(self, "_qr_popup_windows", {})
+        win = popups.get(tv)
+        if not (win and win.winfo_exists()):
+            win = ctk.CTkToplevel(self)
+            win.title(f"🔔 Panggilan — {tv_label}")
+            win.geometry("470x540")
+            win.minsize(400, 320)
+            win.configure(fg_color=C_BG)
+            hdr = ctk.CTkFrame(win, fg_color=C_PANEL, corner_radius=0, height=46)
+            hdr.pack(fill="x")
+            hdr.pack_propagate(False)
+            ctk.CTkLabel(hdr, text=f"🔔  PANGGILAN DARI {tv_label}",
+                         font=("Russo One", 13, "bold"),
+                         text_color=C_ACCENT).pack(side="left", padx=12)
+            ctk.CTkButton(hdr, text="📋 Riwayat", width=92, height=26,
+                          fg_color=C_BTN, hover_color=C_ACCENT2,
+                          border_width=1, border_color=C_ACCENT2,
+                          font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                          command=self._buka_riwayat_pesanan).pack(side="right", padx=4, pady=9)
+            ctk.CTkButton(hdr, text="✖ Tutup", width=76, height=26,
+                          fg_color=C_RED, hover_color="#B71C1C",
+                          font=("Russo One", 9, "bold"), text_color="white",
+                          command=lambda: self._qr_tutup_panggilan(tv)).pack(side="right", padx=(4, 8), pady=9)
+            body = ctk.CTkScrollableFrame(win, fg_color=C_PANEL, corner_radius=8)
+            body.pack(fill="both", expand=True, padx=10, pady=10)
+            win.body = body
+            win._q_orders = {}          # oid -> {'widgets': {idx: (btn, lbl)}}
+            win._q_items = {}           # oid -> daftar item terstruktur
+            popups[tv] = win
+        self._qr_tambah_section(win, tv, jenis, oid, items, p.get("catatan", ""))
+        win.lift()
+        win.attributes("-topmost", True)
+        win.attributes("-topmost", False)
+
+    def _qr_tambah_section(self, win, tv, jenis, oid, items, catatan):
+        """Tambah satu blok pesanan (per panggilan) ke popup; tiap item punya
+        tombol ✓ SUDAH untuk langsung menambahkan ke tagihan kartu TV."""
+        label_jenis = {"pesanan": "🛒  PESANAN", "paket": "➕  TAMBAH PAKET",
+                       "makanan": "🍔  MAKANAN", "minuman": "🥤  MINUMAN",
+                       "keluhan": "📢  KELUHAN"}.get(jenis, jenis.upper())
+        sec = ctk.CTkFrame(win.body, fg_color=C_CARD, corner_radius=8)
+        sections = getattr(win, "_q_sections", None)
+        if sections is None:
+            sections = []
+            win._q_sections = sections
+        if sections:
+            # Pack sebelum section pesanan pertama — JANGAN pakai
+            # winfo_children()[0] (frame internal CTkScrollableFrame tidak
+            # pack-managed → TclError "isn't packed").
+            sec.pack(fill="x", padx=2, pady=5, before=sections[0])
+        else:
+            sec.pack(fill="x", padx=2, pady=5)
+        sections.insert(0, sec)
+        if items:
+            jam = datetime.now().strftime("%H:%M")
+            ctk.CTkLabel(sec, text=f"{label_jenis}  •  {jam}",
+                         font=("Russo One", 11, "bold"),
+                         text_color=C_ACCENT, anchor="w").pack(fill="x", padx=10, pady=(6, 0))
+        widgets = {}
+        if items:
+            for idx, it in enumerate(items):
+                row_f = ctk.CTkFrame(sec, fg_color="transparent")
+                row_f.pack(fill="x", padx=8, pady=1)
+                nama = str(it.get("nama", "?"))
+                qty = int(it.get("qty", 1) or 1)
+                harga = int(it.get("harga", 0) or 0)
+                label_txt = f"•  {nama}" + (f"  x{qty}" if qty > 1 else "")
+                if harga:
+                    label_txt += f"    {fmt_rp(int(harga) * qty)}"
+                st = str(it.get("status", "baru"))
+                is_paket = str(it.get("tipe")) == "paket"
+                txt_color = C_GREEN if st == "sudah" else C_TEXT
+                icon = "➕" if is_paket else ("🍔" if it.get("tipe") == "makanan" else "🥤")
+                lbl = ctk.CTkLabel(row_f, text=f"{icon} {label_txt}",
+                                   font=FONT_BODY, anchor="w", text_color=txt_color)
+                lbl.pack(side="left", fill="x", expand=True)
+                btn_pay = ctk.CTkButton(row_f, text="✅  SUDAH BAYAR", width=118, height=26,
+                                        fg_color=C_GREEN, hover_color="#2E7D32",
+                                        text_color="white",
+                                        font=("Russo One", 9, "bold"),
+                                        command=lambda oid=oid, i=idx: self._qr_mark_sudah(
+                                            oid, i, win, True))
+                btn_unpaid = ctk.CTkButton(row_f, text="⏳  BELUM BAYAR", width=118, height=26,
+                                           fg_color="#FFB300", hover_color="#E6A400",
+                                           text_color="black",
+                                           font=("Russo One", 9, "bold"),
+                                           command=lambda oid=oid, i=idx: self._qr_mark_sudah(
+                                               oid, i, win, False))
+                if st != "baru":
+                    btn_pay.configure(state="disabled", fg_color="#2E7D32",
+                                      hover_color="#2E7D32")
+                    btn_unpaid.configure(state="disabled", fg_color="#B26A00",
+                                         hover_color="#B26A00")
+                btn_pay.pack(side="right", padx=2, pady=3)
+                btn_unpaid.pack(side="right", padx=2, pady=3)
+                widgets[idx] = (btn_pay, btn_unpaid, lbl)
+        if catatan:
+            ctk.CTkLabel(sec, text=f"✏️  {catatan}",
+                         font=FONT_SMALL, text_color=C_MUTED,
+                         anchor="w", wraplength=380).pack(fill="x", padx=10, pady=(0, 4))
+        elif not items:
+            ctk.CTkLabel(sec, text="(panggilan tanpa pesanan — hanya panggil kasir)",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(pady=6)
+        win._q_orders[oid] = {"widgets": widgets}
+        win._q_items[oid] = items or []
+
+    def _qr_tutup_panggilan(self, tv: str):
+        win = getattr(self, "_qr_popup_windows", {}).pop(tv, None)
+        if win and win.winfo_exists():
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _qr_pak_info(self, kartu, nama: str):
+        """Cari harga & menit paket di grup kartu TV. Return (harga, menit)."""
+        try:
+            d = kartu.get_paket_data() or {}
+        except Exception:
+            d = {}
+        if not d:
+            try:
+                d = self.get_paket_data(getattr(kartu, "nama_grup", None)) or {}
+            except Exception:
+                d = {}
+        info = d.get(nama) or {}
+        if isinstance(info, dict):
+            try:
+                return int(info.get("harga", 0) or 0), int(info.get("menit", 0) or 0)
+            except Exception:
+                return 0, 0
+        try:
+            return int(info or 0), 0
+        except Exception:
+            return 0, 0
+
+    def _qr_mark_sudah(self, oid, idx, win=None, paid=True):
+        """Operator menekan tombol aksi pada item pesanan web:
+        - ✅ SUDAH BAYAR  → item langsung masuk kartu TV, status LUNAS.
+        - ⏳ BELUM BAYAR  → item langsung masuk kartu TV, status TAGIHAN.
+        - paket          → langsung masuk ke kartu TV (tambah waktu + biaya);
+                           kalau kartu kosong, sesi otomatis dimulai.
+        - makanan/minuman → langsung masuk ke tagihan kartu TV.
+        Status item diperbarui di riwayat lokal & tampilan popup/riwayat."""
+        import traceback
+        try:
+            rows = self._qr_pesan_log_load()
+            row = next((r for r in rows if r.get("id") == str(oid)), None)
+            if row is None:
+                return
+            items = row.get("items", [])
+            if idx < 0 or idx >= len(items):
+                return
+            litem = items[idx]
+            if str(litem.get("status", "baru")) != "baru":
+                messagebox.showinfo("Sudah Diproses", "Item ini sudah ditandai.",
+                                    parent=self)
+                return
+            tv = str(row.get("tv", ""))
+            kartu = self._qr_cari_kartu(tv)
+            if kartu is None:
+                messagebox.showerror(
+                    "Kartu TV Tidak Ditemukan",
+                    f"Kartu TV '{tv}' tidak ada di dashboard.\n"
+                    "Tambahkan/nyalakan kartu TV itu dulu, lalu klik tombol lagi.",
+                    parent=self)
+                return
+
+            tipe = str(litem.get("tipe", ""))
+            nama = str(litem.get("nama", "?"))
+            qty = int(litem.get("qty", 1) or 1)
+            harga_item = int(litem.get("harga", 0) or 0)
+            lbl_status = "LUNAS" if paid else "TAGIHAN"
+            info = ""
+            try:
+                if tipe == "paket":
+                    harga, menit = self._qr_pak_info(kartu, nama)
+                    harga = harga or harga_item
+                    if harga <= 0:
+                        messagebox.showwarning(
+                            "Paket Tidak Dikenali",
+                            f"Paket '{nama}' tidak ada di data tarif "
+                            f"grup {getattr(kartu, 'nama_grup', '?')}.\n"
+                            "Cek nama grup/paket di menu Tarif, lalu coba lagi.",
+                            parent=self)
+                        return
+                    sesi_kosong = kartu.sesi_kosong()
+                    kartu._on_paket_confirm(nama, harga, menit, {}, 0, 0, "nominal",
+                                            paid=paid)
+                    if sesi_kosong:
+                        info = (f"TV {tv}: sesi baru '{nama}' ({fmt_rp(harga)}) "
+                                f"otomatis berjalan ({menit:g} menit) — {lbl_status}.")
+                    else:
+                        info = (f"TV {tv}: paket '{nama}' +{menit:g} mnt → "
+                                f"total {fmt_rp(kartu._total_setelah_diskon())} ({lbl_status}).")
+                else:
+                    pesanan = {nama: qty}
+                    kartu._on_tambah_pesanan_confirm(pesanan, paid=paid,
+                                                     _stok_delta=dict(pesanan))
+                    if kartu.sesi_kosong():
+                        info = (f"TV {tv}: {nama} masuk ke tagihan ({lbl_status}). Ses ini "
+                                "belum aktif — mulai paket dari kartu TV untuk timer.")
+                    else:
+                        sub = f"({fmt_rp(harga_item * qty)}) " if harga_item else ""
+                        info = f"TV {tv}: {nama} masuk ke tagihan {sub}({lbl_status})."
+            except Exception as e:
+                traceback.print_exc()
+                messagebox.showerror("Gagal Tambah Pesanan",
+                                     f"{tipe} '{nama}':\n{e}", parent=self)
+                return
+
+            litem["status"] = "sudah"
+            litem["paid"] = bool(paid)
+            row["ditangani"] = True
+            if all(str(x.get("status", "baru")) == "sudah" for x in items):
+                row["status"] = "selesai"
+            self._qr_pesan_log_save(rows)
+            self._qr_panggilan_ui_sudah(win, oid, idx, info, paid)
+            self._qr_riwayat_refresh()
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Gagal menandai: {e}", parent=self)
+
+    def _qr_panggilan_ui_sudah(self, win, oid, idx, info, paid=True):
+        """Update tombol/label item di popup + notice singkat setelah aksi."""
+        try:
+            if win is not None and win.winfo_exists():
+                o = getattr(win, "_q_orders", {}).get(str(oid))
+                trio = (o or {}).get("widgets", {}).get(idx)
+                if trio and len(trio) == 3:
+                    btn_pay, btn_unpaid, lbl = trio
+                    try:
+                        btn_pay.configure(text="✅  LUNAS", state="disabled",
+                                          fg_color="#2E7D32", hover_color="#2E7D32")
+                        btn_unpaid.configure(text="⏳  TAGIHAN", state="disabled",
+                                             fg_color="#B26A00", hover_color="#B26A00")
+                        lbl.configure(text_color=C_GREEN if paid else "#FF9800")
+                    except Exception:
+                        pass
+            if info:
+                try:
+                    self.after(0, lambda t=info: self._qr_notice_popup(t))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _qr_notice_popup(self, text):
+        try:
+            ct = ctk.CTkToplevel(self)
+            ct.title("✓  Sudah Diproses")
+            ct.geometry("380x120")
+            ct.configure(fg_color=C_BG)
+            ctk.CTkLabel(ct, text=text, font=FONT_SMALL, text_color=C_TEXT,
+                         wraplength=330).pack(pady=18)
+            ct.after(2600, ct.destroy)
+            ct.lift()
+        except Exception:
+            pass
+
+    def _buka_riwayat_pesanan(self):
+        """Window riwayat pesanan web — non-modal, bisa di-minimize; operator
+        tetap bisa bekerja di TV lain sambil popup ini terbuka."""
+        win = getattr(self, "_qr_his_win", None)
+        if win and win.winfo_exists():
+            win.lift()
+            self._qr_riwayat_refresh()
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("📋 Riwayat Pesanan Web")
+        win.geometry("980x560")
+        win.minsize(760, 380)
+        win.configure(fg_color=C_BG)
+        self._qr_his_win = win
+
+        hdr = ctk.CTkFrame(win, fg_color=C_PANEL, corner_radius=0, height=48)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text="📋  RIWAYAT PESANAN WEB",
+                     font=("Russo One", 14, "bold"), text_color=C_ACCENT).pack(side="left", padx=14)
+        ctk.CTkButton(hdr, text="✖ Tutup", width=76, height=28,
+                      fg_color=C_RED, font=("Russo One", 10, "bold"), text_color="white",
+                      command=win.destroy).pack(side="right", padx=(4, 10), pady=9)
+        ctk.CTkButton(hdr, text="⏳ Tandai BELUM BAYAR", width=170, height=28,
+                      fg_color="#FFB300", hover_color="#E6A400", text_color="black",
+                      font=("Russo One", 10, "bold"),
+                      command=lambda: self._qr_his_mark_selected(False)).pack(side="right", padx=4, pady=9)
+        ctk.CTkButton(hdr, text="✅ Tandai SUDAH BAYAR", width=170, height=28,
+                      fg_color=C_GREEN, hover_color="#2E7D32", text_color="white",
+                      font=("Russo One", 10, "bold"),
+                      command=lambda: self._qr_his_mark_selected(True)).pack(side="right", padx=4, pady=9)
+        ctk.CTkButton(hdr, text="↻ Muat Ulang", width=120, height=28,
+                      fg_color=C_BTN, border_width=1, border_color=C_ACCENT2,
+                      font=("Russo One", 10, "bold"), text_color=C_ACCENT2,
+                      command=self._qr_riwayat_refresh).pack(side="right", padx=4, pady=9)
+
+        wrap = ctk.CTkFrame(win, fg_color=C_PANEL, corner_radius=8)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        cols = ("waktu", "tv", "jenis", "item", "qty", "harga", "status", "catatan")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="extended")
+        tree.heading("waktu", text="Waktu")
+        tree.heading("tv", text="TV")
+        tree.heading("jenis", text="Jenis")
+        tree.heading("item", text="Item")
+        tree.heading("qty", text="Qty")
+        tree.heading("harga", text="Harga")
+        tree.heading("status", text="Keterangan")
+        tree.heading("catatan", text="Catatan")
+        tree.column("waktu", width=130, anchor="w")
+        tree.column("tv", width=48, anchor="center")
+        tree.column("jenis", width=90, anchor="w")
+        tree.column("item", width=240, anchor="w")
+        tree.column("qty", width=46, anchor="center")
+        tree.column("harga", width=90, anchor="e")
+        tree.column("status", width=130, anchor="center")
+        tree.column("catatan", width=200, anchor="w")
+        tree.tag_configure("s", foreground=C_GREEN)
+        tree.tag_configure("b", foreground="#FF9800")
+        tree.tag_configure("t", foreground="#E53935")
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        # Status HANYA diubah kasir via klik kanan (menu) — klik kiri tidak
+        # boleh langsung menandai ditangani.
+        tree.bind("<Button-3>", self._qr_riwayat_right_click)
+        win._qr_tree = tree
+        win._qr_wrap = wrap
+
+        self._qr_riwayat_refresh()
+        win.lift()
+
+    def _qr_his_mark_selected(self, paid=True):
+        win = getattr(self, "_qr_his_win", None)
+        if not (win and win.winfo_exists()):
+            return
+        tree = getattr(win, "_qr_tree", None)
+        if tree is None:
+            return
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Pilih Item", "Pilih baris yang mau ditandai.",
+                                parent=self)
+            return
+        for iid in list(sel):
+            oid, idx = (iid.split("|", 1) + ["0"])[:2]
+            try:
+                idx = int(idx)
+            except Exception:
+                idx = -1
+            rows = self._qr_pesan_log_load()
+            row = next((r for r in rows if r.get("id") == oid), None)
+            if row and 0 <= idx < len(row.get("items", [])):
+                self._qr_mark_sudah(str(oid), idx, None, paid)
+            else:
+                tree.selection_remove(iid)
+
+    def _qr_log_set_ditangani(self, oid, ditangani):
+        """Tandai order (riwayat web) sebagai Sudah/Belum Ditangani."""
+        rows = self._qr_pesan_log_load()
+        for r in rows:
+            if r.get("id") == str(oid):
+                r["ditangani"] = bool(ditangani)
+                break
+        self._qr_pesan_log_save(rows)
+        self._qr_riwayat_refresh()
+
+    def _qr_riwayat_right_click(self, event):
+        tree = event.widget
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return
+        tree.selection_set(iid)
+        oid, idx = (iid.split("|", 1) + ["0"])[:2]
+        try:
+            idx = int(idx)
+        except Exception:
+            idx = -1
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label="✅  Tandai Sudah Ditangani",
+                         command=lambda o=oid: self._qr_log_set_ditangani(o, True))
+        menu.add_command(label="⏳  Tandai Belum Ditangani",
+                         command=lambda o=oid: self._qr_log_set_ditangani(o, False))
+        if idx >= 0:
+            menu.add_separator()
+            menu.add_command(label="✅  Tandai SUDAH BAYAR",
+                             command=lambda o=oid, i=idx: self._qr_mark_sudah(o, i, None, True))
+            menu.add_command(label="⏳  Tandai BELUM BAYAR",
+                             command=lambda o=oid, i=idx: self._qr_mark_sudah(o, i, None, False))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _qr_riwayat_refresh(self):
+        """Refresh isi tree riwayat + status bar (terbaru di paling atas)."""
+        win = getattr(self, "_qr_his_win", None)
+        if not (win and win.winfo_exists()):
+            return
+        tree = getattr(win, "_qr_tree", None)
+        if tree is None:
+            return
+        rows = self._qr_pesan_log_load()
+        try:
+            rows.sort(key=lambda r: datetime.strptime(str(r.get("waktu", "")),
+                                                      "%Y-%m-%d %H:%M"))
+        except Exception:
+            pass
+        tree.delete(*tree.get_children())
+        belum = 0
+        for r in reversed(rows):
+            tv = str(r.get("tv", "?"))
+            tv_label = f"TV {tv}" if tv.isdigit() else tv
+            oid = str(r.get("id", ""))
+            catatan = str(r.get("catatan", ""))
+            dit = bool(r.get("ditangani", False))
+            items = r.get("items", []) or []
+            if not items:
+                if not dit:
+                    belum += 1
+                tree.insert("", "end",
+                            iid=f"{oid}|x",
+                            values=(str(r.get("waktu", "")), tv_label,
+                                    str(r.get("jenis", "")).upper(),
+                                    "(panggilan tanpa item)", "1", "",
+                                    "Sudah Ditangani" if dit else "Belum Ditangani",
+                                    catatan),
+                            tags=("s" if dit else "b",))
+                continue
+            if not dit and any(str(x.get("status", "baru")) == "baru" for x in items):
+                belum += 1
+            for idx, it in enumerate(items):
+                st = str(it.get("status", "baru"))
+                tipe = str(it.get("tipe", ""))
+                harga = int(it.get("harga", 0) or 0)
+                qty = int(it.get("qty", 1) or 1)
+                butir = f"{it.get('nama', '?')}  ({tipe.upper()})"
+                if harga:
+                    butir += f"  • {fmt_rp(harga)}"
+                sudah = st != "baru"
+                st_show = "Sudah Ditangani" if (sudah or dit) else "Belum Ditangani"
+                tree.insert("", "end", iid=f"{oid}|{idx}",
+                            values=(str(r.get("waktu", "")), tv_label,
+                                    str(r.get("jenis", "")).upper(),
+                                    butir, qty,
+                                    fmt_rp(harga * qty) if harga else "—",
+                                    st_show,
+                                    catatan if idx == len(items) - 1 else ""),
+                            tags=("s" if (sudah or dit) else "b",))
+        footer = getattr(win, "_qr_footer", None)
+        if footer is None:
+            footer = ctk.CTkLabel(win, text="", font=FONT_SMALL, text_color=C_MUTED)
+            footer.pack(pady=4)
+            win._qr_footer = footer
+        footer.configure(text=f"Total pesanan: {len(rows)}  •  Belum Ditangani: {belum}")
+        if win and win.winfo_exists():
+            win.after(3000, self._qr_riwayat_refresh)
+
+    def _qr_push_menu_bg(self):
+        """Push menu/nama rental ke Firestore call_meta/<owner> — dipakai halaman
+        web pelanggan. Dijalankan berkala (menu jarang berubah)."""
+        def worker():
+            try:
+                from firestore_sync import FirestoreClient
+                owner = self._resolve_license_user()
+                if not owner:
+                    return
+                paket_grup = {}
+                for g in (getattr(self, "grup_tarif", {}) or {}):
+                    d = self.get_paket_data(g)
+                    if d:
+                        paket_grup[g] = {
+                            n: {"harga": int(v.get("harga", 0) if isinstance(v, dict) else v),
+                                "menit": int(v.get("menit", 60) if isinstance(v, dict) else 60)}
+                            for n, v in d.items()
+                        }
+                data = {
+                    "nama_rental": self._get_nama_rental_dinamis(),
+                    "paket_grup": paket_grup,
+                    "makanan": dict(getattr(self, "menu_makanan", {}) or {}),
+                    "minuman": dict(getattr(self, "menu_minuman", {}) or {}),
+                    "stok": getattr(self, "stok", {}) or {},
+                    "stok_min": getattr(self, "stok_min", {}) or {},
+                    "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                FirestoreClient().set_document(f"call_meta/{owner}", data)
+            except Exception as e:
+                print(f"[QR] push menu gagal: {e}")
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            self._stok_push_queued = False
+        except Exception:
+            pass
+        try:
+            self.after(300000, self._qr_push_menu_bg)  # refresh berkala (5 menit)
+        except Exception:
+            pass
 
     def _media_state_extra(self, meja_id: str) -> list:
         """TIDAK lagi mengirim ulang SHOW_MEDIA saat client reconnect.
@@ -9027,32 +11383,34 @@ class AutoRentApp(ctk.CTk):
         try:
             import datetime as _dt
             fc = FirestoreClient()
-            # 1. Cari license record by kode
+            # 1. Cari license record by kode (opsional — kode keygen tidak
+            # selalu masuk koleksi licenses/; jangan blokir penulisan status)
             record = fc.find_license_by_code(kode)
-            if not record:
-                _LOGGER.warning("License code not found in Firestore: %s", kode)
+            doc_id = (record or {}).get("_id", "")
+            if record and record.get("revoked"):
+                _LOGGER.warning("Sync aktivasi dilewati — lisensi %s sudah direvoke", kode)
                 return
-            doc_id = record.get("_id", "")
             if not doc_id:
-                return
+                _LOGGER.info("License code not in Firestore (keygen code?) — sync tetap lanjut: %s", kode)
 
             # 2. Dapatkan expiry + maxTv dari license record dan lisensi lokal
             status = LicenseManager.get_status(current_user=uname)
             expiry_str = status.get("expiry", "")
 
-            # 3. Activate license (update activatedDevices)
-            fc.activate_license(doc_id, expiry=expiry_str, device_type="desktop")
+            # 3. Activate license (update activatedDevices) bila record ada
+            if record and doc_id:
+                fc.activate_license(doc_id, expiry=expiry_str, device_type="desktop")
 
             # 4. Hitung maxTv dari license record (prioritas), fallback ke promo, lalu ke edition
             lic_local = LicenseManager.load()
-            max_tv = record.get("maxTv", 0) or 0
+            max_tv = (record or {}).get("maxTv", 0) or 0
             if max_tv <= 0:
                 max_tv = lic_local.get("promo_add_tv", 0) or 0
             if max_tv <= 0:
                 ed = lic_local.get("edition", "")
                 max_tv = {"BULANAN": 5, "3BULAN": 10, "TAHUNAN": 15, "LIFETIME": 999999}.get(ed, 0)
             if max_tv <= 0:
-                pkg_name = record.get("package", "BULANAN").upper()
+                pkg_name = ((record or {}).get("package", "BULANAN") or "BULANAN").upper()
                 pkg_max_tv = {"BULANAN": 5, "3BULAN": 10, "TAHUNAN": 15, "LIFETIME": 999999}
                 max_tv = pkg_max_tv.get(pkg_name, 5)
             promo_add = lic_local.get("promo_add_tv", 0)
@@ -9079,7 +11437,7 @@ class AutoRentApp(ctk.CTk):
             return
         try:
             from firestore_sync import LicensePoller
-            self._license_poller = LicensePoller(uname, interval=30.0)
+            self._license_poller = LicensePoller(uname, interval=180.0)
             self._license_poller.start(self._on_cloud_license_update)
             _LOGGER.info("License poller started for %s", uname)
         except Exception as e:
@@ -9373,29 +11731,68 @@ class AutoRentApp(ctk.CTk):
                     return
             status = ls.get("status", "")
             expires_at = ls.get("expiresAt", "")
+
+            # ── Lisensi dicabut / kedaluwarsa dari cloud → nonaktifkan lokal ──
+            if status in ("revoked", "expired", "inactive") and existing.get("aktif"):
+                existing["aktif"] = False
+                existing["revoked"] = True
+                existing["revoked_from_cloud"] = True
+                existing["revoked_at"] = _dt.datetime.now().isoformat()
+                if status == "revoked":
+                    existing["revoke_reason"] = ls.get("pesan", "Lisensi dicabut di cloud.")
+                LicenseManager.save(existing)
+                _LOGGER.warning("Lisensi lokal dinonaktifkan dari cloud (status=%s)", status)
+                try:
+                    self.after(200, self._rebuild_sidebar_lic)
+                    self.after(400, self._cek_lisensi_saat_start)
+                except Exception:
+                    pass
+                return
+
             if status == "active" and expires_at:
                 expires = _dt.datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=_dt.timezone.utc)
                 if expires > _dt.datetime.now(_dt.timezone.utc):
                     existing["aktif"] = True
-                    existing["expiry"] = expires_at
+                    # Proteksi: jangan memotong masa lisensi lokal yang lebih lama
+                    # (cloud kadang hanya memegang 1 dari 2 kode yang di-stack).
+                    try:
+                        _old_exp_raw = existing.get("expiry", "")
+                        _old_exp = _dt.datetime.fromisoformat(
+                            (_old_exp_raw + "T00:00:00" if "T" not in _old_exp_raw else _old_exp_raw).replace("Z", "+00:00"))
+                        _new_exp = _dt.datetime.fromisoformat(
+                            (expires_at + "T00:00:00" if "T" not in expires_at else expires_at).replace("Z", "+00:00"))
+                        if not _old_exp_raw or _new_exp > _old_exp:
+                            existing["expiry"] = expires_at
+                    except Exception:
+                        existing["expiry"] = expires_at
                     existing["firebase_sync"] = True
                     existing["binding_mode"] = "username"
                     existing["username"] = resolved_user or self.current_user
-                    if not existing.get("kode_aktivasi") or "edition" not in existing:
-                        mtv = ls.get("maxTv", 5)
-                        if mtv >= 999999:
-                            existing["edition"] = "LIFETIME"
-                        elif mtv >= 15:
-                            existing["edition"] = "TAHUNAN"
-                        elif mtv >= 10:
-                            existing["edition"] = "3BULAN"
-                        else:
-                            existing["edition"] = "BULANAN"
+                    mtv = ls.get("maxTv") or 0
+                    if mtv <= 0:
+                        _LOGGER.warning(
+                            "Cloud licenseStatus tanpa maxTv (user=%s) — edition dipertahankan",
+                            resolved_user or self.current_user)
+                    if mtv >= 999999:
+                        _new_ed = "LIFETIME"
+                    elif mtv >= 15:
+                        _new_ed = "TAHUNAN"
+                    elif mtv >= 10:
+                        _new_ed = "3BULAN"
+                    elif mtv > 0:
+                        _new_ed = "BULANAN"
+                    else:
+                        _new_ed = ""
+                    if _new_ed:
+                        _ed_rank = {"BULANAN": 0, "3BULAN": 1, "TAHUNAN": 2, "LIFETIME": 3}
+                        _old_ed = str(existing.get("edition", "")).strip().upper() if "edition" in existing else ""
+                        if not _old_ed or _ed_rank.get(_new_ed, -1) > _ed_rank.get(_old_ed, -1):
+                            existing["edition"] = _new_ed
                     existing.setdefault("promo_add_tv", 0)
                     existing.setdefault("promo_add_warnet", 0)
-                    lic_path.write_text(json.dumps(existing, indent=2))
+                    LicenseManager.save(existing)
                     try:
                         self.after(200, self._rebuild_sidebar_lic)
                         self.after(500, self._save_promo_override_to_license)
@@ -9503,6 +11900,7 @@ class AutoRentApp(ctk.CTk):
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
         self._stop_license_poller()
+        self._stop_call_poller()
         self._stop_session_poller()
         self._stop_idle_watcher()
         try:
@@ -9528,6 +11926,20 @@ class AutoRentApp(ctk.CTk):
         self._build_layout()
         self._muat_daftar_tv()
         self._muat_daftar_warnet()
+        # QR panggil kasir: state per sesi
+        self._qr_seen = set()
+        self._qr_last_call = {}
+        self._qr_popup_windows = {}
+        # Auto-generate QR setiap TV (IP berubah -> QR baru)
+        try:
+            self._qr_selaras_semua()
+        except Exception:
+            pass
+        # Sinkronkan tvList ke Firestore setelah kartu dimuat (APK TV membaca ini)
+        try:
+            self._jadwal_sync_tv_list()
+        except Exception:
+            pass
         TimerService.restore_timer_state(self)
         self._load_riwayat()
         self._cek_adb_global_saat_start()
@@ -9584,6 +11996,16 @@ class AutoRentApp(ctk.CTk):
         # Start license poller untuk pantau perubahan dari cloud
         try:
             self._start_license_poller()
+        except Exception:
+            pass
+
+        # QR panggil kasir: poller + menu cloud (halaman web pelanggan)
+        try:
+            self._start_call_poller()
+        except Exception:
+            pass
+        try:
+            self._qr_push_menu_bg()
         except Exception:
             pass
 
@@ -9714,19 +12136,27 @@ class AutoRentApp(ctk.CTk):
             except Exception:
                 pass
 
-        def _save_edition_from_max_tv(lic: dict, max_tv: int):
-            if lic.get("kode_aktivasi") and "edition" in lic:
-                return
-            if max_tv >= 999999:
-                lic["edition"] = "LIFETIME"
-            elif max_tv >= 15:
-                lic["edition"] = "TAHUNAN"
-            elif max_tv >= 10:
-                lic["edition"] = "3BULAN"
-            else:
-                lic["edition"] = "BULANAN"
+        _EDITION_RANK = {"BULANAN": 0, "3BULAN": 1, "TAHUNAN": 2, "LIFETIME": 3}
 
-        def _write_cloud_license(expires_at: str, kode_aktivasi: str = "", max_tv: int = 5, promo_add_tv: int = 0):
+        def _save_edition_from_max_tv(lic: dict, max_tv: int):
+            # maxTv tidak valid/hilang (<=0) → jangan ubah edition:
+            # LIFETIME (expiry 2099+) tetap LIFETIME, jangan downgrade ke BULANAN.
+            if max_tv >= 999999:
+                _new = "LIFETIME"
+            elif max_tv >= 15:
+                _new = "TAHUNAN"
+            elif max_tv >= 10:
+                _new = "3BULAN"
+            elif max_tv > 0:
+                _new = "BULANAN"
+            else:
+                return
+            _old = str(lic.get("edition", "")).strip().upper() if "edition" in lic else ""
+            if _old and _EDITION_RANK.get(_old, -1) >= _EDITION_RANK.get(_new, -1):
+                return  # jangan pernah downgrade edition dari lisensi lokal
+            lic["edition"] = _new
+
+        def _write_cloud_license(expires_at: str, kode_aktivasi: str = "", max_tv: int = 0, promo_add_tv: int = 0):
             import pathlib as _pl
             import datetime as _dt
             lic_path = _pl.Path("rr_billing_license.json")
@@ -9750,7 +12180,22 @@ class AutoRentApp(ctk.CTk):
                 if not (admin_utama and resolved_user == admin_utama):
                     return
             lic["aktif"] = True
-            lic["expiry"] = expires_at
+            if not max_tv or max_tv <= 0:
+                # maxTv hilang/0 di cloud: jangan tebak 5 — edition dipertahankan
+                # (rank guard di _save_edition_from_max_tv mencegah downgrade).
+                _LOGGER.warning("Cloud license tanpa maxTv valid (%s); edition lokal dipertahankan",
+                                (lic.get("username") or "") or (self.current_user or ""))
+            # Proteksi: jangan memotong masa lisensi lokal yang lebih lama
+            try:
+                _old_exp_raw = lic.get("expiry", "")
+                _old_exp = _dt.datetime.fromisoformat(
+                    (_old_exp_raw + "T00:00:00" if "T" not in _old_exp_raw else _old_exp_raw).replace("Z", "+00:00"))
+                _new_exp = _dt.datetime.fromisoformat(
+                    (expires_at + "T00:00:00" if "T" not in expires_at else expires_at).replace("Z", "+00:00"))
+                if not _old_exp_raw or _new_exp > _old_exp:
+                    lic["expiry"] = expires_at
+            except Exception:
+                lic["expiry"] = expires_at
             lic["firebase_sync"] = True
             lic["binding_mode"] = "username"
             lic["username"] = resolved_user or self.current_user
@@ -9759,7 +12204,7 @@ class AutoRentApp(ctk.CTk):
                 lic["kode_aktivasi"] = kode_aktivasi
             lic["promo_add_tv"] = promo_add_tv or lic.get("promo_add_tv", 0)
             lic["promo_add_warnet"] = lic["promo_add_tv"]
-            lic_path.write_text(json.dumps(lic, indent=2))
+            LicenseManager.save(lic)
             try:
                 self.after(200, self._rebuild_sidebar_lic)
                 self.after(500, self._save_promo_override_to_license)
@@ -9776,23 +12221,22 @@ class AutoRentApp(ctk.CTk):
                     expires = expires.replace(tzinfo=_dt.timezone.utc)
                 if expires > _dt.datetime.now(_dt.timezone.utc):
                     _LOGGER.info("Cloud license restore: found via licenseStatus, maxTv=%s", ls.get("maxTv"))
-                    _write_cloud_license(ls["expiresAt"], max_tv=ls.get("maxTv", 5), promo_add_tv=ls.get("promoAddTv", 0))
+                    _write_cloud_license(ls["expiresAt"], max_tv=ls.get("maxTv") or 0, promo_add_tv=ls.get("promoAddTv") or 0)
                     # Re-check lisensi setelah restore agar UI update
                     self.after(1000, self._cek_lisensi_saat_start)
                 return
             # Fallback: cari langsung di koleksi licenses/
             try:
                 import datetime as _dt
-                _ls = fc.db.collection("licenses").document(self.current_user).get()
-                if _ls.exists:
-                    ld = _ls.to_dict()
+                ld = fc.get_document(f"licenses/{self.current_user}")
+                if ld:
                     if ld.get("expiry") and not ld.get("revoked"):
                         expires = _dt.datetime.fromisoformat(ld["expiry"].replace("Z", "+00:00"))
                         if expires.tzinfo is None:
                             expires = expires.replace(tzinfo=_dt.timezone.utc)
                         if expires > _dt.datetime.now(_dt.timezone.utc):
                             _LOGGER.info("Cloud license restore: found via licenses/")
-                            _write_cloud_license(ld["expiry"], ld.get("kode", ""), max_tv=ld.get("maxTv", 5))
+                            _write_cloud_license(ld["expiry"], ld.get("kode", ""), max_tv=ld.get("maxTv") or 0)
                             self.after(1000, self._cek_lisensi_saat_start)
                             return
             except Exception:
@@ -9800,10 +12244,11 @@ class AutoRentApp(ctk.CTk):
             # Fallback: cari di invoices/
             try:
                 import datetime as _dt
-                invs = fc.db.collection("invoices").where("username", "==", self.current_user).stream()
-                for inv in invs:
-                    iv = inv.to_dict()
-                    if iv.get("status","").upper() == "CONFIRMED" and iv.get("kodeLisensi"):
+                invs = fc.query_where_equal("invoices", "username", self.current_user)
+                for iv in invs:
+                    if iv.get("revoked"):
+                        continue
+                    if iv.get("status", "").upper() == "CONFIRMED" and iv.get("kodeLisensi"):
                         kode = iv["kodeLisensi"]
                         import rr_keygen
                         pkg_name = iv.get("package", "BULANAN").upper()
@@ -9811,7 +12256,7 @@ class AutoRentApp(ctk.CTk):
                         if pkg:
                             expires_at = _dt.datetime.fromtimestamp(iv.get("expiresAt", 0)).isoformat() if iv.get("expiresAt") else pkg.get("expiresAt", "")
                             _LOGGER.info("Cloud license restore: found via invoices/")
-                            _write_cloud_license(expires_at, kode, max_tv=pkg.get("maxTv", 5))
+                            _write_cloud_license(expires_at, kode, max_tv=pkg.get("maxTv") or 0)
                             self.after(1000, self._cek_lisensi_saat_start)
                             return
             except Exception:
@@ -9863,13 +12308,14 @@ class AutoRentApp(ctk.CTk):
         self._build_sidebar()
 
         self.frames = {}
-        for name in ["dashboard", "warnet", "harga", "riwayat", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
+        for name in ["dashboard", "warnet", "harga", "stok", "riwayat", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
             f = ctk.CTkFrame(self.content, fg_color=C_BG, corner_radius=0)
             self.frames[name] = f
 
         self._setup_dashboard()
         self._setup_warnet()
         self._setup_harga()
+        self._setup_stok()
         self._setup_riwayat()
         self._setup_wifi()
         self._setup_aktivasi()
@@ -9929,6 +12375,7 @@ class AutoRentApp(ctk.CTk):
                 ("🖥️", "Dashboard Warnet", "warnet"),
                 ("📜", "Riwayat",         "riwayat"),
                 ("💰", "Kontrol Harga",   "harga"),
+                ("📦", "Stok",            "stok"),
                 ("🔗", "Panduan Koneksi",  "wifi"),
                 ("🔓", "Aktivasi",        "aktivasi"),
                 ("👤", "Profil",          "profil"),
@@ -10145,6 +12592,13 @@ class AutoRentApp(ctk.CTk):
         for k, f in self.frames.items():
             f.pack_forget()
         self.frames[key].pack(fill="both", expand=True)
+        # Tab Stok dibangun ulang setiap dibuka supaya item baru/hapus/rename
+        # dari Kontrol Harga langsung terlihat.
+        if key == "stok" and hasattr(self, "scroll_stok"):
+            try:
+                self._build_stok_section()
+            except Exception:
+                pass
         for k, btn in self.nav_btns.items():
             btn.configure(fg_color=C_ACCENT2 if k == key else "transparent",
                           text_color="white" if k == key else C_TEXT)
@@ -10208,6 +12662,218 @@ class AutoRentApp(ctk.CTk):
     def get_makanan_data(self): return dict(self.menu_makanan)
     def get_minuman_data(self): return dict(self.menu_minuman)
     def get_semua_kartu(self):  return list(self._semua_kartu_tv)
+
+    # ── Stok makanan & minuman ─────────────────────────────────────────────────
+    def _stok_map(self, nama):
+        """Cari kategori item: 'makanan' | 'minuman' | None (item tidak dikenal)."""
+        if nama in self.menu_makanan:
+            return "makanan"
+        if nama in self.menu_minuman:
+            return "minuman"
+        return None
+
+    def _stok_get(self, nama):
+        """Stok saat ini utk item; None = item tidak dilacak stoknya."""
+        kat = self._stok_map(nama)
+        if kat is None:
+            return None
+        m = (self.stok.get(kat) or {}) if isinstance(self.stok, dict) else {}
+        val = m.get(nama)
+        if val is None:
+            return None
+        try:
+            return max(0, int(val))
+        except Exception:
+            return None
+
+    def _stok_min_get(self, nama):
+        kat = self._stok_map(nama)
+        if kat is None:
+            return None
+        m = (self.stok_min.get(kat) or {}) if isinstance(self.stok_min, dict) else {}
+        val = m.get(nama)
+        if val is None:
+            return None
+        try:
+            return max(0, int(val))
+        except Exception:
+            return None
+
+    def _stok_set(self, nama, qty, kat=None):
+        """Set stok item (qty >= 0). Item jadi 'dilacak' sejak pertama di-set."""
+        kat = kat or self._stok_map(nama)
+        if kat not in ("makanan", "minuman"):
+            return False
+        if not isinstance(self.stok, dict):
+            self.stok = {}
+        if not isinstance(self.stok.get(kat), dict):
+            self.stok[kat] = {}
+        try:
+            self.stok[kat][nama] = max(0, int(qty))
+        except Exception:
+            return False
+        return True
+
+    def _stok_min_set(self, nama, qty, kat=None):
+        kat = kat or self._stok_map(nama)
+        if kat not in ("makanan", "minuman"):
+            return False
+        if not isinstance(self.stok_min, dict):
+            self.stok_min = {}
+        if not isinstance(self.stok_min.get(kat), dict):
+            self.stok_min[kat] = {}
+        try:
+            self.stok_min[kat][nama] = max(0, int(qty))
+        except Exception:
+            return False
+        return True
+
+    def _stok_save(self):
+        """Simpan stok & stok_min ke config (thread-safe)."""
+        try:
+            cfg = ConfigManager.load()
+            cfg["stok"] = self.stok
+            cfg["stok_min"] = self.stok_min
+            ConfigManager.save(cfg)
+        except Exception:
+            pass
+
+    def _stok_validate_orders(self, pesanan):
+        """Cek apakah semua item bisa dipenuhi stok. Return (ok, pesan, nama,
+        stok_sisa). Pesan None = semua aman."""
+        if not pesanan:
+            return True, None, None, None
+        for nama, qty in pesanan.items():
+            sisa = self._stok_get(nama)
+            if sisa is None:
+                continue  # tidak dilacak
+            if int(qty or 0) > sisa:
+                return (False,
+                        f"Stok '{nama}' tidak mencukupi.\n"
+                        f"Tersedia: {sisa}, diminta: {int(qty or 0)}.\n"
+                        "Kurangi jumlah atau restok dulu.",
+                        nama, sisa)
+        return True, None, None, None
+
+    def _stok_terapkan(self, delta):
+        """Terapkan selisih stok dari pesanan: delta > 0 = kurangi, delta < 0 =
+        kembalikan (mis. kasir mengurangi qty item yang sudah pernah dipesan)."""
+        if not delta:
+            return
+        berubah = False
+        for nama, d in delta.items():
+            d = int(d or 0)
+            if d == 0:
+                continue
+            sisa = self._stok_get(nama)
+            if sisa is None:
+                continue  # tidak dilacak
+            if self._stok_set(nama, max(0, sisa - d), self._stok_map(nama)):
+                berubah = True
+        if berubah:
+            self._stok_save()
+            self._stok_push_bg()
+            self._stok_update_badge()
+
+    def _stok_push_bg(self):
+        """Push stok terbaru ke call_meta Firestore (halaman web pelanggan)."""
+        try:
+            if not getattr(self, "_stok_push_queued", False):
+                self._stok_push_queued = True
+                self.after(3000, self._qr_push_menu_bg)
+        except Exception:
+            pass
+
+    def _stok_tracked_items(self):
+        """Daftar (kategori, nama, stok, stok_min) utk semua item menu."""
+        out = []
+        for kat, menu in (("makanan", self.menu_makanan), ("minuman", self.menu_minuman)):
+            m = (self.stok.get(kat) or {}) if isinstance(self.stok, dict) else {}
+            mn = (self.stok_min.get(kat) or {}) if isinstance(self.stok_min, dict) else {}
+            for nama in menu:
+                try:
+                    stok = max(0, int(m.get(nama, 0) or 0))
+                except Exception:
+                    stok = 0
+                try:
+                    mini = max(0, int(mn.get(nama, 0) or 0))
+                except Exception:
+                    mini = 0
+                out.append((kat, nama, stok, mini))
+        return out
+
+    def _stok_menipis(self):
+        """Item dilacak dengan stok <= stok_min (atau stok 0)."""
+        items = []
+        for kat, nama, stok, mini in self._stok_tracked_items():
+            mini_eff = mini
+            if mini_eff <= 0 and stok <= 0:
+                mini_eff = 0
+            if stok <= mini_eff:
+                items.append((kat, nama, stok, mini))
+        return items
+
+    def _stok_update_badge(self):
+        """Perbarui badge 'stok menipis' di Dashboard TV & tab Stok."""
+        try:
+            items = self._stok_menipis()
+            by_kat = {}
+            for kat, nama, stok, mini in items:
+                by_kat.setdefault(kat, []).append((nama, stok, mini))
+            if not by_kat:
+                for lbl in (getattr(self, "_stok_tracked_lbl", None),
+                            getattr(self, "_stok_dash_lbl", None)):
+                    if lbl is not None:
+                        try:
+                            lbl.configure(text="", fg_color="transparent")
+                        except Exception:
+                            pass
+                return
+            txt = "📦 Stok menipis: "
+            txt += " | ".join(
+                f"{'Makanan' if k == 'makanan' else 'Minuman'} {len(v)} item"
+                for k, v in by_kat.items())
+            for lbl in (getattr(self, "_stok_tracked_lbl", None),
+                        getattr(self, "_stok_dash_lbl", None)):
+                if lbl is not None:
+                    try:
+                        lbl.configure(text=txt, fg_color="#3A3A2A")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _stok_poll_badge(self):
+        try:
+            self._stok_update_badge()
+        except Exception:
+            pass
+        try:
+            self.after(60000, self._stok_poll_badge)
+        except Exception:
+            pass
+
+    def _remap_stok_rename(self, kat, nama_asli, nama_baru):
+        """Ikuti rename item: pindahkan entri stok lama ke nama baru."""
+        if not isinstance(self.stok, dict) or not isinstance(self.stok.get(kat), dict):
+            return
+        m = self.stok[kat]
+        if nama_asli in m and nama_asli != nama_baru:
+            m[nama_baru] = m.pop(nama_asli)
+        mn = self.stok_min.get(kat)
+        if isinstance(mn, dict) and nama_asli in mn and nama_asli != nama_baru:
+            mn[nama_baru] = mn.pop(nama_asli)
+
+    def _hapus_stok_item(self, kat, nama):
+        if isinstance(self.stok, dict) and isinstance(self.stok.get(kat), dict):
+            self.stok[kat].pop(nama, None)
+        if isinstance(self.stok_min, dict) and isinstance(self.stok_min.get(kat), dict):
+            self.stok_min[kat].pop(nama, None)
+
+    def _stok_default_stok_min(self):
+        """Default stok_min utk item yang baru pertama kali dilacak."""
+        return 3
+
 
     def _tv_idle_guard(self):
         """Poller auto-mati TV yang menyala tanpa paket aktif (anti-kasir nakal).
@@ -10295,6 +12961,7 @@ class AutoRentApp(ctk.CTk):
             item_id = self.tree.insert("", 0, values=row, tags=(tag,))
             self._tree_item_to_index[item_id] = idx
         self._refresh_riwayat_summary()
+        self._remap_kartu_transaction_items()
 
     def _set_filter_tanggal(self, mode):
         self._riwayat_filter_range = None
@@ -10473,6 +13140,17 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             return self.current_user or ""
 
+    def _lisensi_lifetime(self) -> bool:
+        """True bila lisensi efektif = LIFETIME (label LIFETIME atau expiry >= 2099).
+
+        Dipakai untuk mengunci fitur branding TV (logo, nama rental, media promosi)
+        yang hanya tersedia bagi user berlisensi LIFETIME."""
+        try:
+            lic = LicenseManager.load()
+            return LicenseManager._effective_edition(lic) == "LIFETIME"
+        except Exception:
+            return False
+
     def _cloud_upload_target(self):
         """Target doc Firestore untuk upload transaksi: admin utama untuk kasir,
         username sendiri untuk admin."""
@@ -10527,6 +13205,7 @@ class AutoRentApp(ctk.CTk):
                 "paketHarga": paket_harga,
                 "pesananHarga": pesananHarga,
                 "tvJenisPs": "TV" if meta.get("source") == "tv" else "PC",
+                "paid": bool(meta.get("paid", True)),
             }
         except Exception:
             return None
@@ -10798,6 +13477,19 @@ class AutoRentApp(ctk.CTk):
                                          font=("Russo One", 10, "bold"),
                                          command=self._buka_dialog_tambah)
         self.btn_tambah.pack(side="right", padx=8, pady=10)
+        self.btn_riwayat_qr = ctk.CTkButton(hdr, text="📋  Riwayat Pesanan", width=150, height=34,
+                                            fg_color=C_BTN, hover_color=C_ACCENT2,
+                                            border_width=1, border_color=C_ORANGE,
+                                            font=("Russo One", 10, "bold"),
+                                            text_color=C_ORANGE,
+                                            command=self._buka_riwayat_pesanan)
+        self.btn_riwayat_qr.pack(side="right", padx=2, pady=10)
+        self._stok_dash_lbl = ctk.CTkLabel(hdr, text="", font=("Russo One", 10, "bold"),
+                                           text_color="#FFB300", fg_color="transparent",
+                                           corner_radius=6, cursor="hand2")
+        self._stok_dash_lbl.bind("<Button-1>", lambda e: self._show_tab("stok"))
+        if (self.current_role or "kasir") == "admin":
+            self._stok_dash_lbl.pack(side="right", padx=4, pady=10)
         if (self.current_role or "kasir") != "admin":
             self.btn_tambah.pack_forget()
             self.btn_overlay_setting.pack_forget()
@@ -11162,6 +13854,50 @@ class AutoRentApp(ctk.CTk):
                 print(f"[TV] Gagal simpan daftar_tv: {e}", flush=True)
         except Exception as e:
             print(f"[TV] Gagal simpan daftar_tv: {e}", flush=True)
+        self._jadwal_sync_tv_list()
+
+    def _tv_list_cloud(self):
+        """Daftar TV sesuai kontrak APK TV (field id/nama/ip/...).
+        APK membaca billingps_users/{username}.tvList saat menghubungkan TV."""
+        daftar = []
+        for kartu in list(getattr(self, "_semua_kartu_tv", [])):
+            daftar.append({
+                "id": getattr(kartu, "label_tv", ""),
+                "nama": getattr(kartu, "label_tv", ""),
+                "ip": getattr(kartu, "ip", ""),
+                "port": int(getattr(kartu, "port", 0) or 0),
+                "nama_grup": getattr(kartu, "nama_grup", ""),
+            })
+        return daftar
+
+    def _sync_tv_list_cloud(self):
+        """Sinkronkan tvList ke Firestore agar APK TV bisa terhubung/memilih TV."""
+        uname = getattr(self, "current_user", None) or ""
+        if not uname:
+            return
+        try:
+            from firestore_sync import get_firestore_client
+            daftar = self._tv_list_cloud()
+            ok = get_firestore_client().sync_tv_list(uname, daftar)
+            print(f"[TV] tvList cloud tersinkron ({len(daftar)} TV) — {ok}", flush=True)
+        except Exception as e:
+            print(f"[TV] Sync tvList error: {e}", flush=True)
+
+    def _jadwal_sync_tv_list(self):
+        """Coalesce: 1,5 detik setelah perubahan terakhir, sync ke cloud."""
+        try:
+            if getattr(self, "_tv_sync_timer", None):
+                self.after_cancel(self._tv_sync_timer)
+        except Exception:
+            pass
+        try:
+            self._tv_sync_timer = self.after(1500, self._flush_sync_tv_list)
+        except Exception:
+            pass
+
+    def _flush_sync_tv_list(self):
+        self._tv_sync_timer = None
+        threading.Thread(target=self._sync_tv_list_cloud, daemon=True).start()
 
     def _muat_daftar_tv(self):
         """Buat ulang kartu TV dari config (daftar_tv) setelah login.
@@ -11382,7 +14118,8 @@ class AutoRentApp(ctk.CTk):
                         on_ganti_grup=self._on_kartu_ganti_grup,
                         on_hapus=self._hapus_tv,
                         nama_grup=nama_grup,
-                        is_first=(self.jumlah_tv == 1))
+                        is_first=(self.jumlah_tv == 1),
+                        role=self.current_role)
         wid = canvas.create_window(0, 0, window=kartu, anchor="nw", tags=("_dash_card",))
         self._dash_card_windows.append((wid, kartu))
         self._semua_kartu_tv.append(kartu)
@@ -11391,6 +14128,52 @@ class AutoRentApp(ctk.CTk):
         if not restore:
             self._simpan_daftar_tv()
         self.after_idle(self._debounced_layout_dash)
+
+    def _bersihkan_konfig_tv(self, kartu):
+        """Hapus seluruh jejak konfigurasi TV yang dihapus:
+        - qr_call (kode QR tidak berlaku lagi)
+        - timer_state (entry timer per nomor kartu)
+        - sertifikat pairing cert_<ip>.pem / key_<ip>.pem
+        Tanpa hapus sertifikat, auto-restore saat login berikutnya akan
+        memunculkan lagi TV yang sudah dihapus."""
+        ip = str(getattr(kartu, "ip", "")).strip()
+        nama = str(getattr(kartu, "label_tv", "")).strip()
+        nomor = str(getattr(kartu, "nomor", "")).strip()
+
+        def _mut(c):
+            qr = c.get("qr_call") or {}
+            if isinstance(qr, dict) and nama and nama in qr:
+                del qr[nama]
+                c["qr_call"] = qr
+            ts = c.get("timer_state") or {}
+            if isinstance(ts, dict):
+                tv_state = ts.get("tv")
+                if isinstance(tv_state, dict) and nomor and nomor in tv_state:
+                    del tv_state[nomor]
+            return c
+
+        try:
+            ConfigManager.update(_mut)
+            print(f"[TV] Konfigurasi '{nama}' dibersihkan (qr_call/timer_state).")
+        except Exception as e:
+            print(f"[TV] Bersihkan konfigurasi gagal: {e}")
+
+        n_dihapus = 0
+        if ip:
+            try:
+                from tv_mesin import _cert_paths_for_ip
+                for p in _cert_paths_for_ip(ip):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                            n_dihapus += 1
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[TV] Gagal hapus sertifikat {ip}: {e}")
+        if n_dihapus:
+            print(f"[TV] Sertifikat pairing {ip} dihapus ({n_dihapus} file) — "
+                  "TV tidak akan muncul lagi otomatis.")
     
     # ── PIN KEAMANAN (HAPUS TV & KURSI WANET) ──────────────────────────
     def _get_pin_hapus(self):
@@ -11626,8 +14409,9 @@ class AutoRentApp(ctk.CTk):
         self.lbl_total_tv.configure(text=f"Total TV: {self.jumlah_tv}")
         self._refresh_dashboard_total_pesanan()
         self._simpan_daftar_tv()
+        self._bersihkan_konfig_tv(kartu)
         self.after_idle(self._debounced_layout_dash)
- 
+
     def _on_kartu_ganti_grup(self, kartu, grup_baru):
         """Saat user mengganti grup tarif sebuah TV: refresh closure get_paket_data
         kartu itu supaya menunjuk ke grup yang baru."""
@@ -12423,10 +15207,14 @@ class AutoRentApp(ctk.CTk):
                     del paket_grup[nama_asli]
             elif kategori == "makanan" and nama_asli in self.menu_makanan:
                 del self.menu_makanan[nama_asli]
+                self._hapus_stok_item("makanan", nama_asli)
             elif kategori == "minuman" and nama_asli in self.menu_minuman:
                 del self.menu_minuman[nama_asli]
+                self._hapus_stok_item("minuman", nama_asli)
             row_widget.destroy()
             self._harga_entries.pop((kategori, nama_asli), None)
+            self._stok_save()
+            self._stok_update_badge()
 
     def _rebuild_harga(self):
         for w in self.scroll_harga.winfo_children():
@@ -12523,6 +15311,9 @@ class AutoRentApp(ctk.CTk):
                 new_makanan[nama_baru] = harga_baru
             elif kategori == "minuman":
                 new_minuman[nama_baru] = harga_baru
+            # Ikutkan entri stok saat item di-rename
+            if kategori in ("makanan", "minuman") and nama_asli != nama_baru:
+                self._remap_stok_rename(kategori, nama_asli, nama_baru)
 
         # Jaga-jaga: pastikan "Main Bebas" selalu ada walau entry-nya hilang
         if "Main Bebas" not in new_paket_grup_aktif:
@@ -12536,6 +15327,8 @@ class AutoRentApp(ctk.CTk):
         cfg = ConfigManager.load()
         cfg["menu_makanan"] = self.menu_makanan
         cfg["menu_minuman"] = self.menu_minuman
+        cfg["stok"] = self.stok
+        cfg["stok_min"] = self.stok_min
         # Grup tarif disimpan dengan pemisahan shared vs warnet (anti-bocor ke kartu TV)
         self._simpan_grup_tarif_ke_config(cfg)
 
@@ -12550,6 +15343,190 @@ class AutoRentApp(ctk.CTk):
         self._refresh_grup_info()
         self._refresh_info_bebas()
         self._rebuild_harga()
+
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  TAB STOK: kelola stok makanan & minuman
+    # ══════════════════════════════════════════════════════════════════════════
+    def _setup_stok(self):
+        f = self.frames["stok"]
+        hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
+        hdr.pack(fill="x")
+        ctk.CTkLabel(hdr, text="📦  MANAJEMEN STOK",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
+        ctk.CTkButton(hdr, text="💾 Simpan Semua", width=150, height=34,
+                      fg_color="#1A4A1A", hover_color="#0A3A0A",
+                      border_width=1, border_color=C_GREEN,
+                      font=("Russo One", 10, "bold"), text_color=C_GREEN,
+                      command=self._stok_simpan_semua).pack(side="right", padx=18, pady=10)
+
+        info = ctk.CTkFrame(f, fg_color=C_PANEL, corner_radius=10,
+                            border_width=1, border_color=C_ACCENT2)
+        info.pack(fill="x", padx=14, pady=(10, 4))
+        ctk.CTkLabel(info, text=(
+            "Isi stok & stok-minim per item. Item yang diisi stoknya otomatis "
+            "DILACAK — pesanan melebihi stok akan ditolak.\n"
+            "Kosongkan stok untuk menonaktifkan pelacakan item (tanpa blokir)."),
+            font=FONT_SMALL, text_color=C_MUTED, justify="left", wraplength=1000).pack(anchor="w", padx=14, pady=8)
+
+        self._stok_tracked_lbl = ctk.CTkLabel(f, text="", font=FONT_SMALL,
+                                              text_color="#FFB300", anchor="w")
+        self._stok_tracked_lbl.pack(fill="x", padx=16, pady=(2, 0))
+
+        self.scroll_stok = ctk.CTkScrollableFrame(f, fg_color=C_BG)
+        self.scroll_stok.pack(fill="both", expand=True, padx=14, pady=10)
+
+        self._stok_entries = {}
+        self._build_stok_section()
+
+    def _build_stok_section(self):
+        for w in self.scroll_stok.winfo_children():
+            w.destroy()
+        self._stok_entries = {}
+        self._build_stok_section_kat("makanan", "🍔  STOK MAKANAN", self.menu_makanan)
+        self._build_stok_section_kat("minuman", "🥤  STOK MINUMAN", self.menu_minuman)
+        self._stok_update_badge()
+
+    def _build_stok_section_kat(self, kategori, judul, menu_dict):
+        sec = ctk.CTkFrame(self.scroll_stok, fg_color=C_PANEL, corner_radius=12)
+        sec.pack(fill="x", pady=8)
+
+        hdr_row = ctk.CTkFrame(sec, fg_color="transparent")
+        hdr_row.pack(fill="x", padx=16, pady=(10, 6))
+        tk.Label(hdr_row, text=judul, font=FONT_SUB, fg=C_ACCENT2, bg=C_PANEL).pack(side="left")
+
+        kol_row = tk.Frame(sec, bg=C_PANEL)
+        kol_row.pack(fill="x", padx=16, pady=(0, 2))
+        tk.Label(kol_row, text="Item", font=FONT_SMALL, fg=C_MUTED, bg=C_PANEL,
+                 width=24, anchor="w").pack(side="left", padx=(0, 8))
+        tk.Label(kol_row, text="Stok Saat Ini", font=FONT_SMALL, fg=C_MUTED, bg=C_PANEL,
+                 width=12, anchor="w").pack(side="left", padx=(0, 4))
+        tk.Label(kol_row, text="Stok Minim", font=FONT_SMALL, fg=C_MUTED, bg=C_PANEL,
+                 width=10, anchor="w").pack(side="left", padx=(0, 4))
+        tk.Label(kol_row, text="Aksi", font=FONT_SMALL, fg=C_MUTED, bg=C_PANEL,
+                 width=22, anchor="w").pack(side="left")
+
+        container = tk.Frame(sec, bg=C_PANEL)
+        container.pack(fill="x", padx=0, pady=(0, 8))
+
+        for nama, harga in menu_dict.items():
+            self._tambah_row_stok(container, kategori, nama, harga)
+
+        self._stok_containers = getattr(self, "_stok_containers", {})
+        self._stok_containers[kategori] = container
+
+    def _tambah_row_stok(self, container, kategori, nama, harga):
+        row = tk.Frame(container, bg=C_PANEL)
+        row.pack(fill="x", padx=16, pady=2)
+
+        stok = self._stok_get(nama) or 0
+        mini = self._stok_min_get(nama) or 0
+        dilacak = self._stok_get(nama) is not None
+
+        var_stok = tk.StringVar(value=str(stok))
+        var_min = tk.StringVar(value=str(mini))
+
+        e_nama = tk.Label(row, text=nama, bg=C_PANEL, fg=C_TEXT, font=FONT_SMALL,
+                          width=24, anchor="w")
+        e_nama.pack(side="left", padx=(0, 8))
+
+        e_stok = tk.Entry(row, textvariable=var_stok, width=10,
+                          bg=C_BTN, fg=C_ACCENT, bd=1, font=FONT_SMALL,
+                          justify="center")
+        e_stok.pack(side="left", padx=(0, 4))
+        if dilacak and stok <= 0:
+            e_stok.configure(fg="#FFB300")
+
+        e_min = tk.Entry(row, textvariable=var_min, width=8,
+                         bg=C_BTN, fg=C_YELLOW, bd=1, font=FONT_SMALL,
+                         justify="center")
+        e_min.pack(side="left", padx=(0, 4))
+        if not dilacak:
+            e_stok.configure(fg=C_MUTED)
+            e_min.configure(fg=C_MUTED)
+
+        # Aksi: +5, +10, +50, Hapus pelacakan
+        for jml in (5, 10, 50):
+            tk.Button(row, text=f"+{jml}", width=4, height=1,
+                      bg=C_BTN, fg=C_GREEN, font=FONT_SMALL,
+                      relief="ridge", bd=1,
+                      command=lambda v=var_stok, j=jml: self._stok_tambah_ke_entry(v, j)
+                      ).pack(side="left", padx=2)
+        tk.Button(row, text="✕ Hapus Stok", width=10, height=1,
+                  bg=C_BTN, fg=C_RED, font=FONT_SMALL,
+                  relief="ridge", bd=1,
+                  command=lambda r=row, k=kategori, n=nama:
+                      self._stok_hapus_pelacakan(r, k, n)).pack(side="left", padx=2)
+        if dilacak and stok <= 0:
+            tk.Label(row, text="⚠ HABIS", bg=C_PANEL, fg=C_RED,
+                     font=("Consolas", 9, "bold")).pack(side="left", padx=6)
+
+        self._stok_entries[(kategori, nama)] = {
+            "var_stok": var_stok, "var_min": var_min, "nama": nama,
+        }
+
+    def _stok_tambah_ke_entry(self, var, jml):
+        try:
+            cur = int(var.get().strip() or 0)
+        except ValueError:
+            cur = 0
+        var.set(str(cur + jml))
+
+    def _stok_hapus_pelacakan(self, row_widget, kategori, nama):
+        if not messagebox.askyesno("Hapus Pelacakan",
+                                   f"Berhenti melacak stok '{nama}'?\n"
+                                   "Pesanan item ini tidak akan diblokir lagi."):
+            return
+        self._hapus_stok_item(kategori, nama)
+        row_widget.destroy()
+        self._stok_entries.pop((kategori, nama), None)
+        self._stok_save()
+        self._stok_update_badge()
+        self._stok_push_bg()
+
+    def _stok_simpan_semua(self):
+        """Simpan semua kolom stok/minim ke config + terapkan ke self.stok."""
+        baru = 0
+        for (kategori, nama), entry in self._stok_entries.items():
+            stok_str = entry["var_stok"].get().strip()
+            min_str = entry["var_min"].get().strip()
+            try:
+                stok_v = int(stok_str)
+                if stok_v < 0:
+                    stok_v = 0
+                self._stok_set(nama, stok_v, kategori)
+            except ValueError:
+                self._hapus_stok_item(kategori, nama)  # kosong = tidak dilacak
+            try:
+                min_v = int(min_str)
+                if min_v < 0:
+                    min_v = 0
+                self._stok_min_set(nama, min_v, kategori)
+            except ValueError:
+                self._stok_min_set(nama, 0, kategori)
+            if stok_str.strip():
+                baru += 1
+        self._stok_save()
+        self._stok_push_bg()
+        self._stok_update_badge()
+        self._build_stok_section()
+        messagebox.showinfo("✅ Tersimpan",
+                            f"Stok berhasil disimpan ({baru} item dilacak).\n"
+                            "Halaman QR pelanggan diperbarui otomatis.")
+
+    def _stok_penjualan_per_item(self):
+        """Hitung total qty terjual per item dari riwayat (buat info tambahan)."""
+        out = {}
+        try:
+            for m in getattr(self, "riwayat_meta", []) or []:
+                pesanan = m.get("pesanan") or {}
+                if not isinstance(pesanan, dict):
+                    continue
+                for nm, q in pesanan.items():
+                    out[nm] = out.get(nm, 0) + int(q or 0)
+        except Exception:
+            pass
+        return out
 
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -12694,7 +15671,7 @@ class AutoRentApp(ctk.CTk):
         self.tree.pack(fill="both", expand=True, padx=14, pady=(10, 4))
         # Tag for row coloring
         self.tree.tag_configure("paid", foreground=C_GREEN)
-        self.tree.tag_configure("unpaid", foreground=C_YELLOW)
+        self.tree.tag_configure("unpaid", foreground=C_RED)
         # Right-click: admin-only action menu (Hapus transaksi)
         self.tree.bind("<Button-3>", self._on_riwayat_right_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_riwayat_select)
@@ -12734,29 +15711,6 @@ class AutoRentApp(ctk.CTk):
         paid = not current
         # Update tree row
         status_str = "✅ Lunas" if paid else "⏳ Belum Lunas"
-        vals = list(self.tree.item(iid, "values"))
-        if len(vals) >= 8:
-            vals[7] = status_str
-        else:
-            while len(vals) < 8:
-                vals.append("—")
-            vals[7] = status_str
-        self.tree.item(iid, values=vals, tags=("paid" if paid else "unpaid",))
-        self.btn_toggle_paid.configure(text="⏳ Tandai Belum Lunas" if paid else "✅ Tandai Lunas")
-        self._refresh_riwayat_summary()
-        self._save_riwayat()
-        AuditLogger.log(action="payment_toggle", username=self.current_user or "", status="success",
-                        details={"transaction_index": idx, "new_status": "paid" if paid else "unpaid"})
-
-    def _set_transaksi_paid(self, item_id, paid):
-        """Sinkron status bayar dari kartu TV/PC ke baris riwayat terkait."""
-        if not item_id:
-            return
-        idx = self._tree_item_to_index.get(item_id, -1)
-        if idx < 0 or idx >= len(self.riwayat_meta):
-            return
-        self.riwayat_meta[idx]['paid'] = bool(paid)
-        status_str = "✅ Lunas" if paid else "⏳ Belum Lunas"
         try:
             row = list(self.riwayat_transaksi[idx])
             if len(row) >= 8:
@@ -12768,16 +15722,29 @@ class AutoRentApp(ctk.CTk):
             self.riwayat_transaksi[idx] = tuple(row)
         except Exception:
             pass
-        if self.tree.exists(item_id):
-            self.tree.item(item_id, values=self.riwayat_transaksi[idx],
-                           tags=("paid" if paid else "unpaid",))
-        if item_id in self.tree.selection() and hasattr(self, 'btn_toggle_paid'):
-            self.btn_toggle_paid.configure(
-                text="⏳ Tandai Belum Lunas" if paid else "✅ Tandai Lunas")
+        vals = list(self.tree.item(iid, "values"))
+        if len(vals) >= 8:
+            vals[7] = status_str
+        else:
+            while len(vals) < 8:
+                vals.append("—")
+            vals[7] = status_str
+        self.tree.item(iid, values=vals, tags=("paid" if paid else "unpaid",))
+        self.btn_toggle_paid.configure(text="⏳ Tandai Belum Lunas" if paid else "✅ Tandai Lunas")
         self._refresh_riwayat_summary()
         self._save_riwayat()
-        AuditLogger.log(action="payment_toggle_card", username=self.current_user or "", status="success",
+        threading.Thread(target=self._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
+        AuditLogger.log(action="payment_toggle", username=self.current_user or "", status="success",
                         details={"transaction_index": idx, "new_status": "paid" if paid else "unpaid"})
+
+    def _set_transaksi_paid(self, item_id, paid):
+        """Sinkron status bayar dari kartu TV/PC ke baris riwayat terkait."""
+        if not item_id:
+            return
+        idx = self._tree_item_to_index.get(item_id, -1)
+        if idx < 0 or idx >= len(self.riwayat_meta):
+            return
+        self._set_transaksi_paid_idx(idx, paid)
 
     def _show_invoice_dialog(self, iid=None):
         if not iid:
@@ -12984,12 +15951,13 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
 
-    def _catat_transaksi(self, tv_label, paket, pesanan, total, source='tv', diskoni=0, diskoni_mode="nominal"):
+    def _catat_transaksi(self, tv_label, paket, pesanan, total, source='tv', diskoni=0, diskoni_mode="nominal", paid=True):
         """Catat transaksi ke riwayat.
         pesanan: dict nama->qty
         tv_label: string label TV/PC
         source: 'tv' atau 'warnet'
         total: int (total rupiah)
+        paid: status pembayaran (True=LUNAS, False=TAGIHAN)
         """
         waktu       = datetime.now().strftime("%Y-%m-%d %H:%M")
         pesanan = pesanan or {}
@@ -13016,12 +15984,12 @@ class AutoRentApp(ctk.CTk):
         self.riwayat_transaksi.append(row)
         # maintain parallel meta + info upload cloud
         cloud_id = f"tx_{int(time.time() * 1000)}"
-        self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int, 'diskoni': diskoni, 'diskoni_mode': diskoni_mode, 'paid': True, 'cloud_id': cloud_id, 'paket_raw': str(paket or ""), 'pesanan': {str(k): int(v) for k, v in (pesanan.items() if isinstance(pesanan, dict) else [])}})
+        self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int, 'diskoni': diskoni, 'diskoni_mode': diskoni_mode, 'paid': paid, 'cloud_id': cloud_id, 'paket_raw': str(paket or ""), 'pesanan': {str(k): int(v) for k, v in (pesanan.items() if isinstance(pesanan, dict) else [])}})
 
         # Tampilkan hanya bila lolos filter aktif
         item_id = None
         if self._row_matches_filter(row):
-            item_id = self.tree.insert("", 0, values=row, tags=("paid",))
+            item_id = self.tree.insert("", 0, values=row, tags=("paid" if paid else "unpaid",))
             self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
 
         # Upload ke Firestore (billingps_users/{admin_utama}.transaksiList) agar
@@ -13043,6 +16011,8 @@ class AutoRentApp(ctk.CTk):
             self._refresh_dashboard_total_pesanan()
 
         self._save_riwayat()
+        self._last_catat_idx = len(self.riwayat_transaksi) - 1
+        self._last_catat_cloud_id = cloud_id
         return item_id
 
     def _bersihkan_riwayat(self):
@@ -13101,6 +16071,87 @@ class AutoRentApp(ctk.CTk):
                 # fallback: use position-based mapping (assume newest at 0)
                 idx = max(0, len(self.riwayat_transaksi) - 1 - items.index(item_id))
             self._tree_item_to_index[item_id] = idx
+        self._remap_kartu_transaction_items()
+
+    def _resolve_session_idx(self, kartu):
+        """Index riwayat milik kartu TV/PC: item-map -> idx tersimpan -> cloud_id."""
+        try:
+            item_id = getattr(kartu, '_last_transaction_item', None)
+            if item_id is not None and hasattr(self.tree, 'exists') and self.tree.exists(item_id):
+                idx = self._tree_item_to_index.get(item_id, -1)
+                if idx >= 0:
+                    return idx
+            idx = getattr(kartu, '_last_riwayat_idx', None)
+            if idx is not None and 0 <= idx < len(self.riwayat_meta):
+                return idx
+            cid = getattr(kartu, '_last_cloud_id', None)
+            if cid:
+                for i, meta in enumerate(self.riwayat_meta):
+                    if isinstance(meta, dict) and meta.get("cloud_id") == cid:
+                        return i
+        except Exception:
+            pass
+        return -1
+
+    def _tree_item_for_idx(self, idx):
+        """Cari item id tree yang memetakan ke index riwayat (None jika tak tampil)."""
+        for item_id, i in self._tree_item_to_index.items():
+            if i == idx:
+                return item_id
+        return None
+
+    def _remap_kartu_transaction_items(self):
+        """Relink kartu ke item tree setelah tree di-render ulang (item id hangus)."""
+        try:
+            if not hasattr(self, "tree") or not hasattr(self.tree, "exists"):
+                return
+            item_by_cloud = {}
+            for item_id, idx in self._tree_item_to_index.items():
+                if 0 <= idx < len(self.riwayat_meta):
+                    cid = self.riwayat_meta[idx].get("cloud_id")
+                    if cid:
+                        item_by_cloud[cid] = item_id
+            for kartu in list(getattr(self, "_semua_kartu_tv", []) or []) + list(getattr(self, "_semua_kartu_warnet", []) or []):
+                item_id = getattr(kartu, "_last_transaction_item", None)
+                if item_id is not None and self.tree.exists(item_id) and self._tree_item_to_index.get(item_id) is not None:
+                    continue
+                cid = getattr(kartu, "_last_cloud_id", None)
+                if cid and cid in item_by_cloud:
+                    kartu._last_transaction_item = item_by_cloud[cid]
+                else:
+                    kartu._last_transaction_item = None
+        except Exception:
+            pass
+
+    def _set_transaksi_paid_idx(self, idx, paid):
+        """Sinkron status bayar ke baris riwayat terkait (berdasarkan index)."""
+        if idx is None or not (0 <= idx < len(self.riwayat_meta)):
+            return
+        self.riwayat_meta[idx]['paid'] = bool(paid)
+        status_str = "✅ Lunas" if paid else "⏳ Belum Lunas"
+        try:
+            row = list(self.riwayat_transaksi[idx])
+            if len(row) >= 8:
+                row[7] = status_str
+            else:
+                while len(row) < 8:
+                    row.append("—")
+                row[7] = status_str
+            self.riwayat_transaksi[idx] = tuple(row)
+        except Exception:
+            pass
+        item_id = self._tree_item_for_idx(idx)
+        if item_id is not None and self.tree.exists(item_id):
+            self.tree.item(item_id, values=self.riwayat_transaksi[idx],
+                           tags=("paid" if paid else "unpaid",))
+        if item_id is not None and item_id in self.tree.selection() and hasattr(self, 'btn_toggle_paid'):
+            self.btn_toggle_paid.configure(
+                text="⏳ Tandai Belum Lunas" if paid else "✅ Tandai Lunas")
+        self._refresh_riwayat_summary()
+        self._save_riwayat()
+        threading.Thread(target=self._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
+        AuditLogger.log(action="payment_toggle_card", username=self.current_user or "", status="success",
+                        details={"transaction_index": idx, "new_status": "paid" if paid else "unpaid"})
 
     def _ask_admin_and_delete(self, iid):
         # Dialog kecil untuk meminta username + password admin untuk otorisasi
@@ -14456,28 +17507,53 @@ class AutoRentApp(ctk.CTk):
         # Get rental profile data
         cfg = ConfigManager.load()
         profil_semua = cfg.get("profil_rental", {})
-        profil_user = profil_semua.get(self.current_user, {})
-        
-        # Display rental profile info
-        rental_info = [
-            ("🏪 Nama Rental",      profil_user.get("nama_rental", "-")),
-            ("👤 Nama Pemilik",     profil_user.get("nama_pemilik", "-")),
-            ("📱 No HP / WhatsApp",  profil_user.get("hp", "-")),
-            ("📧 Email / Gmail",    profil_user.get("email", "-")),
-            ("📍 Alamat Tempat",    profil_user.get("alamat", "-")),
-        ]
-        
-        for label, val in rental_info:
-            row = ctk.CTkFrame(rental_card, fg_color="transparent")
-            row.pack(fill="x", padx=20, pady=4)
-            ctk.CTkLabel(row, text=f"{label}:", font=FONT_LABEL,
-                        text_color=C_MUTED, width=140, anchor="w").pack(side="left")
-            # Handle long text wrapping
-            lbl_val = ctk.CTkLabel(row, text=val, font=FONT_BODY, 
-                                   text_color=C_TEXT, wraplength=300, justify="left")
-            lbl_val.pack(side="left", anchor="nw", fill="x", expand=True)
-        
-        ctk.CTkLabel(rental_card, text="",).pack(pady=4)
+        profil_user = profil_semua.get(self.current_user, {}) or {}
+
+        # ── Form isi langsung (tanpa dialog) ─────────────────────────────
+        def _field_profil(parent, label, value):
+            ctk.CTkLabel(parent, text=label, font=FONT_LABEL,
+                         text_color=C_MUTED, anchor="w").pack(anchor="w", padx=20, pady=(4, 2))
+            e = ctk.CTkEntry(parent, fg_color=C_BTN, text_color=C_TEXT,
+                             border_color=C_BORDER, font=FONT_BODY, height=34)
+            e.insert(0, value)
+            e.pack(fill="x", padx=20, pady=(0, 6))
+            return e
+
+        e_nama_rental = _field_profil(rental_card, "🏪 Nama Rental PS",
+                                      profil_user.get("nama_rental", ""))
+        e_nama_pemilik = _field_profil(rental_card, "👤 Nama Pemilik",
+                                       profil_user.get("nama_pemilik", ""))
+        e_hp = _field_profil(rental_card, "📱 No HP / WhatsApp",
+                             profil_user.get("hp", ""))
+        e_email = _field_profil(rental_card, "📧 Email / Gmail",
+                                profil_user.get("email", ""))
+
+        ctk.CTkLabel(rental_card, text="📍 Alamat Tempat", font=FONT_LABEL,
+                     text_color=C_MUTED, anchor="w").pack(anchor="w", padx=20, pady=(4, 2))
+        e_alamat = ctk.CTkTextbox(rental_card, height=64, fg_color=C_BTN,
+                                  text_color=C_TEXT, border_color=C_BORDER,
+                                  border_width=1, font=FONT_BODY)
+        e_alamat.pack(fill="x", padx=20, pady=(0, 6))
+        e_alamat.insert("1.0", profil_user.get("alamat", ""))
+
+        def _simpan_profil_form():
+            data = {
+                "nama_rental": sanitize_text(e_nama_rental.get()),
+                "nama_pemilik": sanitize_text(e_nama_pemilik.get()),
+                "hp": sanitize_text(e_hp.get()),
+                "email": sanitize_text(e_email.get()).lower(),
+                "alamat": sanitize_text(e_alamat.get("1.0", "end")),
+            }
+            self._simpan_profil_rental(data)
+
+        ctk.CTkButton(rental_card, text="💾  Simpan Profil", height=36,
+                      fg_color=C_ACCENT2, font=("Russo One", 10, "bold"),
+                      text_color="white",
+                      command=_simpan_profil_form).pack(anchor="w", padx=20, pady=(8, 2))
+        ctk.CTkLabel(rental_card,
+                     text="Nama rental tampil di popup kanan atas TV "
+                          "(berlaku setelah aktivasi lisensi LIFETIME).",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(0, 10))
 
         # ── PIN KEAMANAN (Hapus TV & Kursi) ──────────────────────────
         pin_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)

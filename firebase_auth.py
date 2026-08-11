@@ -287,8 +287,8 @@ class FirebaseAuth:
                     try:
                         data = json.loads(body)
                         id_token = data.get("idToken", "")
-                        if not id_token:
-                            self._reply(400, {"success": False, "error": "No idToken"})
+                        if not id_token or len(id_token.split(".")) != 3:
+                            self._reply(400, {"success": False, "error": "Invalid idToken format"})
                             return
                         result[0] = ("ok", {
                             "idToken": id_token,
@@ -342,8 +342,26 @@ class FirebaseAuth:
 
         status, data = result[0]
         if status == "ok":
-            self._set_tokens(data)
-            self._display_name = data.get("displayName", "")
+            id_token = data.get("idToken", "")
+            if not id_token:
+                return False, "Tidak ada idToken dari Google"
+            # VERIFIKASI WAJIB: idToken harus sah di Firebase (accounts:lookup).
+            # Body POST relay TIDAK dipercaya — email/displayName bisa dipalsukan
+            # oleh halaman web jahat yang menembak endpoint localhost ini.
+            self._id_token = id_token
+            user_info = self._get_user_info()
+            if not user_info:
+                self._id_token = ""
+                return False, "idToken Google tidak valid / tidak terdaftar di Firebase"
+            self._set_tokens({
+                "idToken": id_token,
+                "refreshToken": data.get("refreshToken", ""),
+                "localId": user_info.get("localId", data.get("localId", "")),
+                "email": user_info.get("email", ""),
+                "displayName": user_info.get("displayName", user_info.get("email", "")),
+            })
+            if not self._email:
+                return False, "Akun Google tidak punya email"
             return True, "Login Google berhasil"
         return False, "Gagal login Google"
 

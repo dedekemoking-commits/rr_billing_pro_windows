@@ -134,6 +134,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(200, ok, "UNLOCK_SCREEN terkirim" if ok else "TV tidak terhubung",
                           action="UNLOCK_SCREEN", meja_id=meja_id)
 
+        elif path == "/api/show-media":
+            mtype = str(data.get("type", "video"))
+            url = str(data.get("url", ""))
+            ok = self.hub.send_show_media(meja_id, mtype, url)
+            self._respond(200, ok, "SHOW_MEDIA terkirim" if ok else "TV tidak terhubung",
+                          action="SHOW_MEDIA", meja_id=meja_id, type=mtype, url=url)
+
+        elif path == "/api/hide-media":
+            ok = self.hub.send_hide_media(meja_id)
+            self._respond(200, ok, "HIDE_MEDIA terkirim" if ok else "TV tidak terhubung",
+                          action="HIDE_MEDIA", meja_id=meja_id)
+
         else:
             self._respond(404, False, f"Not found: {path}")
 

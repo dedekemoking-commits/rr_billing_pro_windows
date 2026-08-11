@@ -17,6 +17,12 @@ DEVICE_TYPE_ANDROID = "android"
 VALID_DEVICE_TYPES = (DEVICE_TYPE_DESKTOP, DEVICE_TYPE_ANDROID)
 MAX_ACTIVATIONS_DEFAULT = 2
 
+# Throttle 429 (kuota Firestore) bersifat GLOBAL antar instans FirestoreClient
+# agar semua jalur (poller, aktivasi, session, invoice, lisensi) berhenti
+# bersama-sama saat kuota habis — bukan hanya per-objek.
+_THROTTLED_UNTIL = 0.0
+_TX_SAVE_LOCK = threading.Lock()
+
 
 # ── Firestore Value Converters ────────────────────────────────────────────
 
@@ -75,9 +81,25 @@ def _dict_to_doc(data: dict) -> dict:
 # ── Firestore Client ──────────────────────────────────────────────────────
 
 class FirestoreClient:
+    # Jeda setelah HTTP 429 (kuota Firestore habis) — poller berhenti mem-bombardir
+    # server, lalu otomatis coba lagi setelah jeda. Prevent spiral rate-limit.
+    THROTTLE_429_SECONDS = 60.0
+
     def __init__(self):
         self._auth = get_firebase_auth()
         self._session = requests.Session()
+
+    def _throttled(self) -> bool:
+        global _THROTTLED_UNTIL
+        return time.time() < _THROTTLED_UNTIL
+
+    def _note_response(self, status: int, ctx: str) -> None:
+        global _THROTTLED_UNTIL
+        if status == 429:
+            _THROTTLED_UNTIL = time.time() + self.THROTTLE_429_SECONDS
+            _LOGGER.warning(
+                "%s HTTP 429 (kuota Firestore habis) — jeda request %ds",
+                ctx, int(self.THROTTLE_429_SECONDS))
 
     def _token(self) -> str:
         if not self._auth.get_id_token():
@@ -93,6 +115,8 @@ class FirestoreClient:
     # ── Document CRUD ─────────────────────────────────────────────────────
 
     def get_document(self, path: str) -> Optional[dict]:
+        if self._throttled():
+            return None
         url = f"{FIRESTORE_BASE}/{path}"
         try:
             resp = self._session.get(url, headers=self._headers(), timeout=15)
@@ -100,6 +124,7 @@ class FirestoreClient:
                 return _doc_to_dict(resp.json())
             if resp.status_code == 404:
                 return None
+            self._note_response(resp.status_code, f"get_document({path})")
             _LOGGER.warning("get_document(%s) HTTP %d: %s", path, resp.status_code, resp.text[:200])
             return None
         except requests.RequestException as e:
@@ -111,6 +136,8 @@ class FirestoreClient:
         return ok
 
     def _set_document_detailed(self, path: str, data: dict, merge: bool = True) -> tuple[bool, str]:
+        if self._throttled():
+            return False, "Firestore di-throttle (kuota habis) — coba lagi nanti"
         url = f"{FIRESTORE_BASE}/{path}"
         doc = _dict_to_doc(data)
         params = {}
@@ -120,6 +147,7 @@ class FirestoreClient:
             resp = self._session.patch(url, params=params, json=doc, headers=self._headers(), timeout=30)
             if resp.status_code in (200, 201):
                 return True, ""
+            self._note_response(resp.status_code, f"set_document({path})")
             err_msg = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
             _LOGGER.warning("set_document(%s) HTTP %d: %s", path, resp.status_code, err_msg)
             return False, err_msg
@@ -128,9 +156,12 @@ class FirestoreClient:
             return False, str(e)
 
     def delete_document(self, path: str) -> bool:
+        if self._throttled():
+            return False
         url = f"{FIRESTORE_BASE}/{path}"
         try:
             resp = self._session.delete(url, headers=self._headers(), timeout=15)
+            self._note_response(resp.status_code, f"delete_document({path})")
             return resp.status_code in (200, 204)
         except requests.RequestException as e:
             _LOGGER.warning("delete_document(%s) error: %s", path, e)
@@ -139,6 +170,8 @@ class FirestoreClient:
     # ── Query ─────────────────────────────────────────────────────────────
 
     def query_where_equal(self, collection: str, field: str, value: str) -> list[dict]:
+        if self._throttled():
+            return []
         url = f"{FIRESTORE_BASE}:runQuery"
         body = {
             "structuredQuery": {
@@ -161,6 +194,7 @@ class FirestoreClient:
                     if "document" in item:
                         results.append(_doc_to_dict(item["document"]))
                 return results
+            self._note_response(resp.status_code, f"query({collection})")
             _LOGGER.warning("query(%s) HTTP %d: %s", collection, resp.status_code, resp.text[:200])
             return []
         except requests.RequestException as e:
@@ -191,16 +225,36 @@ class FirestoreClient:
         """
         if not txs:
             return True
-        doc = self.get_user_doc(username)
-        tx_list = doc.get("transaksiList", []) if doc else []
-        if not isinstance(tx_list, list):
-            tx_list = []
-        existing_ids = {t.get("id") for t in tx_list if isinstance(t, dict) and t.get("id")}
-        fresh = [t for t in txs if isinstance(t, dict) and t.get("id") not in existing_ids]
-        if not fresh:
+        with _TX_SAVE_LOCK:
+            doc = self.get_user_doc(username)
+            tx_list = doc.get("transaksiList", []) if doc else []
+            if not isinstance(tx_list, list):
+                tx_list = []
+            existing_ids = {t.get("id") for t in tx_list if isinstance(t, dict) and t.get("id")}
+            fresh = [t for t in txs if isinstance(t, dict) and t.get("id") not in existing_ids]
+            if not fresh:
+                return True
+            merged = list(fresh) + list(tx_list)
+            return self.set_user_doc(username, {"transaksiList": merged}, merge=True)
+
+    def upsert_transactions(self, username: str, txs: list[dict]) -> bool:
+        """Update (replace by id) transaksi yang sudah ada di cloud; tambahkan
+        yang belum ada. Dipakai saat detail transaksi berubah di riwayat lokal
+        (mis. pesanan makanan/minuman ditambahkan, status bayar berubah).
+        """
+        if not txs:
             return True
-        merged = list(fresh) + list(tx_list)
-        return self.set_user_doc(username, {"transaksiList": merged}, merge=True)
+        with _TX_SAVE_LOCK:
+            doc = self.get_user_doc(username)
+            tx_list = doc.get("transaksiList", []) if doc else []
+            if not isinstance(tx_list, list):
+                tx_list = []
+            by_id = {t.get("id"): t for t in tx_list if isinstance(t, dict) and t.get("id")}
+            for t in txs:
+                if isinstance(t, dict) and t.get("id"):
+                    by_id[t["id"]] = t
+            merged = list(by_id.values())
+            return self.set_user_doc(username, {"transaksiList": merged}, merge=True)
 
     def fetch_transactions(self, username: str, max_days: int = 6) -> list[dict]:
         doc = self.get_user_doc(username)
@@ -301,7 +355,12 @@ class FirestoreClient:
         
         # Get existing doc to read current activatedDevices
         doc = self.get_document(f"licenses/{doc_id}")
-        
+
+        # Revoked license tidak boleh diaktifkan kembali
+        if doc and doc.get("revoked"):
+            _LOGGER.warning("activate_license(%s) ditolak — lisensi sudah direvoke", doc_id)
+            return False
+
         updates = {
             "activatedAt": now_ms,
             "activatedDeviceId": device_id,
@@ -315,6 +374,12 @@ class FirestoreClient:
         # Check if this device type already exists
         device_exists = any(d.get("deviceType") == device_type for d in existing)
         if not device_exists:
+            max_act = (doc or {}).get("maxActivations", MAX_ACTIVATIONS_DEFAULT)
+            if len(existing) >= int(max_act):
+                _LOGGER.warning(
+                    "activate_license(%s) ditolak — kuota aktivasi tercapai (%d perangkat)",
+                    doc_id, int(max_act))
+                return False
             existing.append({
                 "deviceType": device_type,
                 "deviceId": device_id,
@@ -346,12 +411,15 @@ class FirestoreClient:
         return self.set_document(f"licenses/{doc_id}", updates, merge=True)
 
     def write_license_status(self, username: str, ls: dict) -> bool:
-        # Preserve existing promoAddTv from cloud if not provided
-        promo = ls.get("promoAddTv", 0)
-        if not promo:
+        # Hanya pertahankan promo lama dari cloud bila key TIDAK disediakan
+        # (None); promoAddTv=0 artinya promo sengaja dimatikan.
+        promo = ls.get("promoAddTv", None)
+        if promo is None:
             existing = self.get_user_doc(username)
             if existing:
                 promo = existing.get("licenseStatus", {}).get("promoAddTv", 0)
+            else:
+                promo = 0
         data = {
             "licenseStatus": {
                 "status": ls.get("status", ""),
@@ -367,58 +435,45 @@ class FirestoreClient:
 
     def fetch_license_status_by_username(self, username: str) -> Optional[dict]:
         """
-        Fetch licenseStatus from billingps_users/<username> doc.
-        Jika tidak ditemukan, coba alternative username (dengan/tanpa prefix _user_).
-        Returns the licenseStatus dict or None.
+        Fetch licenseStatus dari billingps_users/<username> doc.
+        Dioptimasi: get_user_doc dipanggil maksimal 2x (bukan 8x) per
+        pemanggilan — hemat kuota read Firestore (1 read per GET).
         """
         def _check(uname):
             if not uname:
-                return None
+                return None, None
             doc = self.get_user_doc(uname)
             if doc is None:
-                return None
+                return None, None
             ls = doc.get("licenseStatus")
             if ls and isinstance(ls, dict) and ls.get("status") == "active":
-                return ls
-            return None
+                return ls, doc
+            return None, doc
 
-        # Coba primary username
-        result = _check(username)
-        if result:
-            return result
-
-        # Coba alternative: strip atau tambah prefix _user_
-        alt_usernames = []
+        candidates = [username]
         if username.startswith("_user_"):
-            alt_usernames.append(username[6:])  # hilangin _user_
+            candidates.append(username[6:])
         else:
-            alt_usernames.append(f"_user_{username}")
+            candidates.append(f"_user_{username}")
 
-        # Juga cek field 'username' di doc primary (jika doc-nya ada)
-        primary_doc = self.get_user_doc(username)
-        if primary_doc and primary_doc.get("username"):
-            field_username = primary_doc["username"]
-            if field_username not in alt_usernames and field_username != username:
-                alt_usernames.append(field_username)
+        primary_doc = None
+        for c in candidates:
+            ls, doc = _check(c)
+            if ls:
+                return ls
+            if doc is not None and primary_doc is None:
+                primary_doc = doc
 
-        for alt in alt_usernames:
-            result = _check(alt)
-            if result:
-                _LOGGER.info("fetch_license_status_by_username: found via alt username '%s'", alt)
-                return result
-
-        # Fallback: cari by email (untuk antisipasi login pake email atau Android nulis pake email sbg doc ID)
-        email_to_try = None
-        if primary_doc and primary_doc.get("email"):
-            email_to_try = primary_doc["email"]
-        elif "@" in username:
-            email_to_try = username  # user logged in with email directly
+        if primary_doc:
+            field_username = primary_doc.get("username")
+            if field_username and field_username not in candidates:
+                ls, _ = _check(field_username)
+                if ls:
+                    _LOGGER.info("fetch_license_status_by_username: found via field username '%s'", field_username)
+                    return ls
+            email_to_try = primary_doc.get("email")
         else:
-            for alt in alt_usernames:
-                alt_doc = self.get_user_doc(alt)
-                if alt_doc and alt_doc.get("email"):
-                    email_to_try = alt_doc["email"]
-                    break
+            email_to_try = username if "@" in username else None
 
         if email_to_try:
             email_results = self.query_where_equal("billingps_users", "email", email_to_try)
@@ -431,23 +486,29 @@ class FirestoreClient:
                 doc_id = r.get("_id", "")
                 if doc_id.startswith("_user_"):
                     bare_user = doc_id[6:]
-                    bare_doc = self.get_user_doc(bare_user)
-                    if bare_doc:
-                        ls = bare_doc.get("licenseStatus")
-                        if ls and isinstance(ls, dict) and ls.get("status") == "active":
-                            _LOGGER.info("fetch_license_status_by_username: found via email -> bare user '%s'", bare_user)
-                            return ls
+                    ls, _ = _check(bare_user)
+                    if ls:
+                        _LOGGER.info("fetch_license_status_by_username: found via email -> bare user '%s'", bare_user)
+                        return ls
 
         return None
 
     # ── Invoice ────────────────────────────────────────────────────────────
 
     def query_invoices(self, status: str = None, limit: int = 50, username: str = "") -> list[dict]:
-        # Query from user subcollection first, fallback to top-level collection
+        if self._throttled():
+            return []
+        # Prioritas: map invoices di dalam doc user (billingps_users/{user}.invoices)
         if username:
-            docs = self.query_where_equal(f"billingps_users/{username}/invoices", "status", status) if status else self.query_all(f"billingps_users/{username}/invoices", limit=limit)
-            if docs:
-                return docs
+            doc = self.get_user_doc(username)
+            inv_map = (doc or {}).get("invoices", {})
+            if isinstance(inv_map, dict) and inv_map:
+                results = [d for d in inv_map.values() if isinstance(d, dict)]
+                results.sort(key=lambda d: d.get("dibuat", 0) if isinstance(d.get("dibuat"), (int, float)) else 0,
+                             reverse=True)
+                if status:
+                    results = [d for d in results if d.get("status") == status]
+                return results[:limit]
         url = f"{FIRESTORE_BASE}:runQuery"
         body = {
             "structuredQuery": {
@@ -463,23 +524,30 @@ class FirestoreClient:
                 for item in resp.json():
                     if "document" in item:
                         d = _doc_to_dict(item["document"])
+                        if username and d.get("username") not in (None, "", username):
+                            continue
                         if status is None or d.get("status") == status:
                             results.append(d)
                 return results
+            self._note_response(resp.status_code, "query_invoices")
             _LOGGER.warning("query_invoices HTTP %d: %s", resp.status_code, resp.text[:200])
             return []
         except requests.RequestException as e:
             _LOGGER.warning("query_invoices error: %s", e)
             return []
 
-    def query_all(self, collection: str, limit: int = 100) -> list[dict]:
+    def query_all(self, collection: str, limit: int = 100, order_field: str = "") -> list[dict]:
+        if self._throttled():
+            return []
         url = f"{FIRESTORE_BASE}:runQuery"
-        body = {
-            "structuredQuery": {
-                "from": [{"collectionId": collection}],
-                "limit": limit,
-            }
-        }
+        query = {"from": [{"collectionId": collection}]}
+        if order_field:
+            # Dokumen TERBARU duluan — penting untuk poller QR: sesi/panggilan
+            # baru selalu masuk window walau koleksi sudah menumpuk dokumen lama.
+            query["orderBy"] = [{"field": {"fieldPath": order_field},
+                                 "direction": "DESCENDING"}]
+        query["limit"] = limit
+        body = {"structuredQuery": query}
         try:
             resp = self._session.post(url, json=body, headers=self._headers(), timeout=15)
             if resp.status_code == 200:
@@ -488,6 +556,7 @@ class FirestoreClient:
                     if "document" in item:
                         results.append(_doc_to_dict(item["document"]))
                 return results
+            self._note_response(resp.status_code, f"query_all({collection})")
             _LOGGER.warning("query_all(%s) HTTP %d: %s", collection, resp.status_code, resp.text[:200])
             return []
         except requests.RequestException as e:
@@ -563,11 +632,18 @@ class LicensePoller:
             self._thread.join(timeout=5)
 
     def _run(self):
+        last_fetch = 0.0
+        cached_ls = None
         while not self._stop_event.is_set():
             try:
-                ls = self._client.fetch_license_status_by_username(self._username)
-                if self._callback:
-                    self._callback(ls)
+                if time.time() - last_fetch >= self._interval:
+                    ls = self._client.fetch_license_status_by_username(self._username)
+                    last_fetch = time.time()
+                    cached_ls = ls
+                    if self._callback:
+                        self._callback(ls)
+                elif self._callback:
+                    self._callback(cached_ls)
             except Exception as e:
                 _LOGGER.warning("LicensePoller error: %s", e)
             self._stop_event.wait(self._interval)
@@ -579,6 +655,68 @@ class LicensePoller:
                 self._callback(ls)
         except Exception as e:
             _LOGGER.warning("LicensePoller.poll_now error: %s", e)
+
+
+class CallPoller:
+    """Polling panggilan QR dari halaman web pelanggan (collection 'calls').
+
+    Meniru pola LicensePoller: thread + interval. Setiap dokumen baru diteruskan
+    ke callback (dict hasil _doc_to_dict + '_id'). Validasi kode TV & rate-limit
+    dilakukan di sisi kasir (main.py)."""
+
+    def __init__(self, collection: str = "calls", interval: float = 3.0, limit: int = 20,
+                 order_field: str = ""):
+        self._collection = collection
+        self._interval = float(interval)
+        self._limit = max(5, int(limit))
+        self._order_field = order_field or ""
+        self._callback = None
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._client = FirestoreClient()
+
+    def start(self, callback):
+        self._callback = callback
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                docs = self._client.query_all(self._collection, limit=self._limit,
+                                              order_field=self._order_field)
+                if docs and self._callback:
+                    docs.sort(key=lambda d: str(d.get("_createTime", "")))
+                    for d in docs:
+                        try:
+                            self._callback(d)
+                        except Exception:
+                            pass
+            except Exception as e:
+                _LOGGER.warning("CallPoller error: %s", e)
+            self._stop_event.wait(self._interval)
+
+    def poll_now(self):
+        try:
+            docs = self._client.query_all(self._collection, limit=self._limit,
+                                          order_field=self._order_field)
+            if docs and self._callback:
+                docs.sort(key=lambda d: str(d.get("_createTime", "")))
+                for d in docs:
+                    try:
+                        self._callback(d)
+                    except Exception:
+                        pass
+        except Exception as e:
+            _LOGGER.warning("CallPoller.poll_now error: %s", e)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────
