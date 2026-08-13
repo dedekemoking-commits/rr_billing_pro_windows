@@ -85,18 +85,18 @@ service cloud.firestore {
 
     // ── TAMBAHAN: QR Panggil Kasir (BillingPS Desktop) ────────────────
     // Panggilan dari halaman web pelanggan (auth anonim) boleh dibuat;
-    // kasir (akun ber-email) membaca & menghapus; panggilan tidak boleh diedit.
+    // kasir (app desktop, login ANONIM) membaca & menghapus.
     match /calls/{callId} {
       allow create: if true;
-      allow read: if isAuth() && request.auth.token.email != null;
+      allow read: if isAuth();
       allow update: if false;
-      allow delete: if isAuth() && request.auth.token.email != null;
+      allow delete: if isAuth();
     }
     // Menu & nama rental untuk tampil di halaman web pelanggan:
-    // tampil publik (dibaca semua), ditulis hanya oleh kasir (akun ber-email).
+    // tampil publik (dibaca semua), ditulis oleh app kasir (anonim).
     match /call_meta/{owner} {
       allow read: if true;
-      allow write: if isAuth() && request.auth.token.email != null;
+      allow write: if isAuth();
     }
     // Sesi PIN QR: pelanggan (anonim) membuat & mengupdate dokumennya send
     // (uid disimpan di field 'uid'); kasir (ber-email) mengelola semuanya.
@@ -108,6 +108,16 @@ service cloud.firestore {
         request.auth.uid == resource.data.uid
       );
       allow delete: if isAuth() && request.auth.token.email != null;
+    }
+
+    // ── TAMBAHAN: Booking Online (rrcctv.online/booking.html) ─────────────
+    // Pelanggan (anonim) membuat booking; aplikasi kasir (terautentikasi)
+    // membaca & mengubah status (baru -> dikonfirmasi/ditolak + alasan).
+    match /bookings/{bookingId} {
+      allow create: if true;
+      allow read: if isAuth();
+      allow update: if isAuth();
+      allow delete: if false;
     }
   }
 }

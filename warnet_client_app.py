@@ -569,7 +569,7 @@ class WarnetClientApp(ctk.CTk):
             self.protocol_client.connect(host, port)
             response = self.protocol_client.auth(client_id, password)
         except Exception as e:
-            self.after(0, lambda: self._on_connect_failed(str(e)))
+            self.after(0, lambda msg=str(e): self._on_connect_failed(msg))
             return
 
         if response.get("status") != "OK":
@@ -640,7 +640,7 @@ class WarnetClientApp(ctk.CTk):
         try:
             response = self.protocol_client.command(self.session_token, pc_id, action)
         except Exception as e:
-            self.after(0, lambda: self._append_log(f"ERROR send {action}: {e}"))
+            self.after(0, lambda msg=str(e): self._append_log(f"ERROR send {action}: {msg}"))
             reconnect_ok = self._reconnect_and_reauth()
             if not reconnect_ok:
                 return
@@ -648,7 +648,7 @@ class WarnetClientApp(ctk.CTk):
                 response = self.protocol_client.command(self.session_token, pc_id, action)
                 self.after(0, lambda: self._append_log(f"Retry {action}: berhasil setelah reconnect."))
             except Exception as retry_error:
-                self.after(0, lambda: self._append_log(f"ERROR retry {action}: {retry_error}"))
+                self.after(0, lambda msg=str(retry_error): self._append_log(f"ERROR retry {action}: {msg}"))
                 return
 
         status = response.get("status", "FAIL")
@@ -683,7 +683,7 @@ class WarnetClientApp(ctk.CTk):
                 self.after(0, lambda: self._set_controls_enabled(False))
                 self.after(0, lambda: self.lbl_status.configure(text="Status: Disconnect"))
                 self.after(0, lambda: self.lbl_auto_reconnect.configure(text="Auto reconnect: OFF"))
-                self.after(0, lambda: self._append_log(f"Reconnect gagal: {reconnect_error}"))
+                self.after(0, lambda msg=str(reconnect_error): self._append_log(f"Reconnect gagal: {msg}"))
                 return False
 
             if response.get("status") != "OK":
@@ -797,7 +797,7 @@ class WarnetClientApp(ctk.CTk):
                     except Exception as ping_error:
                         self.connected = False
                         self.after(0, lambda: self.lbl_status.configure(text="Status: Reconnecting..."))
-                        self.after(0, lambda: self._append_log(f"Koneksi putus: {ping_error}"))
+                        self.after(0, lambda msg=str(ping_error): self._append_log(f"Koneksi putus: {msg}"))
 
             if self.should_maintain_connection and not self.connected:
                 if now - last_reconnect_time >= RECONNECT_INTERVAL_SECONDS:

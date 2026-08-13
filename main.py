@@ -1,4 +1,4 @@
-import customtkinter as ctk
+﻿import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess
@@ -59,6 +59,92 @@ try:
     ESCPOS_AVAILABLE = True
 except ImportError:
     ESCPOS_AVAILABLE = False
+
+
+# ─── Printer Bluetooth BLE (RPP02N dkk — ISSC Transparent UART) ──────────────
+# Karakteristik RX menerima byte ESC/POS mentah tanpa framing paket.
+BLE_PRINT_RX_UUID = "49535343-8841-43f4-a8d4-ecbe34729bb3"
+BLE_PRINT_SVC_HINT = "49535343"          # prefiks service ISSC (Transparent UART)
+_BLE_PRINTER_HINTS = ("RPP", "POS58", "58MM", "MTP", "THERMAL", "PRINTER", "TSC")
+
+def _ble_escpos_bytes(text: str) -> bytes:
+    """Bangun byte ESC/POS teks: init + baris teks + feed + gunting kertas."""
+    data = bytearray()
+    data += b"\x1b\x40"                  # ESC @ init
+    for line in str(text).split("\n"):
+        data += line.encode("cp437", errors="replace") + b"\n"
+    data += b"\x1b\x64\x05"              # feed 5 baris
+    data += b"\x1d\x56\x42"              # GS V 66 — potong kertas
+    return bytes(data)
+
+def _ble_write_printer(addr: str, data: bytes):
+    """Tulis byte ESC/POS ke printer BLE (chunk sesuai MTU, tanpa response)."""
+    import asyncio
+    from bleak import BleakClient
+
+    async def _run():
+        async with BleakClient(addr, timeout=20) as client:
+            if not client.is_connected:
+                raise RuntimeError("BLE tidak terhubung")
+            mtu = client.mtu_size
+            chunk = max(20, min(500, mtu - 3))
+            for i in range(0, len(data), chunk):
+                await client.write_gatt_char(
+                    BLE_PRINT_RX_UUID, data[i:i + chunk], response=False)
+                await asyncio.sleep(0.02)
+
+    asyncio.run(_run())
+
+def _ble_find_printer(timeout: int = 6) -> str:
+    """Cari MAC printer BLE: 1) perangkat BLE ter-pair Windows, 2) pindai
+    iklan BLE. Return MAC 'AA:BB:...' atau ''."""
+    import re
+    import subprocess
+
+    # 1) Perangkat BLE ter-pair (Get-PnpDevice BTHLE) — dapat terlihat walau
+    #    tidak sedang mengiklankan.
+    try:
+        ps_cmd = ("powershell -NoProfile -Command "
+                  "\"Get-PnpDevice -PresentOnly -Class Bluetooth | "
+                  "Where-Object { $_.InstanceId -like 'BTHLE*' } | "
+                  "ForEach-Object { \\\"$($_.FriendlyName)`t$($_.InstanceId)\\\" }\"")
+        out = subprocess.run(ps_cmd, shell=True, capture_output=True, text=True,
+                             timeout=20, **subprocess_no_window_kwargs())
+        for line in (out.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            name, iid = (parts[0] or ""), (parts[1] or "")
+            if any(h in name.upper() for h in _BLE_PRINTER_HINTS):
+                m = re.search(r"BTHLE\\DEV_([0-9A-F]{12})", iid.upper())
+                if m:
+                    mac = ":".join(m.group(1)[i:i + 2] for i in range(0, 12, 2))
+                    return mac
+    except Exception:
+        pass
+
+    # 2) Pindai iklan BLE (fallback).
+    try:
+        from bleak import BleakScanner
+        import asyncio
+
+        async def _scan():
+            devs = await BleakScanner.discover(timeout=timeout)
+            for d in devs:
+                if not d.address:
+                    continue
+                nm = (d.name or "").upper()
+                if any(h in nm for h in _BLE_PRINTER_HINTS):
+                    return d.address
+                uuids = d.metadata.get("uuids") or []
+                if any(str(u).lower().startswith(BLE_PRINT_SVC_HINT) for u in uuids):
+                    return d.address
+            return ""
+
+        return asyncio.run(_scan())
+    except Exception:
+        return ""
+
 
 try:
     from cryptography.fernet import Fernet
@@ -1038,8 +1124,64 @@ def fmt_durasi(menit):
         return f"{jam} jam"
     return f"{sisa} menit"
 
+LOGO_RESIZE_MAX = 768  # 3x dari ukuran lama (256px) — logo di header web booking
+
+
+def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) -> str:
+    """Ubah file gambar jadi dataURL logo rental: <=768px (PNG, tetap transparan).
+    Bila melampaui 700KB base64 -> otomatis JPEG q85 (transparansi hilang)
+    supaya dokumen call_meta tetap di bawah limit 1MB Firestore."""
+    try:
+        import base64 as _b64
+        from PIL import Image as _PIL
+        from io import BytesIO as _Bio
+    except Exception as e:
+        if tampil_error and label_widget is not None:
+            try:
+                label_widget.configure(text=f"✖ Modul gambar: {e}")
+            except Exception:
+                pass
+        return ""
+    try:
+        img = _PIL.open(path)
+        img.load()
+        img = img.convert("RGBA")
+        img.thumbnail((LOGO_RESIZE_MAX, LOGO_RESIZE_MAX))
+        out = _Bio()
+        img.save(out, format="PNG", optimize=True)
+        b64 = _b64.b64encode(out.getvalue()).decode("ascii")
+        if len(b64) > 700000:
+            rgb = img.convert("RGB")
+            out2 = _Bio()
+            rgb.save(out2, format="JPEG", quality=85)
+            b64 = _b64.b64encode(out2.getvalue()).decode("ascii")
+            if label_widget is not None:
+                try:
+                    label_widget.configure(text=f"✔ Logo terpasang ({len(b64) // 1024} KB, JPEG)")
+                except Exception:
+                    pass
+            return "data:image/jpeg;base64," + b64
+        if label_widget is not None:
+            try:
+                label_widget.configure(text=f"✔ Logo terpasang ({len(b64) // 1024} KB)")
+            except Exception:
+                pass
+        return "data:image/png;base64," + b64
+    except Exception as e:
+        if label_widget is not None:
+            try:
+                label_widget.configure(text=f"✖ Gagal: {e}")
+            except Exception:
+                pass
+        if tampil_error:
+            try:
+                messagebox.showerror("Gagal", f"Gagal memproses gambar:\n{e}")
+            except Exception:
+                pass
+        return ""
+
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.7"
+APP_VERSION = "2.4.8"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -3498,6 +3640,18 @@ class LoginPage(ctk.CTkFrame):
                                         font=FONT_BODY)
         self.d_alamat.pack(fill="x", padx=14, pady=(0, 10))
 
+        self.d_logo_b64 = ""
+        logo_row = ctk.CTkFrame(profil_f, fg_color="transparent")
+        logo_row.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(logo_row, text="🖼 Logo Rental (opsional, tampil di halaman booking)",
+                     font=FONT_LABEL, text_color=C_MUTED, anchor="w").pack(anchor="w", pady=(0, 4))
+        self.lbl_logo_daftar = ctk.CTkLabel(logo_row, text="Belum ada logo",
+                                            font=FONT_SMALL, text_color=C_MUTED, anchor="w")
+        self.lbl_logo_daftar.pack(side="left", padx=(0, 10))
+        ctk.CTkButton(logo_row, text="📁 Pilih Gambar", width=120, height=30,
+                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                      command=lambda: self._daftar_pilih_logo()).pack(side="left")
+
         # Tombol dalam scroll
         btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
         btn_frame.pack(fill="x", pady=(12, 0))
@@ -3526,6 +3680,32 @@ class LoginPage(ctk.CTkFrame):
                           border_color=C_BORDER, font=FONT_BODY, height=34, **kw)
         e.pack(fill="x", padx=14, pady=(0, 6))
         return e
+
+    def _ambil_logo_b64(self, label_widget=None, tampil_error: bool = False) -> str:
+        """Pilih file gambar logo rental -> resize <=768px -> dataURL.
+        Return "" bila dibatalkan/gagal."""
+        try:
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+        try:
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="Pilih Logo Rental",
+                filetypes=[("Gambar", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                           ("Semua file", "*.*")],
+                parent=self)
+        except Exception as e:
+            if tampil_error:
+                messagebox.showerror("Gagal Buka Dialog", str(e), parent=self)
+            return ""
+        if not path:
+            return ""
+        return logo_gambar_b64(path, label_widget=label_widget, tampil_error=tampil_error)
+
+    def _daftar_pilih_logo(self):
+        self.d_logo_b64 = self._ambil_logo_b64(self.lbl_logo_daftar)
 
     def _submit_daftar(self):
         username     = sanitize_text(self.d_username.get()).lower()
@@ -3602,6 +3782,7 @@ class LoginPage(ctk.CTkFrame):
                     "email":          email,
                     "no_hp":          no_hp,
                     "alamat":         alamat,
+                    "logo":           getattr(self, "d_logo_b64", "") or "",
                     "tanggal_daftar": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 },
             },
@@ -4396,21 +4577,33 @@ class LoginPage(ctk.CTkFrame):
             self.lbl_kasir_status.configure(text="✖ Password salah.", text_color=C_RED)
 
     def _login_google(self):
-        # Aturan: login Google hanya 1x per hari (anti-spam auth ke Google/Firebase)
-        try:
-            if ConfigManager.get("google_login_date") == date.today().isoformat():
-                self.lbl_status.configure(
-                    text="✖ Login Google hanya 1x per hari — sudah login hari ini.",
-                    text_color=C_RED)
-                return
-        except Exception:
-            pass
+        # Aturan: login Google maksimal 10x per hari PER AKUN (per email).
+        # Counter dihitung setelah auth sukses di bawah.
         self.lbl_status.configure(text="⏳ Membuka browser untuk login Google...")
         self.update()
         auth = get_firebase_auth()
         ok, msg = auth.login_with_google()
         if ok:
             email = auth.get_email() or ""
+            # Batasan 10x/hari per akun Google (anti-spam auth ke Google/Firebase)
+            try:
+                limits = dict(ConfigManager.get("google_login_limits", {}) or {})
+                today = date.today().isoformat()
+                ent = limits.get(email) or {}
+                if not isinstance(ent, dict) or ent.get("date") != today:
+                    ent = {"date": today, "count": 0}
+                if int(ent.get("count", 0) or 0) >= 10:
+                    self.lbl_status.configure(
+                        text="✖ Batas login Google hari ini (10x) untuk akun ini tercapai.",
+                        text_color=C_RED)
+                    return
+                ent["count"] = int(ent.get("count", 0) or 0) + 1
+                limits[email] = ent
+                cfg = ConfigManager.load()
+                cfg["google_login_limits"] = limits
+                ConfigManager.save(cfg)
+            except Exception:
+                pass
             nama = auth.get_display_name() or ""
             self.lbl_status.configure(text="✅ Login Google berhasil", text_color=C_GREEN)
             uname = self._find_username_by_email(email)
@@ -4448,10 +4641,6 @@ class LoginPage(ctk.CTkFrame):
                 except Exception:
                     pass
             if uname:
-                try:
-                    ConfigManager.set("google_login_date", date.today().isoformat())
-                except Exception:
-                    pass
                 self.on_login_success(uname, "admin")
             else:
                 self._show_register_google_dialog(email, nama)
@@ -4540,7 +4729,6 @@ class LoginPage(ctk.CTkFrame):
                 }
                 cfg["profil_rental"] = profil
                 ConfigManager.save(cfg)
-                ConfigManager.set("google_login_date", date.today().isoformat())
                 # Sinkron email ke doc cloud agar login Gmail berikutnya langsung cocok
                 try:
                     from firestore_sync import FirestoreClient as _FC
@@ -5231,6 +5419,7 @@ class DialogPaket(ctk.CTkToplevel):
     def __init__(self, master, tv_label, on_confirm, paket_data, makanan_data, minuman_data, nama_grup="Reguler", for_warnet=False):
         self.for_warnet = for_warnet
         super().__init__(master)
+        self.app = master
         self.title(f"Paket & Pesanan — {tv_label}")
         self.geometry("460x620")  # Lebih kecil & compact
         self.configure(fg_color=C_BG)
@@ -5278,7 +5467,11 @@ class DialogPaket(ctk.CTkToplevel):
             scroll, "paket", paket_title,
             self._build_paket_content
         )
-        
+
+        # Grup booking online (hanya kartu TV — warnet tidak memakai)
+        if not getattr(self, 'for_warnet', False):
+            self._build_booking_section(scroll)
+
         # DISCOUNT section
         diskon_frame = ctk.CTkFrame(self, fg_color="transparent")
         diskon_frame.pack(fill="x", padx=12, pady=(4, 2))
@@ -5385,9 +5578,137 @@ class DialogPaket(ctk.CTkToplevel):
                 harga_txt = "Sesuai Durasi" if harga == 0 and menit == 0 else fmt_rp(harga)
                 durasi_txt = fmt_durasi(menit) if menit > 0 else "—"
             
-            ctk.CTkLabel(row, text=f"{harga_txt} • {durasi_txt}", font=FONT_LABEL,
+                ctk.CTkLabel(row, text=f"{harga_txt} • {durasi_txt}", font=FONT_LABEL,
                         text_color=C_MUTED).pack(side="right")
-    
+
+    # ── Booking online (kartu TV saja) ─────────────────────────────────────
+    def _build_booking_section(self, parent):
+        """Tombol daftar PAKET BOOKING + area hasil (collapse toggle)."""
+        self._booking_frame_shown = False
+        self._booking_btn = ctk.CTkButton(
+            parent, text="📅  PAKET BOOKING  (klik untuk buka)",
+            fg_color=C_PANEL, hover_color=C_CARD, height=36,
+            font=("Russo One", 10, "bold"), text_color=C_ORANGE,
+            command=self._toggle_booking)
+        self._booking_btn.pack(fill="x", padx=8, pady=(2, 0))
+        self._booking_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._booking_rows = []
+
+    def _toggle_booking(self):
+        if self._booking_frame_shown and self._booking_frame.winfo_manager():
+            self._booking_frame.pack_forget()
+            self._booking_frame_shown = False
+            self._booking_btn.configure(text="📅  PAKET BOOKING  (klik untuk buka)")
+            self._booking_rows = []
+            return
+        try:
+            kartu = self.app._qr_cari_kartu(self.tv_label)
+        except Exception:
+            kartu = None
+        if kartu is not None and not kartu.sesi_kosong():
+            messagebox.showwarning(
+                "Kartu Dipakai",
+                f"Kartu '{self.tv_label}' sedang dipakai sesi lain.\n"
+                "Selesaikan sesi dulu sebelum memakai booking online.",
+                parent=self)
+            return
+        self._booking_btn.configure(text="⏳  Memuat booking...")
+        try:
+            self.app._booking_fetch_valid(self.tv_label, self._render_booking)
+        except Exception:
+            self._booking_btn.configure(text="📅  PAKET BOOKING  (klik untuk buka)")
+
+    def _render_booking(self, rows):
+        for w in self._booking_frame.winfo_children():
+            w.destroy()
+        if not rows:
+            ctk.CTkLabel(self._booking_frame,
+                         text=f"Tidak ada booking aktif untuk {self.tv_label}.",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(fill="x", padx=14, pady=8)
+        else:
+            for b in rows:
+                try:
+                    self._build_booking_row(b)
+                except Exception:
+                    continue
+        self._booking_frame.pack(fill="x", padx=8, pady=(0, 4))
+        self._booking_frame_shown = True
+        self._booking_btn.configure(text="📅  TUTUP DAFTAR BOOKING")
+
+    def _build_booking_row(self, b):
+        did = str(b.get("_id", ""))
+        status_bayar = str(b.get("statusBayar", "") or "")
+        sb_txt, sb_col = self.app._booking_status_bayar(b)
+        row = ctk.CTkFrame(self._booking_frame, fg_color=C_CARD, corner_radius=6)
+        row.pack(fill="x", padx=6, pady=2)
+        info = f"{did[:8].upper()} • {b.get('namaPelanggan', '-')} • {b.get('jam', '')[:5]}"
+        ctk.CTkLabel(row, text=info, font=("Consolas", 9, "bold"),
+                     text_color=C_TEXT, anchor="w").pack(fill="x", padx=8, pady=(4, 0))
+        sub = (f"{b.get('paket', '')}  •  {fmt_rp(int(b.get('totalHarga', 0) or 0))}"
+               + (f"  ({sb_txt})" if sb_txt else ""))
+        ctk.CTkLabel(row, text=sub, font=FONT_SMALL,
+                     text_color=sb_col, anchor="w").pack(fill="x", padx=8, pady=(0, 3))
+        row.bind("<Button-1>", lambda e, bb=dict(b): self._mulai_booking(bb))
+        for w in row.winfo_children():
+            w.bind("<Button-1>", lambda e, bb=dict(b): self._mulai_booking(bb))
+
+    def _mulai_booking(self, b):
+        try:
+            kartu = self.app._qr_cari_kartu(self.tv_label)
+        except Exception:
+            kartu = None
+        if kartu is not None and not kartu.sesi_kosong():
+            messagebox.showwarning(
+                "Kartu Dipakai",
+                f"Kartu '{self.tv_label}' sudah dipakai sesi lain.",
+                parent=self)
+            return
+        grupk = str(b.get("grup", "") or "")
+        paket = str(b.get("paket", "") or "")
+        pmap = self.app.get_paket_data(grupk) if grupk else {}
+        if not isinstance(pmap, dict) or paket not in pmap:
+            messagebox.showerror("Paket Tidak Dikenal",
+                                 f"Paket '{paket}' tidak ada di grup '{grupk or '-'}'.",
+                                 parent=self)
+            return
+        info = pmap[paket]
+        harga = int((info.get("harga", 0) if isinstance(info, dict) else info) or 0)
+        menit = int((info.get("menit", 60) if isinstance(info, dict) else 60) or 60)
+        pesanan = {str(k): int(v or 0) for k, v in (b.get("pesanan") or {}).items()
+                   if int(v or 0) > 0}
+        all_menu = {**dict(self.app.menu_makanan), **dict(self.app.menu_minuman)}
+        total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+        metode = str(b.get("metode", "") or "")
+        sb = str(b.get("statusBayar", "") or "")
+        did = str(b.get("_id", ""))
+        try:
+            sb_info = self.app._booking_status_bayar(b)[0]
+        except Exception:
+            sb_info = ""
+        if not messagebox.askyesno(
+                "Mulai dari Booking",
+                f"Mulai sesi booking {did[:8].upper()}?\n"
+                f"{b.get('namaPelanggan', '-')} • {paket} • {fmt_rp(int(b.get('totalHarga', 0) or 0))}\n"
+                f"Metode: {metode or 'tempat'}"
+                + (f"\nStatus: {sb_info}" if sb_info else ""),
+                parent=self):
+            return
+        if metode == "lunas" or sb == "lunas_transfer":
+            self.on_confirm(paket, harga, menit, pesanan, total_pesanan,
+                            0, "nominal", True, booking=b)
+            self.destroy()
+        elif metode == "dp":
+            self.on_confirm(paket, harga, menit, pesanan, total_pesanan,
+                            0, "nominal", False, booking=b)
+            self.destroy()
+        else:
+            # Belum bayar (bayar di tempat) — langsung mulai dengan status
+            # TAGIHAN, TANPA popup konfirmasi pembayaran. Konfirmasi bayar
+            # hanya muncul saat sesi selesai (waktu habis / tombol Selesai).
+            self.on_confirm(paket, harga, menit, pesanan, total_pesanan,
+                            0, "nominal", False, booking=b)
+            self.destroy()
+
     def _build_menu_content(self, parent, menu_dict):
         """Build menu items (makanan/minuman) inside collapsible group."""
         cf = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=6)
@@ -5515,10 +5836,10 @@ class DialogPaket(ctk.CTkToplevel):
             messagebox.showerror("Error", f"Terjadi kesalahan: {str(e)}")
 
     def _lanjutkan_konfirmasi(self, paket_nm, paket_harga, paket_menit, pesanan,
-                              total_pesanan, diskoni, diskoni_mode, paid):
+                              total_pesanan, diskoni, diskoni_mode, paid, booking=None):
         """Setelah user memilih BAYAR / TAGIHAN, teruskan ke on_confirm."""
         self.on_confirm(paket_nm, paket_harga, paket_menit, pesanan,
-                        total_pesanan, diskoni, diskoni_mode, paid)
+                        total_pesanan, diskoni, diskoni_mode, paid, booking)
         print(f"[DEBUG] on_confirm dipanggil dengan paid={paid}")
         self.destroy()
 
@@ -6023,11 +6344,8 @@ class DialogQrKartu(ctk.CTkToplevel):
             ctk.CTkLabel(self, text="(Gagal membuat gambar QR)",
                          font=FONT_BODY, text_color=C_RED).pack(pady=20)
 
-        ctk.CTkLabel(self, text=url, font=("Courier New", 9),
-                     text_color=C_TEXT, wraplength=380, justify="center").pack(
-            padx=14, pady=(8, 2))
         ctk.CTkLabel(self, text="Pelanggan scan → pilih layanan/keluhan → kasir dapat notif",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 8))
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(8, 8))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=14, pady=(2, 4))
@@ -6408,7 +6726,7 @@ class DialogStatusClient(ctk.CTkToplevel):
                 pesan_akhir += f"\nVersi baru: v{versi}"
             _ui(lambda: self._upgrade_selesai(True, pesan_akhir))
         except Exception as e:
-            _ui(lambda: self._upgrade_selesai(False, str(e)))
+            _ui(lambda msg=str(e): self._upgrade_selesai(False, msg))
         finally:
             try:
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -6873,12 +7191,24 @@ class KartuTV(tk.Canvas):
 
         lunas_sub = min(lunas_sub, subtotal)
         if lunas_sub >= subtotal:
-            return total, 0
-        if lunas_sub <= 0:
-            return 0, total
-        # diskon proporsional terhadap subtotal lunas
-        lunas = round(total * lunas_sub / subtotal)
-        return lunas, max(0, total - lunas)
+            lunas_res = total
+        elif lunas_sub <= 0:
+            lunas_res = 0
+        else:
+            # diskon proporsional terhadap subtotal lunas
+            lunas_res = round(total * lunas_sub / subtotal)
+        lunas_res = min(lunas_res, total)
+        tagihan_res = max(0, total - lunas_res)
+        # DP booking: nominal yang sudah dibayar pelanggan via transfer tetap
+        # dihitung LUNAS walau item belum ditandai — tampil "bayar X / tagihan Y"
+        try:
+            dp_pre = int(getattr(self, "dp_bayar_awal", 0) or 0)
+        except Exception:
+            dp_pre = 0
+        if dp_pre > 0 and tagihan_res > 0:
+            lunas_res = min(total, max(lunas_res, dp_pre))
+            tagihan_res = max(0, total - lunas_res)
+        return lunas_res, tagihan_res
 
     def _hub(self):
         app = self.winfo_toplevel()
@@ -7505,7 +7835,7 @@ class KartuTV(tk.Canvas):
                     True, f"TV: {self.label_tv}\n{os.path.basename(path)}\n"
                           f"→ {os.path.basename(filename)}\n({ket})"))
             except Exception as e:
-                app.after(0, lambda: selesai(False, str(e)))
+                app.after(0, lambda msg=str(e): selesai(False, msg))
             finally:
                 try:
                     if os.path.isfile(tmp_out):
@@ -7789,7 +8119,8 @@ class KartuTV(tk.Canvas):
                     item_id = self._last_transaction_item
                 if idx < len(app.riwayat_transaksi):
                     waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
-                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua, paid=self.paid)
+                    _bkid = app.riwayat_meta[idx].get("booking_id") if idx < len(app.riwayat_meta) else None
+                    updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_semua, paid=self.paid, booking_id=_bkid)
                     app.riwayat_transaksi[idx] = updated_row
                     if item_id is not None and app.tree.exists(item_id):
                         app.tree.item(item_id, values=updated_row)
@@ -7829,7 +8160,7 @@ class KartuTV(tk.Canvas):
         except Exception:
             pass
 
-    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True):
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True, booking=None):
         app = self.winfo_toplevel()
         # Validasi stok makanan/minuman sebelum paket+pesanan diterima
         if pesanan and hasattr(app, '_stok_validate_orders'):
@@ -7843,6 +8174,20 @@ class KartuTV(tk.Canvas):
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
 
+        # Status pembayaran sesi DIAMBIL DARI DOKUMEN BOOKING (bukan input
+        # manual): lunas/lunas_transfer → LUNAS penuh; dp → bayar sejumlah DP
+        # + tagihan sisa; biasa → mengikuti pilihan kasir (DialogKonfirmasiBayar).
+        if booking is not None:
+            try:
+                _b_metode = str(booking.get("metode", "") or "")
+                _b_sb = str(booking.get("statusBayar", "") or "")
+                if (_b_metode == "lunas") or (_b_sb == "lunas_transfer"):
+                    paid = True
+                else:
+                    paid = False
+            except Exception:
+                pass
+
         if not previous_session:
             # Sesi baru: reset pesanan dan biaya
             self.daftar_paket_sesi = [paket_nm]
@@ -7852,6 +8197,13 @@ class KartuTV(tk.Canvas):
             all_menu = {**self.get_makanan_data(), **self.get_minuman_data()}
             self.lunas_pesanan = {nm: paid for nm in pesanan}
             self.biaya_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            # DP booking: nominal yang sudah dibayar pelanggan via transfer
+            self.dp_bayar_awal = 0
+            if booking is not None:
+                try:
+                    self.dp_bayar_awal = int(booking.get("nominalDp", 0) or 0)
+                except Exception:
+                    self.dp_bayar_awal = 0
         else:
             # Tambah paket ke sesi aktif: pertahankan pesanan lama, merge pesanan baru (jika ada)
             self.daftar_paket_sesi.append(paket_nm)
@@ -7925,7 +8277,8 @@ class KartuTV(tk.Canvas):
                         item_id = self._last_transaction_item
                     if idx < len(app.riwayat_transaksi):
                         waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
-                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid)
+                        _bkid2 = app.riwayat_meta[idx].get("booking_id") if idx < len(app.riwayat_meta) else None
+                        updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_int, paid=self.paid, booking_id=_bkid2)
                         app.riwayat_transaksi[idx] = updated_row
                         if item_id is not None and app.tree.exists(item_id):
                             app.tree.item(item_id, values=updated_row)
@@ -7953,9 +8306,72 @@ class KartuTV(tk.Canvas):
                         app._save_riwayat()
             else:
                 total_int_baru = self._total_setelah_diskon(self.paket_harga_tetap + total_pesanan)
-                self._last_transaction_item = self.on_transaksi(
-                    self.label_tv, paket_nm, pesanan, total_int_baru, paid=paid)
-                self._bind_last_transaction()
+                if booking is not None:
+                    # Mulai dari booking: link ke baris riwayat yang sudah dicatat
+                    # saat konfirmasi (tanpa membuat baris baru / dobel bayar).
+                    idx_b = -1
+                    try:
+                        idx_b = app._riwayat_idx_by_booking(str(booking.get("_id", "") or ""))
+                    except Exception:
+                        idx_b = -1
+                    if idx_b >= 0:
+                        self._last_riwayat_idx = idx_b
+                        self._last_transaction_item = app._tree_item_for_idx(idx_b)
+                        try:
+                            self._last_cloud_id = app.riwayat_meta[idx_b].get("cloud_id")
+                        except Exception:
+                            self._last_cloud_id = None
+                        if idx_b < len(app.riwayat_transaksi):
+                            waktu_b = (app.riwayat_transaksi[idx_b][0]
+                                       if len(app.riwayat_transaksi[idx_b]) > 0
+                                       else datetime.now().strftime("%Y-%m-%d %H:%M"))
+                            updated_row = app._format_riwayat_row(
+                                waktu_b, self.label_tv, self.paket_aktif,
+                                self.pesanan_aktif, total_int_baru, paid=paid,
+                                booking_id=str(booking.get("_id", "") or ""))
+                            app.riwayat_transaksi[idx_b] = updated_row
+                            item_b = app._tree_item_for_idx(idx_b)
+                            if item_b is not None and app.tree.exists(item_b):
+                                app.tree.item(item_b, values=updated_row)
+                            try:
+                                bmenu = {**app.menu_makanan, **app.menu_minuman}
+                                pesanan_total_b = sum(
+                                    bmenu.get(nm, 0) * qty for nm, qty in self.pesanan_aktif.items())
+                                paket_harga_b = max(0, total_int_baru - pesanan_total_b)
+                                if idx_b < len(app.riwayat_meta):
+                                    app.riwayat_meta[idx_b]['paket_harga'] = paket_harga_b
+                                    app.riwayat_meta[idx_b]['pesanan_total'] = pesanan_total_b
+                                    app.riwayat_meta[idx_b]['total'] = total_int_baru
+                                    app.riwayat_meta[idx_b]['diskoni'] = self.diskoni
+                                    app.riwayat_meta[idx_b]['diskoni_mode'] = self.diskoni_mode
+                                    app.riwayat_meta[idx_b]['pesanan'] = {
+                                        str(k): int(v) for k, v in self.pesanan_aktif.items()}
+                                    threading.Thread(
+                                        target=app._upsert_tx_cloud_from_index,
+                                        args=(idx_b,), daemon=True).start()
+                            except Exception:
+                                pass
+                            if hasattr(app, '_refresh_riwayat_summary'):
+                                app._refresh_riwayat_summary()
+                            if hasattr(app, '_save_riwayat'):
+                                app._save_riwayat()
+                    else:
+                        # Baris konfirmasi tidak ada (mis. riwayat dibersihkan) — catat baru
+                        self._last_transaction_item = self.on_transaksi(
+                            self.label_tv, paket_nm, pesanan, total_int_baru, paid=paid,
+                            booking_meta={
+                                "booking_id": str(booking.get("_id", "") or ""),
+                                "kode": str(booking.get("_id", "") or "")[:8].upper(),
+                                "metode": str(booking.get("metode", "") or ""),
+                                "status_bayar": str(booking.get("statusBayar", "") or ""),
+                                "pelanggan": str(booking.get("namaPelanggan", "") or ""),
+                                "no_hp": str(booking.get("noHp", "") or ""),
+                            })
+                        self._bind_last_transaction()
+                else:
+                    self._last_transaction_item = self.on_transaksi(
+                        self.label_tv, paket_nm, pesanan, total_int_baru, paid=paid)
+                    self._bind_last_transaction()
         else:
             self._last_transaction_item = None
             self._last_riwayat_idx = None
@@ -7996,6 +8412,32 @@ class KartuTV(tk.Canvas):
                 app._stok_terapkan(delta)
         except Exception:
             pass
+
+        # Tandai booking online selesai dipakai (tidak muncul lagi di daftar)
+        if booking is not None:
+            try:
+                bid_m = str(booking.get("_id", "") or "")
+                if bid_m:
+                    def _tandai_dimulai():
+                        try:
+                            from firestore_sync import get_firestore_client
+                            get_firestore_client().set_document(
+                                f"bookings/{bid_m}",
+                                {"sesiDimulai": True,
+                                 "sesiDimulaiAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                                merge=True)
+                        except Exception:
+                            pass
+                    threading.Thread(target=_tandai_dimulai, daemon=True).start()
+            except Exception:
+                pass
+
+        # Popup cetak struk setelah sesi baru dimulai (konfirmasi pembayaran)
+        if not previous_session:
+            try:
+                self._buka_print_struk(self._trans_struk())
+            except Exception:
+                pass
 
     # ── Timer paket berwaktu (mundur) ───────────────────────────────────────
     # Decrement sisa_waktu kini dikelola TimerService (thread background);
@@ -8078,7 +8520,8 @@ class KartuTV(tk.Canvas):
                 item_id = self._last_transaction_item
             if idx < len(app.riwayat_transaksi):
                 waktu = app.riwayat_transaksi[idx][0] if len(app.riwayat_transaksi[idx]) > 0 else datetime.now().strftime("%Y-%m-%d %H:%M")
-                updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid)
+                _bkid3 = app.riwayat_meta[idx].get("booking_id") if idx < len(app.riwayat_meta) else None
+                updated_row = app._format_riwayat_row(waktu, self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir, paid=self.paid, booking_id=_bkid3)
                 app.riwayat_transaksi[idx] = updated_row
                 if item_id is not None and app.tree.exists(item_id):
                     app.tree.item(item_id, values=updated_row)
@@ -8205,9 +8648,33 @@ class KartuTV(tk.Canvas):
     def _akhir_sesi_tanpa_tagih(self):
         """Tutup sesi: unlock TV, sleep 2 dtk, reset kartu."""
         print(f"[TV TIMER] {self.label_tv}: dialog kasir OK -> UNLOCK + sleep 2dtk")
+        trans = self._trans_struk()
         self._ws_send_stop()
         self._tv_sleep_now(2, alasan="Waktu habis - kasir klik OK (sleep 2 dtk)")
         self._reset_sesi()
+        self._buka_print_struk(trans)
+
+    def _trans_struk(self):
+        """Data transaksi untuk popup cetak struk (panggil SEBELUM sesi direset)."""
+        try:
+            menit = self._total_menit_terpakai() or 0
+        except Exception:
+            menit = self.menit_dipakai_awal
+        return {
+            "pc": getattr(self, "label_tv", None) or "-",
+            "paket": self.paket_aktif or "Main Bebas",
+            "menit": int(menit or 0),
+            "harga": int(self._total_setelah_diskon() or 0),
+        }
+
+    def _buka_print_struk(self, trans):
+        """Buka popup cetak struk di window utama (app._print_receipt)."""
+        try:
+            app = self.winfo_toplevel()
+            if hasattr(app, "_print_receipt"):
+                app._print_receipt(trans)
+        except Exception as e:
+            print(f"[CETAK] gagal buka popup struk {self.label_tv}: {e}")
 
     # ── Pause/Resume timer untuk virtual scroll ────────────────────────────
     def _pause_timer(self):
@@ -8314,9 +8781,11 @@ class KartuTV(tk.Canvas):
         if paid:
             self.itemconfig(self._ids['lbl_timer'], text="SELESAI \u23f9", fill=C_MUTED)
             self.itemconfig(self._ids['lbl_estimasi'], text="")
+            trans = self._trans_struk()
             self._ws_send_stop()
             self._tv_sleep_now(2, alasan="Kasir klik SELESAI (sleep 2 dtk)")
             self._reset_sesi()
+            self._buka_print_struk(trans)
 
     def _reset_sesi(self):
         if self._timer_job:
@@ -9043,7 +9512,7 @@ class KartuWarnet(tk.Canvas):
         except Exception:
             pass
 
-    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True):
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True, booking=None):
         app = self.winfo_toplevel()
         # Validasi stok makanan/minuman sebelum paket+pesanan diterima
         if pesanan and hasattr(app, '_stok_validate_orders'):
@@ -9211,6 +9680,13 @@ class KartuWarnet(tk.Canvas):
         except Exception:
             pass
 
+        # Popup cetak struk setelah sesi baru dimulai (konfirmasi pembayaran)
+        if not previous_session:
+            try:
+                self._buka_print_struk(self._trans_struk())
+            except Exception:
+                pass
+
     def _tick_waktu(self):
         if self._timer_paused:
             return
@@ -9345,20 +9821,41 @@ class KartuWarnet(tk.Canvas):
                         f"Sudah terbayar (LUNAS): {fmt_rp(lunas_now)}",
             ).lift()
         else:
+            trans = self._trans_struk()
             self._reset_sesi()
+            self._buka_print_struk(trans)
 
     def _warnet_akhir_sesi_setelah_konfirmasi(self, paid):
         """Konfirmasi tagihan sesi habis warnet: BAYAR -> riwayat lunas;
         TAGIHAN -> isi nama & no HP pelanggan, riwayat tetap belum lunas."""
         if paid:
             self._set_paid(True)
+            trans = self._trans_struk()
+            self._reset_sesi()
+            self._buka_print_struk(trans)
         else:
             DialogPelangganAkhir(
                 self.winfo_toplevel(),
                 lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
             ).lift()
-            return
-        self._reset_sesi()
+
+    def _trans_struk(self):
+        """Data transaksi untuk popup cetak struk (panggil SEBELUM sesi direset)."""
+        return {
+            "pc": getattr(self, "label_kursi", None) or "-",
+            "paket": self.paket_aktif or "Main Bebas",
+            "menit": int(getattr(self, "menit_dipakai_awal", 0) or 0),
+            "harga": int(self._total_setelah_diskon() or 0),
+        }
+
+    def _buka_print_struk(self, trans):
+        """Buka popup cetak struk di window utama (app._print_receipt)."""
+        try:
+            app = self.winfo_toplevel()
+            if hasattr(app, "_print_receipt"):
+                app._print_receipt(trans)
+        except Exception as e:
+            print(f"[CETAK] gagal buka popup struk {self.label_kursi}: {e}")
 
     def _simpan_pelanggan_tagihan(self, nama, hp):
         """Catat nama & no HP pelanggan (kasus TAGIHAN) ke baris riwayat."""
@@ -9380,7 +9877,9 @@ class KartuWarnet(tk.Canvas):
                     app._set_transaksi_paid_idx(idx, False)
         except Exception as e:
             print(f"[TAGIHAN] Gagal simpan pelanggan {self.label_kursi}: {e}")
+        trans = self._trans_struk()
         self._reset_sesi()
+        self._buka_print_struk(trans)
 
     def _pause_timer(self):
         self._timer_paused = True
@@ -9463,7 +9962,9 @@ class KartuWarnet(tk.Canvas):
         TAGIHAN -> dialog data pelanggan; lalu tutup sesi."""
         if paid:
             self._set_paid(True)
+            trans = self._trans_struk()
             self._warnet_tutup_sesi_final()
+            self._buka_print_struk(trans)
         else:
             DialogPelangganAkhir(
                 self.winfo_toplevel(),
@@ -10074,6 +10575,61 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             print(f"[MEDIA] set media default gagal: {e}")
 
+    def _ambil_logo_b64(self, label_widget=None, tampil_error: bool = False) -> str:
+        """Pilih file gambar logo rental -> resize <=768px -> dataURL.
+        Return "" bila dibatalkan/gagal (versi AutoRentApp)."""
+        try:
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+        try:
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="Pilih Logo Rental",
+                filetypes=[("Gambar", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                           ("Semua file", "*.*")],
+                parent=self)
+        except Exception as e:
+            if tampil_error:
+                messagebox.showerror("Gagal Buka Dialog", str(e), parent=self)
+            return ""
+        if not path:
+            return ""
+        return logo_gambar_b64(path, label_widget=label_widget, tampil_error=tampil_error)
+
+    def _profil_pilih_logo(self, logo_box: dict, label_widget):
+        b64 = self._ambil_logo_b64(label_widget, tampil_error=True)
+        if b64:
+            logo_box["b64"] = b64
+            try:
+                label_widget.configure(text="✔ Logo terpasang", text_color=C_GREEN)
+            except Exception:
+                pass
+
+    def _profil_hapus_logo(self, logo_box: dict, label_widget):
+        logo_box["b64"] = ""
+        try:
+            label_widget.configure(text="Belum ada logo", text_color=C_MUTED)
+        except Exception:
+            pass
+
+    def _profil_pilih_qr(self, qr_box: dict, label_widget):
+        b64 = self._ambil_logo_b64(label_widget, tampil_error=True)
+        if b64:
+            qr_box["b64"] = b64
+            try:
+                label_widget.configure(text="✔ QR pembayaran terpasang", text_color=C_GREEN)
+            except Exception:
+                pass
+
+    def _profil_hapus_qr(self, qr_box: dict, label_widget):
+        qr_box["b64"] = ""
+        try:
+            label_widget.configure(text="Belum ada QR pembayaran", text_color=C_MUTED)
+        except Exception:
+            pass
+
     def _simpan_profil_rental(self, data: dict) -> None:
         """Simpan profil rental user aktif; LIFETIME -> broadcast UPDATE_RENTAL
         ke semua TV (popup kanan atas). Non-LIFETIME -> tersimpan tapi TV
@@ -10271,6 +10827,7 @@ class AutoRentApp(ctk.CTk):
         # dikembalikan). Best-effort: di-throttle otomatis saat 429.
         try:
             import time as _t
+            from firestore_sync import get_firestore_client
             fs = get_firestore_client()
             potong = _t.time() - 86400
             for koleksi, field_ts in (("calls", "ts"), ("qr_sessions", "created")):
@@ -10309,6 +10866,17 @@ class AutoRentApp(ctk.CTk):
             self._qr_log("PinPoller dimulai (qr_sessions, order created DESC)")
         except Exception as e:
             self._qr_log(f"PinPoller gagal start: {e}")
+        # Booking Online (website /b/<user>) — booking baru milik user ini ->
+        # popup kasir + bukti DP; status diubah lewat tombol Konfirmasi/Tolak.
+        try:
+            from firestore_sync import CallPoller
+            self._booking_seen = set()
+            self._booking_poller = CallPoller(collection="bookings", interval=8.0,
+                                              limit=15, order_field="createdAt")
+            self._booking_poller.start(self._qr_booking_masuk)
+            self._qr_log("BookingPoller dimulai (bookings, order createdAt DESC)")
+        except Exception as e:
+            self._qr_log(f"BookingPoller gagal start: {e}")
 
     def _stop_call_poller(self):
         p = getattr(self, "_call_poller", None)
@@ -10335,6 +10903,13 @@ class AutoRentApp(ctk.CTk):
             pass
         self._pin_actif = {}
         self._pin_hide_last = {}
+        p = getattr(self, "_booking_poller", None)
+        if p:
+            try:
+                p.stop()
+            except Exception:
+                pass
+        self._booking_poller = None
 
     # ── PIN Sesi QR ──────────────────────────────────────────────────────────
     _PIN_HURUF = "ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -10659,6 +11234,117 @@ class AutoRentApp(ctk.CTk):
                     return k
         return None
 
+    def _logo_rental_b64(self) -> str:
+        """Logo rental user aktif (dataURL PNG) untuk call_meta — kosong bila
+        belum dipasang. Dipakai halaman booking online (header & status)."""
+        try:
+            cfg = ConfigManager.load()
+            uname = getattr(self, "current_user", None) or ""
+            profil = cfg.get("profil_rental", {}) or {}
+            if isinstance(profil, dict) and isinstance(profil.get(uname), dict):
+                logo = profil[uname].get("logo") or ""
+                if isinstance(logo, str) and logo.startswith("data:image/"):
+                    return logo
+        except Exception:
+            pass
+        return ""
+
+    def _get_daftar_tv_nama(self) -> list:
+        """Nama kartu TV dari config — daftar perangkat di halaman booking web."""
+        daftar = []
+        try:
+            cfg = ConfigManager.load()
+            tvs = cfg.get("daftar_tv", []) or []
+            if isinstance(tvs, list):
+                for t in tvs:
+                    if isinstance(t, dict):
+                        nama = str(t.get("nama", "")).strip()
+                        if nama:
+                            daftar.append(nama)
+        except Exception:
+            pass
+        return daftar
+
+    def _booking_push_tv_status(self):
+        """Push status TV (aktif/tidak) + daftar perangkat (TV & PC warnet,
+        lengkap dengan grup tarif) ke call_meta tiap 8 dtk — halaman booking
+        web menampilkan kartu perangkat dengan status realtime."""
+        def worker():
+            try:
+                from firestore_sync import FirestoreClient
+                owner = self._resolve_license_user()
+                if not owner:
+                    return
+                tv_status = {}
+                for kartu in list(getattr(self, "_semua_kartu_tv", []) or []):
+                    try:
+                        aktif = (bool(getattr(kartu, "paket_aktif", None))
+                                 and getattr(kartu, "sisa_waktu", 0) > 0
+                                 and not getattr(kartu, "_timer_paused", False)
+                                 and not getattr(kartu, "_billing_paused", False))
+                        tv_status[str(getattr(kartu, "label_tv", ""))] = {
+                            "aktif": bool(aktif),
+                            "paket": str(getattr(kartu, "paket_aktif", "") or "-") if aktif else "",
+                        }
+                    except Exception:
+                        continue
+                devices = {"TV": [], "PC": []}
+                try:
+                    cfg = ConfigManager.load()
+                    tvs = cfg.get("daftar_tv", []) or []
+                    if isinstance(tvs, list):
+                        for t in tvs:
+                            if not isinstance(t, dict):
+                                continue
+                            nama = str(t.get("nama", "")).strip()
+                            if not nama:
+                                continue
+                            st = tv_status.get(nama, {}) or {}
+                            devices["TV"].append({
+                                "nama": nama,
+                                "grup": str(t.get("nama_grup", "") or "Reguler"),
+                                "aktif": bool(st.get("aktif", False)),
+                                "paket": str(st.get("paket", "") or ""),
+                            })
+                except Exception:
+                    pass
+                try:
+                    for kursi in list(getattr(self, "_semua_kartu_warnet", []) or []):
+                        try:
+                            nama_k = str(getattr(kursi, "label_kursi", "") or "")
+                            if not nama_k:
+                                continue
+                            aktif = (bool(getattr(kursi, "paket_aktif", None))
+                                     and getattr(kursi, "sisa_waktu", 0) > 0
+                                     and not getattr(kursi, "_timer_paused", False))
+                            devices["PC"].append({
+                                "nama": nama_k,
+                                "grup": str(getattr(kursi, "nama_grup", "") or "Reguler"),
+                                "aktif": bool(aktif),
+                                "paket": str(getattr(kursi, "paket_aktif", "") or "") if aktif else "",
+                            })
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                FirestoreClient().set_document(
+                    f"call_meta/{owner}",
+                    {"tv_status": tv_status,
+                     "devices": devices,
+                     "daftar_tv": self._get_daftar_tv_nama(),
+                     "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                    merge=True)
+            except Exception as e:
+                print(f"[BOOKING] push tv_status gagal: {e}")
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            self.after(8000, self._booking_push_tv_status)
+        except Exception:
+            pass
+
     def _qr_panggilan_masuk(self, doc: dict):
         """Dipanggil thread CallPoller — validasi, simpan ke riwayat lokal
         (SEBELUM dokumen dihapus), lalu tampilkan di main thread.
@@ -10720,6 +11406,315 @@ class AutoRentApp(ctk.CTk):
             self.after(0, lambda p=payload: self._qr_tampil_panggilan(p))
         except Exception as e:
             self._qr_log(f"panggilan masuk error: {e}")
+
+    def _qr_booking_masuk(self, doc: dict):
+        """Dipanggil thread BookingPoller — validasi milik user ini & status
+        'baru', lalu tampilkan popup kasir di main thread."""
+        try:
+            did = str(doc.get("_id", ""))
+            if not did or did in getattr(self, "_booking_seen", set()):
+                return
+            if str(doc.get("status", "")) != "baru":
+                return
+            owner_b = str(doc.get("owner", "")).strip().lower()
+            uname = (getattr(self, "current_user", None) or "").strip().lower()
+            if not uname or owner_b != uname:
+                return  # booking milik rental lain
+            self._booking_seen.add(did)
+            self._qr_log(f"booking masuk: {did} {str(doc.get('namaPelanggan', ''))} "
+                         f"{str(doc.get('perangkat', ''))} "
+                         f"metode={str(doc.get('metode', ''))} "
+                         f"bukti={'ada' if doc.get('bukti') else '-'}")
+            self.after(0, lambda d=dict(doc): self._qr_tampil_booking(d))
+        except Exception as e:
+            self._qr_log(f"booking masuk error: {e}")
+
+    def _qr_tampil_booking(self, d: dict, bunyi: bool = True):
+        """Popup detail booking (baru masuk / klik dari tab Booking): data per
+        kode + Lihat Bukti + Konfirmasi / Tolak. Hasil ditulis balik ke Firestore."""
+        did = str(d.get("_id", ""))
+        from tkinter import simpledialog
+        win = ctk.CTkToplevel(self)
+        win.title("📅 Booking Online")
+        win.geometry("440x600")
+        win.attributes("-topmost", True)
+        win.transient(self)
+        try:
+            win.after(100, lambda: win.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        ctk.CTkLabel(win, text="📅 Booking Baru", font=("Russo One", 15, "bold"),
+                     text_color=C_ACCENT2).pack(pady=(14, 4))
+        sub = f"{str(d.get('namaPelanggan', '-'))} • {str(d.get('perangkat', '-'))}"
+        ctk.CTkLabel(win, text=sub, font=FONT_SUB, text_color=C_TEXT).pack(pady=(0, 8))
+
+        # Body scrollable: detail panjang (pesanan banyak / catatan) TIDAK
+        # boleh menutupi tombol Konfirmasi / Tolak / Lihat Bukti.
+        body = ctk.CTkScrollableFrame(win, fg_color=C_PANEL, corner_radius=10)
+        body.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+        rows = [
+            ("Kode", did[:8].upper()),
+            ("Nama", str(d.get("namaPelanggan", "-"))),
+            ("WhatsApp", str(d.get("noHp", "-"))),
+            ("Perangkat", str(d.get("perangkat", "-"))),
+            ("Paket", f"{d.get('grup', '')} → {d.get('paket', '')}"),
+            ("Mulai", f"{d.get('tanggal', '')} {d.get('jam', '')}"),
+            ("Total", f"Rp {int(d.get('totalHarga', 0) or 0):,}"),
+            ("Metode", {"lunas": "Lunas (transfer penuh)", "dp": "DP (transfer sebagian)"}
+             .get(str(d.get("metode", "")), "Bayar di tempat")),
+        ]
+        sb = str(d.get("statusBayar", "") or "")
+        if sb == "lunas_transfer":
+            rows.append(("Status Bayar", "✅ LUNAS VIA TRANSFER"))
+            nom_t = int(d.get("nominalTransfer", 0) or 0)
+            if nom_t:
+                rows.append(("Ditransfer", f"Rp {nom_t:,}"))
+        elif sb == "dp":
+            dpn = int(d.get("nominalDp", 0) or 0)
+            sisa = int(d.get("sisaBayar", 0) or 0)
+            rows.append(("Status Bayar", f"💸 TAGIHAN SISA — Rp {sisa:,}"))
+            if dpn:
+                rows.append(("DP Dibayar", f"Rp {dpn:,}  (sisa Rp {sisa:,})"))
+        else:
+            rows.append(("Status Bayar", "⏳ BELUM BAYAR (bayar di tempat)"))
+        if d.get("metode") in ("dp", "lunas"):
+            try:
+                pus = (ConfigManager.load().get("profil_rental", {}) or {}).get(self.current_user, {}) or {}
+                if isinstance(pus, dict):
+                    nama_dana = str(pus.get("nama_dana", "") or "").strip()
+                    no_dana = str(pus.get("no_dana", "") or "").strip()
+                    if no_dana or nama_dana:
+                        rows.append(("DANA", f"{nama_dana} — {no_dana}" if nama_dana else no_dana))
+            except Exception:
+                pass
+        pesanan = d.get("pesanan") or {}
+        if isinstance(pesanan, dict) and pesanan:
+            try:
+                mkd = {**dict(getattr(self, "menu_makanan", {}) or {}),
+                       **dict(getattr(self, "menu_minuman", {}) or {})}
+                txt = ", ".join(f"{nm} x{q}" for nm, q in pesanan.items() if int(q or 0) > 0)
+                harga_p = sum(int(mkd.get(nm, 0) or 0) * int(q or 0) for nm, q in pesanan.items() if int(q or 0) > 0)
+                if txt:
+                    rows.append(("Pesanan", txt))
+                    rows.append(("+Pesanan", f"Rp {harga_p:,}"))
+            except Exception:
+                pass
+        for label, value in rows:
+            r = ctk.CTkFrame(body, fg_color="transparent")
+            r.pack(fill="x", padx=14, pady=3)
+            ctk.CTkLabel(r, text=label, width=90, anchor="w",
+                         font=FONT_LABEL, text_color=C_MUTED).pack(side="left")
+            ctk.CTkLabel(r, text=str(value), anchor="w",
+                         font=FONT_BODY, text_color=C_TEXT).pack(side="left", expand=True, fill="x")
+        catatan = str(d.get("catatan", "") or "")
+        if catatan:
+            ctk.CTkLabel(body, text="Catatan: " + catatan, wraplength=350,
+                         font=FONT_SMALL, text_color=C_MUTED,
+                         anchor="w", justify="left").pack(fill="x", padx=14, pady=(2, 10))
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=18, pady=(0, 14))
+        label_state = ctk.CTkLabel(win, text="", font=FONT_SMALL, text_color=C_MUTED)
+        label_state.pack(pady=(0, 8))
+
+        st_sekarang = str(d.get("status", "") or "")
+        btns_all = []
+
+        def buka_bukti():
+            bukti = str(d.get("bukti", "") or "")
+            if not bukti.startswith("data:image/"):
+                messagebox.showinfo("Tidak Ada", "Tidak ada bukti transfer pada booking ini.", parent=win)
+                return
+            try:
+                import base64 as _b64
+                folder = app_path("invoices_bukti")
+                os.makedirs(folder, exist_ok=True)
+                raw = bukti.split(",", 1)[1]
+                ext = "png" if "image/png" in bukti else "jpg"
+                path = os.path.join(folder, f"booking_bukti_{did}.{ext}")
+                with open(path, "wb") as f:
+                    f.write(_b64.b64decode(raw))
+                os.startfile(path)
+            except Exception as e:
+                messagebox.showerror("Gagal", f"Gagal membuka bukti:\n{e}", parent=win)
+
+        def _simpan(patch: dict, ok_msg: str, err_msg: str, after_ok=None):
+            for b in btns_all:
+                try:
+                    b.configure(state="disabled")
+                except Exception:
+                    pass
+            try:
+                label_state.configure(text="⏳ Menyimpan...", text_color=C_MUTED)
+            except Exception:
+                pass
+
+            def worker():
+                ok = False
+                try:
+                    from firestore_sync import get_firestore_client
+                    ok = get_firestore_client().set_document(f"bookings/{did}", patch, merge=True)
+                except Exception as e:
+                    self._qr_log(f"booking {did} update gagal: {e}")
+
+                def done():
+                    if ok:
+                        try:
+                            label_state.configure(text=ok_msg, text_color=C_GREEN)
+                        except Exception:
+                            pass
+                        self._qr_log(f"booking {did} -> {patch.get('status')}")
+                        if after_ok is not None:
+                            try:
+                                after_ok()
+                            except Exception:
+                                pass
+                        try:
+                            win.after(700, win.destroy)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            label_state.configure(text=err_msg, text_color=C_RED)
+                            for b in btns_all:
+                                b.configure(state="normal")
+                        except Exception:
+                            pass
+
+                try:
+                    self.after(0, done)
+                except Exception:
+                    pass
+
+            try:
+                threading.Thread(target=worker, daemon=True).start()
+            except Exception:
+                pass
+
+        def konfirmasi():
+            _simpan({"status": "dikonfirmasi", "kasir": str(getattr(self, "current_user", "")),
+                     "alasan": "", "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                    "✅ Booking dikonfirmasi", "✖ Gagal menyimpan — cek internet",
+                    after_ok=konfirmasi_after_ok)
+
+        def konfirmasi_after_ok():
+            """Setelah status jadi dikonfirmasi — catat ke riwayat kas langsung
+            (anti-curang: kasir tidak bisa menerima booking tanpa mencatat)."""
+            if self._riwayat_idx_by_booking(did) >= 0:
+                return
+            try:
+                perangkat = str(d.get("perangkat", "") or "").strip()
+                if not perangkat:
+                    return
+                pesanan = {str(k): int(v or 0) for k, v in (d.get("pesanan") or {}).items()
+                           if int(v or 0) > 0}
+                total = int(d.get("totalHarga", 0) or 0)
+                metode = str(d.get("metode", "") or "")
+                sb = str(d.get("statusBayar", "") or "")
+                paid_awal = (metode == "lunas") or (sb == "lunas_transfer")
+                self._catat_transaksi(
+                    perangkat,
+                    str(d.get("paket", "") or ""),
+                    pesanan,
+                    total,
+                    source="tv",
+                    paid=paid_awal,
+                    booking_meta={
+                        "booking_id": did,
+                        "kode": did[:8].upper(),
+                        "metode": metode,
+                        "status_bayar": sb,
+                        "pelanggan": str(d.get("namaPelanggan", "") or ""),
+                        "no_hp": str(d.get("noHp", "") or ""),
+                    })
+                try:
+                    self._booking_riwayat_refresh()
+                except Exception:
+                    pass
+            except Exception as e:
+                self._qr_log(f"catat transaksi booking {did} gagal: {e}")
+
+        def lunas_sisa():
+            sisa = int(d.get("sisaBayar", 0) or 0)
+            dpn = int(d.get("nominalDp", 0) or 0)
+            total = int(d.get("totalHarga", 0) or 0)
+            if not messagebox.askyesno(
+                    "Lunas Sisa",
+                    f"Tandai sisa Rp {sisa:,} dari total Rp {total:,} sebagai LUNAS?\n"
+                    f"(DP Rp {dpn:,} + sisa Rp {sisa:,})",
+                    parent=win):
+                return
+            pat = {"statusBayar": "lunas_transfer",
+                   "nominalTransfer": total,
+                   "pelunasanSisa": sisa,
+                   "lunasAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "kasir": str(getattr(self, "current_user", ""))}
+            def _after_lunas():
+                idx = self._riwayat_idx_by_booking(did)
+                if idx >= 0:
+                    try:
+                        self._set_transaksi_paid_idx(idx, True)
+                    except Exception:
+                        pass
+                perangkat = str(d.get("perangkat", "") or "").strip()
+                kursi = self._qr_cari_kartu(perangkat) if perangkat else None
+                if kursi is not None:
+                    try:
+                        if hasattr(kursi, "_set_paid"):
+                            kursi._set_paid(True)
+                    except Exception:
+                        pass
+                try:
+                    messagebox.showinfo("Lunas",
+                                        f"✅ Sisa Rp {sisa:,} booking {did[:8].upper()} "
+                                        f"ditandai LUNAS via transfer.", parent=win)
+                except Exception:
+                    pass
+                self._booking_riwayat_refresh()
+            _simpan(pat, "💰 Sisa ditandai LUNAS", "✖ Gagal menyimpan — cek internet",
+                    after_ok=_after_lunas)
+
+        def tolak():
+            alasan = simpledialog.askstring("Tolak Booking", "Alasan penolakan:", parent=win)
+            if alasan is None:
+                return
+            _simpan({"status": "ditolak", "kasir": str(getattr(self, "current_user", "")),
+                     "alasan": alasan.strip(), "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                    "✖ Booking ditolak", "✖ Gagal menyimpan — cek internet")
+
+        btn_konf = ctk.CTkButton(btns, text="✅ Konfirmasi", height=38, fg_color=C_GREEN,
+                                 hover_color="#15803D", font=("Russo One", 11, "bold"),
+                                 text_color="#06210F", command=konfirmasi)
+        btn_konf.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        btns_all.append(btn_konf)
+        # Booking yang sudah dikonfirmasi tidak bisa ditolak lagi — tombol
+        # Tolak tidak dibuat sama sekali agar tampilan bersih.
+        btn_tolak = None
+        if st_sekarang != "dikonfirmasi":
+            btn_tolak = ctk.CTkButton(btns, text="✖ Tolak", height=38, fg_color=C_RED,
+                                      hover_color="#8B0000", font=("Russo One", 11, "bold"),
+                                      text_color="white", command=tolak)
+            btn_tolak.pack(side="left", expand=True, fill="x", padx=(0, 5))
+            btns_all.append(btn_tolak)
+        btn_bukti = ctk.CTkButton(btns, text="🖼 Lihat Bukti", height=38, fg_color=C_ACCENT2,
+                                  hover_color="#5A0FCC", font=("Russo One", 11, "bold"),
+                                  text_color="white", command=buka_bukti,
+                                  state="normal" if d.get("bukti") else "disabled")
+        btn_bukti.pack(side="left", expand=True, fill="x")
+        btn_lunas_sisa = ctk.CTkButton(btns, text="💰 Lunas Sisa", height=38, fg_color=C_ORANGE,
+                                       hover_color="#B37500", font=("Russo One", 11, "bold"),
+                                       text_color="#1A1200", command=lunas_sisa,
+                                       state="normal" if str(d.get("statusBayar", "")) == "dp" else "disabled")
+        btn_lunas_sisa.pack(side="left", expand=True, fill="x", padx=(5, 0))
+        btns_all.append(btn_lunas_sisa)
+
+        try:
+            if bunyi:
+                threading.Thread(target=self._qr_bel, daemon=True).start()
+        except Exception:
+            pass
 
     def _qr_bel(self):
         try:
@@ -11212,6 +12207,10 @@ class AutoRentApp(ctk.CTk):
                 owner = self._resolve_license_user()
                 if not owner:
                     return
+                pus = (ConfigManager.load().get("profil_rental", {}) or {}).get(self.current_user, {}) or {}
+                if not isinstance(pus, dict):
+                    pus = {}
+                nama_rental = str(pus.get("nama_rental", "") or "").strip() or "RR Billing Pro"
                 paket_grup = {}
                 for g in (getattr(self, "grup_tarif", {}) or {}):
                     d = self.get_paket_data(g)
@@ -11222,7 +12221,9 @@ class AutoRentApp(ctk.CTk):
                             for n, v in d.items()
                         }
                 data = {
-                    "nama_rental": self._get_nama_rental_dinamis(),
+                    "nama_rental": nama_rental,
+                    "logo": self._logo_rental_b64(),
+                    "daftar_tv": self._get_daftar_tv_nama(),
                     "paket_grup": paket_grup,
                     "makanan": dict(getattr(self, "menu_makanan", {}) or {}),
                     "minuman": dict(getattr(self, "menu_minuman", {}) or {}),
@@ -11230,7 +12231,13 @@ class AutoRentApp(ctk.CTk):
                     "stok_min": getattr(self, "stok_min", {}) or {},
                     "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
-                FirestoreClient().set_document(f"call_meta/{owner}", data)
+                for k in ("nama_dana", "no_dana", "alamat"):
+                    v = str(pus.get(k, "") or "").strip()
+                    if v:
+                        data[k] = v
+                if str(pus.get("qr_pembayaran", "") or "").strip():
+                    data["qr_pembayaran"] = str(pus.get("qr_pembayaran", "")).strip()
+                FirestoreClient().set_document(f"call_meta/{owner}", data, merge=True)
             except Exception as e:
                 print(f"[QR] push menu gagal: {e}")
         try:
@@ -12008,6 +13015,10 @@ class AutoRentApp(ctk.CTk):
             self._qr_push_menu_bg()
         except Exception:
             pass
+        try:
+            self._booking_push_tv_status()
+        except Exception:
+            pass
 
         # Sinkronkan seluruh riwayat lokal ke cloud (idempoten, dedupe by id),
         # lalu retry tiap 30 detik jika ada antrian yang gagal.
@@ -12308,7 +13319,7 @@ class AutoRentApp(ctk.CTk):
         self._build_sidebar()
 
         self.frames = {}
-        for name in ["dashboard", "warnet", "harga", "stok", "riwayat", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
+        for name in ["dashboard", "warnet", "harga", "stok", "riwayat", "booking", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
             f = ctk.CTkFrame(self.content, fg_color=C_BG, corner_radius=0)
             self.frames[name] = f
 
@@ -12317,6 +13328,7 @@ class AutoRentApp(ctk.CTk):
         self._setup_harga()
         self._setup_stok()
         self._setup_riwayat()
+        self._setup_booking()
         self._setup_wifi()
         self._setup_aktivasi()
         self._setup_profil()
@@ -12374,6 +13386,7 @@ class AutoRentApp(ctk.CTk):
                 ("📺", "Dashboard TV",    "dashboard"),
                 ("🖥️", "Dashboard Warnet", "warnet"),
                 ("📜", "Riwayat",         "riwayat"),
+                ("📅", "Booking",         "booking"),
                 ("💰", "Kontrol Harga",   "harga"),
                 ("📦", "Stok",            "stok"),
                 ("🔗", "Panduan Koneksi",  "wifi"),
@@ -12388,6 +13401,7 @@ class AutoRentApp(ctk.CTk):
                 ("🖥️", "Dashboard Warnet", "warnet"),
                 ("📋", "Histori Aktivasi", "aktivasi"),
                 ("📜", "Riwayat",         "riwayat"),
+                ("📅", "Booking",         "booking"),
             ]
         self.nav_btns = {}
         for ico, label, key in nav_items:
@@ -15343,6 +16357,13 @@ class AutoRentApp(ctk.CTk):
         self._refresh_grup_info()
         self._refresh_info_bebas()
         self._rebuild_harga()
+        # Update segera ke halaman web pelanggan (call.html Panggil Kasir):
+        # menu makanan/minuman, paket, dan stok terbaru — tanpa menunggu
+        # refresh berkala 5 menit.
+        try:
+            self._qr_push_menu_bg()
+        except Exception:
+            pass
 
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -15813,35 +16834,48 @@ class AutoRentApp(ctk.CTk):
         diskon = row[5] if len(row) > 5 else ""
         total = row[6] if len(row) > 6 else ""
         paid = meta.get('paid', True)
-        status_str = "✅ LUNAS" if paid else "⏳ BELUM LUNAS"
+        status_str = "LUNAS" if paid else "BELUM LUNAS"
         lines = [
-            "=" * 60,
-            f"            RR BILLING PRO — INVOICE",
-            f"            {invoice_no}",
-            "=" * 60,
-            f"Waktu     : {waktu}",
-            f"Kasir     : {kasir}",
-            f"TV/PC     : {tv_pc}",
-            f"Paket     : {paket}",
-            f"Pesanan   : {pesanan}",
-            f"Diskon    : {diskon}",
-            f"Total     : {total}",
-            f"Status    : {status_str}",
-            "-" * 60,
-            f"Dicetak   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "=" * 60,
+            "=" * 40,
+            "      RR BILLING PRO",
+            f"      INVOICE {invoice_no}",
+            "=" * 40,
+            f"Waktu   : {waktu}",
+            f"Kasir   : {kasir}",
+            f"TV/PC   : {tv_pc}",
+            f"Paket   : {paket}",
+            f"Pesanan : {pesanan}",
+            f"Diskon  : {diskon}",
+            f"Total   : {total}",
+            f"Status  : {status_str}",
+            "-" * 40,
+            f"Dicetak : {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+            "=" * 40,
         ]
         text = "\n".join(lines)
-        docs_dir = os.path.join(os.path.expanduser("~"), "Documents")
-        fname = os.path.join(docs_dir if os.path.isdir(docs_dir) else os.path.expanduser("~"),
-                             f"invoice_{invoice_no}.txt")
+        app = self.winfo_toplevel()
         try:
-            with open(fname, "w", encoding="utf-8") as f:
-                f.write(text)
-            import subprocess
-            subprocess.Popen(["notepad.exe", fname])
-        except Exception as e:
-            messagebox.showerror("Cetak Gagal", f"Gagal mencetak invoice:\n{e}", parent=self)
+            tersedia, ptype, addr = app._printer_tersedia()
+        except Exception:
+            tersedia, ptype, addr = False, "file", ""
+        if not tersedia:
+            if messagebox.askyesno(
+                    "Printer Belum Terhubung",
+                    "Belum ada printer terhubung.\n\n"
+                    "Atur dulu di Pengaturan → PRINTER SETTINGS:\n"
+                    "• Tipe: bluetooth (atau usb/network)\n"
+                    "• Alamat printer, atau klik tombol '🔍 Cari Printer BT'\n"
+                    "• Lalu Test Print untuk memastikan.\n\n"
+                    "Buka Pengaturan Printer sekarang?",
+                    parent=self):
+                try:
+                    app._show_tab("profil")
+                except Exception:
+                    pass
+            return
+        threading.Thread(target=app._print_via_escpos,
+                         args=(text, ptype, addr), daemon=True).start()
+        messagebox.showinfo("Cetak", "Invoice dikirim ke printer.")
 
     def _show_bukti_pembayaran(self, iid=None):
         if not iid:
@@ -15862,7 +16896,7 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Gagal", f"Gagal membuka bukti:\n{e}", parent=self)
 
-    def _format_riwayat_row(self, waktu, tv_label, paket_nama, pesanan_dict, total_int, pesanan_total=None, diskoni=0, diskoni_mode="nominal", paid=True, kasir=None):
+    def _format_riwayat_row(self, waktu, tv_label, paket_nama, pesanan_dict, total_int, pesanan_total=None, diskoni=0, diskoni_mode="nominal", paid=True, kasir=None, booking_id=None):
         """Build a properly formatted riwayat row tuple with price annotations."""
         if pesanan_total is None:
             all_menu = {**self.menu_makanan, **self.menu_minuman}
@@ -15871,6 +16905,8 @@ class AutoRentApp(ctk.CTk):
         if paket_harga < 0:
             paket_harga = 0
         paket_tampil = f"{paket_nama} ({fmt_rp(paket_harga)})" if paket_harga > 0 else paket_nama
+        if booking_id:
+            paket_tampil = f"{paket_tampil.rstrip()} 📅{str(booking_id)[:8].upper()}"
         pesanan_str = ", ".join(f"{nm}×{qty}" for nm, qty in (pesanan_dict.items() if isinstance(pesanan_dict, dict) else [])) or "—"
         if pesanan_str != "—":
             pesanan_tampil = f"{pesanan_str} ({fmt_rp(pesanan_total)})"
@@ -15951,17 +16987,21 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
 
-    def _catat_transaksi(self, tv_label, paket, pesanan, total, source='tv', diskoni=0, diskoni_mode="nominal", paid=True):
+    def _catat_transaksi(self, tv_label, paket, pesanan, total, source='tv', diskoni=0, diskoni_mode="nominal", paid=True, booking_meta=None):
         """Catat transaksi ke riwayat.
         pesanan: dict nama->qty
         tv_label: string label TV/PC
         source: 'tv' atau 'warnet'
         total: int (total rupiah)
         paid: status pembayaran (True=LUNAS, False=TAGIHAN)
+        booking_meta: dict (opsional) keterangan booking online — booking_id,
+            kode, metode, status_bayar, pelanggan, no_hp
         """
         waktu       = datetime.now().strftime("%Y-%m-%d %H:%M")
         pesanan = pesanan or {}
         src = source if source in ('tv', 'warnet') else 'tv'
+        booking_meta = booking_meta or {}
+        booking_id = str(booking_meta.get("booking_id") or "")
 
         # compute pesanan total (money) using menu prices
         all_menu = {**self.menu_makanan, **self.menu_minuman}
@@ -15980,11 +17020,18 @@ class AutoRentApp(ctk.CTk):
         if paket_harga < 0:
             paket_harga = 0
 
-        row = self._format_riwayat_row(waktu, tv_label, paket, pesanan, total_int, pesanan_total, diskoni, diskoni_mode)
+        row = self._format_riwayat_row(waktu, tv_label, paket, pesanan, total_int, pesanan_total, diskoni, diskoni_mode, paid=paid, kasir=self.current_user, booking_id=booking_id)
         self.riwayat_transaksi.append(row)
         # maintain parallel meta + info upload cloud
         cloud_id = f"tx_{int(time.time() * 1000)}"
         self.riwayat_meta.append({'source': src, 'paket_harga': paket_harga, 'pesanan_total': pesanan_total, 'total': total_int, 'diskoni': diskoni, 'diskoni_mode': diskoni_mode, 'paid': paid, 'cloud_id': cloud_id, 'paket_raw': str(paket or ""), 'pesanan': {str(k): int(v) for k, v in (pesanan.items() if isinstance(pesanan, dict) else [])}})
+        if booking_id:
+            self.riwayat_meta[-1]['booking_id'] = booking_id
+            self.riwayat_meta[-1]['booking_kode'] = str(booking_meta.get("kode") or "")
+            self.riwayat_meta[-1]['booking_metode'] = str(booking_meta.get("metode") or "")
+            self.riwayat_meta[-1]['booking_status_bayar'] = str(booking_meta.get("status_bayar") or "")
+            self.riwayat_meta[-1]['pelanggan'] = str(booking_meta.get("pelanggan") or "")
+            self.riwayat_meta[-1]['no_hp'] = str(booking_meta.get("no_hp") or "")
 
         # Tampilkan hanya bila lolos filter aktif
         item_id = None
@@ -16043,6 +17090,9 @@ class AutoRentApp(ctk.CTk):
         # Hanya tampilkan opsi hapus jika user adalah admin
         menu = tk.Menu(self.tree, tearoff=0)
         menu.add_command(label="🧾 Invoice", command=lambda i=iid: self._show_invoice_dialog(i))
+        if idx >= 0 and idx < len(self.riwayat_meta) and self.riwayat_meta[idx].get("booking_id"):
+            menu.add_command(label="🔗 Lihat Booking",
+                             command=lambda ix=idx: self._buka_booking_dari_riwayat(ix))
         if idx >= 0 and idx < len(self.riwayat_meta) and self.riwayat_meta[idx].get("bukti_pembayaran"):
             menu.add_command(label="📎 Lihat Bukti", command=lambda i=iid: self._show_bukti_pembayaran(i))
         if self.current_role == "admin":
@@ -16072,6 +17122,20 @@ class AutoRentApp(ctk.CTk):
                 idx = max(0, len(self.riwayat_transaksi) - 1 - items.index(item_id))
             self._tree_item_to_index[item_id] = idx
         self._remap_kartu_transaction_items()
+
+    def _riwayat_idx_by_booking(self, booking_id):
+        """Index baris riwayat yang berasal dari booking online tertentu (-1
+        bila tidak ada). Basis relasi baris kas ↔ booking."""
+        if not booking_id:
+            return -1
+        bid = str(booking_id)
+        try:
+            for i, meta in enumerate(self.riwayat_meta):
+                if isinstance(meta, dict) and str(meta.get("booking_id") or "") == bid:
+                    return i
+        except Exception:
+            pass
+        return -1
 
     def _resolve_session_idx(self, kartu):
         """Index riwayat milik kartu TV/PC: item-map -> idx tersimpan -> cloud_id."""
@@ -16438,7 +17502,447 @@ class AutoRentApp(ctk.CTk):
                             parent=self)
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  TAB 4: WiFi
+    #  TAB 4.5: Booking Online (web /b/<user>)
+    #  Pengaturan (logo, rekening x3, no DANA, alamat) + riwayat booking
+    # ══════════════════════════════════════════════════════════════════════════
+    def _setup_booking(self):
+        f = self.frames["booking"]
+        hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text="📅  BOOKING ONLINE",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
+        ctk.CTkLabel(hdr, text="Halaman pelanggan: rrcctv.online/b/<username>",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(side="right", padx=18)
+
+        body = ctk.CTkFrame(f, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=10)
+        body.grid_columnconfigure(0, weight=5)
+        body.grid_columnconfigure(1, weight=7)
+        body.grid_rowconfigure(0, weight=1)
+
+        # ── KIRI: PENGATURAN ────────────────────────────────────────────────
+        set_f = ctk.CTkFrame(body, fg_color=C_PANEL, corner_radius=14)
+        set_f.grid(row=0, column=0, sticky="nsw", padx=(0, 8), pady=(0, 8))
+        ctk.CTkLabel(set_f, text="⚙️  PENGATURAN BOOKING WEB",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(14, 6))
+
+        cfg = ConfigManager.load()
+        psemua = cfg.get("profil_rental", {}) or {}
+        puser = psemua.get(self.current_user, {}) or {}
+        if not isinstance(puser, dict):
+            puser = {}
+
+        def _fld(parent, label):
+            ctk.CTkLabel(parent, text=label, font=FONT_LABEL,
+                         text_color=C_MUTED, anchor="w").pack(anchor="w", padx=16, pady=(4, 2))
+            e = ctk.CTkEntry(parent, fg_color=C_BTN, text_color=C_TEXT,
+                             border_color=C_BORDER, font=FONT_BODY, height=32)
+            e.pack(fill="x", padx=16, pady=(0, 4))
+            return e
+
+        e_nama_dana = _fld(set_f, "👤 Nama Akun DANA")
+        e_nama_dana.insert(0, str(puser.get("nama_dana", "")))
+        e_dana = _fld(set_f, "📱 No DANA (transfer)")
+        e_dana.insert(0, str(puser.get("no_dana", "")))
+
+        ctk.CTkLabel(set_f, text="🏪 Nama Rental PS", font=FONT_LABEL,
+                     text_color=C_MUTED, anchor="w").pack(anchor="w", padx=16, pady=(4, 2))
+        e_nama = ctk.CTkEntry(set_f, fg_color=C_BTN, text_color=C_TEXT,
+                              border_color=C_BORDER, font=FONT_BODY, height=32)
+        e_nama.insert(0, str(puser.get("nama_rental", "")))
+        e_nama.pack(fill="x", padx=16, pady=(0, 6))
+
+        logo_box = {"b64": str(puser.get("logo", "") or "")}
+        logo_row = ctk.CTkFrame(set_f, fg_color="transparent")
+        logo_row.pack(fill="x", padx=16, pady=(4, 2))
+        ctk.CTkLabel(logo_row, text="🖼 Logo (header halaman booking)",
+                     font=FONT_LABEL, text_color=C_MUTED, anchor="w").pack(anchor="w", pady=(0, 4))
+        lbl_logo_st = ctk.CTkLabel(logo_row, text="✔ Logo terpasang" if logo_box["b64"] else "Belum ada logo",
+                                   font=FONT_SMALL,
+                                   text_color=C_GREEN if logo_box["b64"] else C_MUTED, anchor="w")
+        lbl_logo_st.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(logo_row, text="📁 Pilih", width=80, height=28,
+                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                      command=lambda: self._profil_pilih_logo(logo_box, lbl_logo_st)).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(logo_row, text="🗑 Hapus", width=70, height=28,
+                      fg_color=C_RED, font=("Russo One", 9, "bold"),
+                      command=lambda: self._profil_hapus_logo(logo_box, lbl_logo_st)).pack(side="left")
+
+        qr_box = {"b64": str(puser.get("qr_pembayaran", "") or "")}
+        qr_row = ctk.CTkFrame(set_f, fg_color="transparent")
+        qr_row.pack(fill="x", padx=16, pady=(4, 2))
+        ctk.CTkLabel(qr_row, text="📸 QR Kode Pembayaran (statis — tampil di web booking)",
+                     font=FONT_LABEL, text_color=C_MUTED, anchor="w").pack(anchor="w", pady=(0, 4))
+        lbl_qr_st = ctk.CTkLabel(qr_row,
+                                 text="✔ QR pembayaran terpasang" if qr_box["b64"] else "Belum ada QR pembayaran",
+                                 font=FONT_SMALL,
+                                 text_color=C_GREEN if qr_box["b64"] else C_MUTED, anchor="w")
+        lbl_qr_st.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(qr_row, text="📁 Pilih", width=80, height=28,
+                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                      command=lambda: self._profil_pilih_qr(qr_box, lbl_qr_st)).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(qr_row, text="🗑 Hapus", width=70, height=28,
+                      fg_color=C_RED, font=("Russo One", 9, "bold"),
+                      command=lambda: self._profil_hapus_qr(qr_box, lbl_qr_st)).pack(side="left")
+        ctk.CTkLabel(set_f,
+                     text="QR statis (QRIS / rekening) tampil di halaman web booking saat "
+                          "pelanggan memilih metode Lunas / DP.",
+                     font=FONT_SMALL, text_color=C_MUTED, justify="left", anchor="w",
+                     wraplength=360).pack(anchor="w", padx=16, pady=(8, 4))
+
+        ctk.CTkLabel(set_f,
+                     text="No DANA + nama akun akan tampil di halaman booking saat "
+                          "pelanggan memilih metode Transfer.\nData langsung dipush "
+                          "ke call_meta (web) setelah disimpan.",
+                     font=FONT_SMALL, text_color=C_MUTED, justify="left", anchor="w",
+                     wraplength=360).pack(anchor="w", padx=16, pady=(8, 4))
+
+        def _simpan_booking_set():
+            data = {
+                "nama_dana": sanitize_text(e_nama_dana.get()),
+                "no_dana": sanitize_text(e_dana.get()),
+                "nama_rental": sanitize_text(e_nama.get()),
+                "logo": logo_box["b64"],
+                "qr_pembayaran": qr_box["b64"],
+            }
+            self._simpan_profil_rental(data)
+            self._qr_push_menu_bg()
+
+        ctk.CTkButton(set_f, text="💾  Simpan & Push ke Web", height=36,
+                      fg_color=C_ACCENT2, font=("Russo One", 10, "bold"), text_color="white",
+                      command=_simpan_booking_set).pack(anchor="w", padx=16, pady=(10, 14))
+
+        # ── KANAN: RIWAYAT BOOKING ──────────────────────────────────────────
+        riw_f = ctk.CTkFrame(body, fg_color=C_PANEL, corner_radius=14)
+        riw_f.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        riw_hdr = ctk.CTkFrame(riw_f, fg_color="transparent")
+        riw_hdr.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(riw_hdr, text="📋  RIWAYAT BOOKING & PLAYER",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(side="left")
+        ctk.CTkButton(riw_hdr, text="⟳ Refresh", width=90, height=28,
+                      fg_color=C_BTN, font=("Russo One", 9, "bold"),
+                      command=self._booking_riwayat_refresh).pack(side="right")
+
+        plant = ctk.CTkFrame(riw_f, fg_color="transparent")
+        plant.pack(fill="x", padx=16, pady=(2, 2))
+        cols = ["Kode", "Nama Player", "WhatsApp", "Perangkat", "Mulai", "Metode", "Status Bayar", "Booking", "Aksi"]
+        wcols = [70, 100, 105, 85, 105, 60, 125, 80, 110]
+        for c, w in zip(cols, wcols):
+            ctk.CTkLabel(plant, text=c, width=w, font=("Russo One", 9, "bold"),
+                         text_color=C_MUTED, anchor="w").pack(side="left", padx=(0, 4))
+        self._booking_scroll = ctk.CTkScrollableFrame(riw_f, fg_color=C_BG)
+        self._booking_scroll.pack(fill="both", expand=True, padx=16, pady=(2, 14))
+        self._booking_riwayat_running = False
+        self.after(1000, self._booking_riwayat_refresh)
+
+    def _booking_riwayat_refresh(self):
+        """Ambil booking dari Firestore (milik user ini) lalu render daftar."""
+        if getattr(self, "_booking_riwayat_running", False):
+            return
+        self._booking_riwayat_running = True
+        uname = (getattr(self, "current_user", None) or "").strip().lower()
+        if not uname:
+            self._booking_riwayat_running = False
+            return
+
+        def worker():
+            docs = []
+            try:
+                from firestore_sync import get_firestore_client
+                docs = get_firestore_client().query_all("bookings", limit=100,
+                                                        order_field="createdAt")
+            except Exception:
+                docs = []
+            rows = []
+            for d in docs:
+                if str(d.get("owner", "")).strip().lower() != uname:
+                    continue
+                rows.append(d)
+            rows.sort(key=lambda d: str(d.get("createdAt", "")), reverse=True)
+            try:
+                self.after(0, lambda rs=rows: self._booking_riwayat_render(rs))
+            except Exception:
+                pass
+            self._booking_riwayat_running = False
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            self._booking_riwayat_running = False
+        self.after(15000, self._booking_riwayat_refresh)
+
+    def _booking_status_bayar(self, d: dict) -> tuple:
+        sb = str(d.get("statusBayar", "") or "")
+        if sb == "lunas_transfer":
+            return ("LUNAS VIA TRANSFER", C_GREEN)
+        if sb == "dp":
+            sisa = int(d.get("sisaBayar", 0) or 0)
+            return (f"TAGIHAN SISA Rp {sisa:,}", C_ORANGE)
+        if sb == "belum_bayar":
+            return ("BELUM BAYAR", C_YELLOW)
+        return ("—", C_MUTED)
+
+    def _booking_buka_bukti(self, d: dict, parent=None):
+        bukti = str(d.get("bukti", "") or "")
+        if not bukti.startswith("data:image/"):
+            messagebox.showinfo("Tidak Ada", "Tidak ada bukti transfer.", parent=parent or self)
+            return
+        try:
+            import base64 as _b64
+            folder = app_path("invoices_bukti")
+            os.makedirs(folder, exist_ok=True)
+            raw = bukti.split(",", 1)[1]
+            ext = "png" if "image/png" in bukti else "jpg"
+            did = str(d.get("_id", ""))
+            path = os.path.join(folder, f"booking_bukti_{did}.{ext}")
+            with open(path, "wb") as f:
+                f.write(_b64.b64decode(raw))
+            os.startfile(path)
+        except Exception as e:
+            messagebox.showerror("Gagal", f"Gagal membuka bukti:\n{e}", parent=parent or self)
+
+    def _booking_update_status(self, did: str, status: str, alasan: str = ""):
+        try:
+            from firestore_sync import get_firestore_client
+            patch = {"status": status, "kasir": str(getattr(self, "current_user", "")),
+                     "alasan": alasan, "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            get_firestore_client().set_document(f"bookings/{did}", patch, merge=True)
+            self._qr_log(f"booking {did} -> {status} (dari tab Booking)")
+            self._booking_riwayat_refresh()
+        except Exception as e:
+            self._qr_log(f"booking {did} update gagal: {e}")
+            messagebox.showerror("Gagal", f"Gagal update status:\n{e}", parent=self)
+
+    def _booking_riwayat_render(self, rows: list):
+        sc = getattr(self, "_booking_scroll", None)
+        if sc is None:
+            return
+        # Tanpa kedip: hanya bangun ulang daftar jika data benar-benar berubah.
+        sig = tuple(sorted(
+            (str(d.get("_id", "")), str(d.get("status", "")),
+             str(d.get("statusBayar", "")), str(d.get("createdAt", "")),
+             str(d.get("updatedAt", "")), str(d.get("namaPelanggan", "")),
+             str(d.get("noHp", "")), str(d.get("perangkat", "")),
+             str(d.get("tanggal", "")), str(d.get("jam", "")),
+             str(d.get("metode", "")), str(d.get("totalHarga", "")),
+             str(d.get("sisaBayar", "")), str(d.get("bukti", "") or ""))
+            for d in rows))
+        if getattr(self, "_booking_riwayat_sig", None) == sig:
+            return
+        self._booking_riwayat_sig = sig
+        for w in sc.winfo_children():
+            w.destroy()
+        if not rows:
+            ctk.CTkLabel(sc, text="Belum ada booking untuk rental ini.",
+                         font=FONT_BODY, text_color=C_MUTED).pack(pady=20)
+            return
+        for d in rows:
+            did = str(d.get("_id", ""))
+            st = str(d.get("status", ""))
+            sb_txt, sb_col = self._booking_status_bayar(d)
+            st_txt = {"baru": "⏳ BARU", "dikonfirmasi": "✅ DITERIMA", "ditolak": "✖ DITOLAK"}.get(st, st)
+            st_col = C_GREEN if st == "dikonfirmasi" else C_YELLOW if st == "baru" else C_RED
+            mulai = f"{d.get('tanggal', '')} {str(d.get('jam', ''))[:5]}".strip()
+            metode_txt = {"lunas": "Lunas", "dp": "DP"}.get(str(d.get("metode", "")), "Tempat")
+            row = ctk.CTkFrame(sc, fg_color=C_PANEL, corner_radius=8)
+            row.pack(fill="x", pady=3)
+            vals = [did[:8].upper(), str(d.get("namaPelanggan", "-")),
+                    str(d.get("noHp", "-")), str(d.get("perangkat", "-")),
+                    mulai or "-", metode_txt]
+            click_widgets = [row]
+            for v, w in zip(vals, [70, 100, 105, 85, 105, 60]):
+                lbl = ctk.CTkLabel(row, text=v, width=w, font=("Consolas" if len(v) < 20 else FONT_SMALL, 10),
+                                   text_color=C_TEXT, anchor="w")
+                lbl.pack(side="left", padx=(0, 4))
+                click_widgets.append(lbl)
+            lbl_sb = ctk.CTkLabel(row, text=sb_txt, width=125, font=("Russo One", 9, "bold"),
+                                  text_color=sb_col, anchor="w")
+            lbl_sb.pack(side="left", padx=(0, 4))
+            click_widgets.append(lbl_sb)
+            lbl_st = ctk.CTkLabel(row, text=st_txt, width=80, font=("Russo One", 9, "bold"),
+                                  text_color=st_col, anchor="w")
+            lbl_st.pack(side="left", padx=(0, 4))
+            click_widgets.append(lbl_st)
+            act = ctk.CTkFrame(row, fg_color="transparent")
+            act.pack(side="left")
+            wa_num = re.sub(r"[^0-9]", "", str(d.get("noHp", "") or ""))
+            if wa_num.startswith("0"):
+                wa_num = "62" + wa_num[1:]
+            ctk.CTkButton(act, text="💬", width=30, height=24, fg_color=C_BTN,
+                          font=("Segoe UI Emoji", 11),
+                          command=lambda n=wa_num: self._booking_wa_chat(n),
+                          state="normal" if wa_num else "disabled").pack(side="left", padx=2)
+            ctk.CTkButton(act, text="🖼", width=30, height=24, fg_color=C_BTN,
+                          font=("Segoe UI Emoji", 11),
+                          command=lambda dd=dict(d): self._booking_buka_bukti(dd),
+                          state="normal" if d.get("bukti") else "disabled").pack(side="left", padx=2)
+            if str(d.get("statusBayar", "")) == "dp" and st != "ditolak":
+                ctk.CTkButton(act, text="💰", width=30, height=24, fg_color=C_ORANGE,
+                              text_color="#1A1200", font=("Segoe UI Emoji", 11),
+                              command=lambda dd=dict(d): self._booking_lunas_sisa(dd)).pack(side="left", padx=2)
+            if st == "baru":
+                ctk.CTkButton(act, text="✅", width=30, height=24, fg_color=C_GREEN,
+                              text_color="#06210F", font=("Segoe UI Emoji", 11),
+                              command=lambda i=did: self._booking_update_status(i, "dikonfirmasi")).pack(side="left", padx=2)
+                ctk.CTkButton(act, text="✖", width=30, height=24, fg_color=C_RED,
+                              text_color="white", font=("Segoe UI Emoji", 11),
+                              command=lambda i=did: self._booking_tolak(i)).pack(side="left", padx=2)
+            for wdg in click_widgets:
+                try:
+                    wdg.bind("<Button-1>",
+                             lambda e, dd=dict(d): self._qr_tampil_booking(dd, bunyi=False))
+                except Exception:
+                    pass
+
+    def _booking_wa_chat(self, wa_num: str):
+        if not wa_num:
+            return
+        try:
+            webbrowser.open(f"https://wa.me/{wa_num}")
+        except Exception as e:
+            messagebox.showerror("Gagal", f"Gagal membuka WhatsApp:\n{e}", parent=self)
+
+    def _booking_tolak(self, did: str):
+        from tkinter import simpledialog
+        alasan = simpledialog.askstring("Tolak Booking", "Alasan penolakan:", parent=self)
+        if alasan is None:
+            return
+        self._booking_update_status(did, "ditolak", alasan.strip())
+
+    def _booking_fetch_valid(self, tv_label, cb):
+        """Ambil booking valid untuk kartu tertentu (thread, tanpa blokir UI):
+        status dikonfirmasi, perangkat = kartu, tanggal+jam belum lewat, dan
+        belum sesiDimulai. Hasil dipanggil di main thread via cb(rows)."""
+        uname = (getattr(self, "current_user", None) or "").strip().lower()
+        tv_s = str(tv_label or "").strip()
+
+        def worker():
+            rows = []
+            try:
+                from firestore_sync import get_firestore_client
+                docs = get_firestore_client().query_all("bookings", limit=100,
+                                                        order_field="createdAt")
+            except Exception:
+                docs = []
+            now = datetime.now()
+            for d in docs:
+                try:
+                    if str(d.get("owner", "")).strip().lower() != uname:
+                        continue
+                    if str(d.get("status", "")) != "dikonfirmasi":
+                        continue
+                    if str(d.get("perangkat", "") or "").strip() != tv_s:
+                        continue
+                    if d.get("sesiDimulai"):
+                        continue
+                    tgl = str(d.get("tanggal", "") or "").strip()
+                    jam = str(d.get("jam", "") or "").strip()[:5]
+                    try:
+                        mulai = datetime.strptime(f"{tgl} {jam}", "%Y-%m-%d %H:%M")
+                    except Exception:
+                        mulai = None
+                    if mulai is not None and mulai < now:
+                        continue
+                    rows.append(d)
+                except Exception:
+                    continue
+            rows.sort(key=lambda x: str(x.get("jam", "")))
+            try:
+                self.after(0, lambda rs=rows: cb(rs))
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            try:
+                self.after(0, lambda: cb([]))
+            except Exception:
+                pass
+
+    def _buka_booking_dari_riwayat(self, idx):
+        """Klik kanan baris riwayat bertanda 📅 — buka popup booking terkait."""
+        try:
+            bid = str(self.riwayat_meta[idx].get("booking_id") or "")
+        except Exception:
+            return
+        if not bid:
+            return
+
+        def worker():
+            doc = None
+            try:
+                from firestore_sync import get_firestore_client
+                doc = get_firestore_client().get_document(f"bookings/{bid}")
+            except Exception:
+                doc = None
+
+            def done():
+                if doc:
+                    self._qr_tampil_booking(dict(doc), bunyi=False)
+                else:
+                    messagebox.showinfo("Booking", "Booking tidak ditemukan di Firestore.",
+                                        parent=self)
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception as e:
+            self._qr_log(f"buka booking {bid} gagal: {e}")
+
+    def _booking_lunas_sisa(self, d: dict):
+        """Tandai sisa DP booking sebagai LUNAS (dari tombol 💰 di riwayat)."""
+        did = str(d.get("_id", ""))
+        sisa = int(d.get("sisaBayar", 0) or 0)
+        dpn = int(d.get("nominalDp", 0) or 0)
+        total = int(d.get("totalHarga", 0) or 0)
+        if not messagebox.askyesno(
+                "Lunas Sisa",
+                f"Tandai sisa Rp {sisa:,} dari total Rp {total:,} sebagai LUNAS?\n"
+                f"(DP Rp {dpn:,} + sisa Rp {sisa:,})",
+                parent=self):
+            return
+        try:
+            from firestore_sync import get_firestore_client
+            pat = {"statusBayar": "lunas_transfer",
+                   "nominalTransfer": total,
+                   "pelunasanSisa": sisa,
+                   "lunasAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "kasir": str(getattr(self, "current_user", ""))}
+            ok = get_firestore_client().set_document(f"bookings/{did}", pat, merge=True)
+        except Exception as e:
+            self._qr_log(f"booking {did} lunas sisa gagal: {e}")
+            ok = False
+        if not ok:
+            messagebox.showerror("Gagal", "Gagal menyimpan — cek internet.", parent=self)
+            return
+        self._qr_log(f"booking {did} -> sisa dilunasi (dari riwayat)")
+        idx = self._riwayat_idx_by_booking(did)
+        if idx >= 0:
+            try:
+                self._set_transaksi_paid_idx(idx, True)
+            except Exception:
+                pass
+        perangkat = str(d.get("perangkat", "") or "").strip()
+        kursi = self._qr_cari_kartu(perangkat) if perangkat else None
+        if kursi is not None:
+            try:
+                if hasattr(kursi, "_set_paid"):
+                    kursi._set_paid(True)
+            except Exception:
+                pass
+        messagebox.showinfo("Lunas",
+                            f"✅ Sisa Rp {sisa:,} booking {did[:8].upper()} "
+                            f"ditandai LUNAS via transfer.", parent=self)
+        self._booking_riwayat_refresh()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  TAB WiFi
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_wifi(self):
         f = self.frames["wifi"]
@@ -16965,6 +18469,37 @@ class AutoRentApp(ctk.CTk):
                       font=FONT_SUB, text_color=C_MUTED,
                       command=dlg.destroy).pack(pady=(4, 16))
 
+    def _printer_tersedia(self):
+        """Cek printer terkonfigurasi & benar-benar bisa dipakai.
+        Return (tersedia, tipe, alamat). Untuk bluetooth alamat kosong tetap
+        dicari otomatis (RPP02N dkk ter-pair) dan disimpan ke config."""
+        try:
+            cfg = ConfigManager.get("printer_settings", {}) or {}
+        except Exception:
+            cfg = {}
+        ptype = str(cfg.get("type", "file") or "file")
+        addr = str(cfg.get("address", "") or "").strip()
+        if ptype == "bluetooth":
+            if not addr:
+                try:
+                    mac = _ble_find_printer(timeout=4)
+                    if mac:
+                        try:
+                            cfg2 = ConfigManager.load()
+                            cfg2.setdefault("printer_settings", {})
+                            cfg2["printer_settings"].update(
+                                {"type": "bluetooth", "address": mac})
+                            ConfigManager.save(cfg2)
+                        except Exception:
+                            pass
+                        addr = mac
+                except Exception:
+                    addr = ""
+            return bool(addr), ptype, addr
+        if ptype in ("usb", "network"):
+            return bool(addr) and ESCPOS_AVAILABLE, ptype, addr
+        return False, ptype, ""
+
     def _print_receipt(self, trans: dict = None):
         """Show dialog with receipt formatted for thermal printer (40 columns)."""
         dlg = ctk.CTkToplevel(self)
@@ -17008,15 +18543,11 @@ class AutoRentApp(ctk.CTk):
             printer_cfg = ConfigManager.get("printer_settings", {})
             printer_type = printer_cfg.get("type", "file")
             address = printer_cfg.get("address", "")
-            if printer_type == "bluetooth" and ESCPOS_AVAILABLE:
+            if printer_type == "bluetooth":
                 threading.Thread(target=self._print_via_escpos,
                                  args=("\n".join(lines), printer_type, address),
                                  daemon=True).start()
-            elif printer_type == "usb" and ESCPOS_AVAILABLE:
-                threading.Thread(target=self._print_via_escpos,
-                                 args=("\n".join(lines), printer_type, address),
-                                 daemon=True).start()
-            elif printer_type == "network" and ESCPOS_AVAILABLE:
+            elif printer_type in ("usb", "network") and ESCPOS_AVAILABLE:
                 threading.Thread(target=self._print_via_escpos,
                                  args=("\n".join(lines), printer_type, address),
                                  daemon=True).start()
@@ -17040,12 +18571,38 @@ class AutoRentApp(ctk.CTk):
                       command=dlg.destroy).pack(side="right", padx=4)
 
     def _print_via_escpos(self, text: str, ptype: str, address: str):
-        """Print receipt via python-escpos library."""
+        """Print receipt via python-escpos / Bluetooth BLE (RPP02N)."""
         try:
             if ptype == "bluetooth":
-                from escpos.printer import Network
-                p = Network(address, port=1)
-            elif ptype == "network":
+                # Printer Bluetooth BLE (RPP02N dkk): ESC/POS langsung ditulis
+                # ke karakteristik RX (ISSC Transparent UART), tanpa escpos.
+                try:
+                    mac = address.strip() if address.strip() else _ble_find_printer()
+                    if not mac:
+                        _LOGGER.warning("BLE print: printer Bluetooth tidak ditemukan")
+                        self._print_to_file(text)
+                        return
+                    if mac != address.strip():
+                        try:
+                            cfg = ConfigManager.load()
+                            cfg.setdefault("printer_settings", {})
+                            cfg["printer_settings"].update({"type": "bluetooth", "address": mac})
+                            ConfigManager.save(cfg)
+                            print(f"[PRINT] Printer BLE disimpan: {mac}", flush=True)
+                        except Exception:
+                            pass
+                    _ble_write_printer(mac, _ble_escpos_bytes(text))
+                    print(f"[PRINT] BLE terkirim ke {mac}", flush=True)
+                    return
+                except ImportError:
+                    _LOGGER.warning("BLE print: 'bleak' tidak terinstal")
+                    self._print_to_file(text)
+                    return
+                except Exception as e:
+                    _LOGGER.warning("BLE print error: %s", e)
+                    self._print_to_file(text)
+                    return
+            if ptype == "network":
                 from escpos.printer import Network
                 p = Network(address)
             elif ptype == "usb":
@@ -17723,7 +19280,11 @@ class AutoRentApp(ctk.CTk):
             test_lines.append("Jika terbaca, printer berfungsi!")
             test_lines.append("=" * 40)
             test_text = "\n".join(test_lines)
-            if ptype in ("bluetooth", "usb", "network") and ESCPOS_AVAILABLE:
+            if ptype == "bluetooth":
+                threading.Thread(target=self._print_via_escpos,
+                                 args=(test_text, ptype, addr),
+                                 daemon=True).start()
+            elif ptype in ("usb", "network") and ESCPOS_AVAILABLE:
                 threading.Thread(target=self._print_via_escpos,
                                  args=(test_text, ptype, addr),
                                  daemon=True).start()
@@ -17731,11 +19292,41 @@ class AutoRentApp(ctk.CTk):
                 self._print_to_file(test_text)
             messagebox.showinfo("Test Print", "Test print dikirim. Periksa printer / folder receipts/.")
 
+        def _cari_printer_bt():
+            def worker():
+                try:
+                    mac = _ble_find_printer()
+                    self.after(0, lambda m=mac: _hasil_cari(m))
+                except Exception as e:
+                    self.after(0, lambda msg=str(e): _hasil_cari("", msg))
+
+            def _hasil_cari(mac, err=""):
+                if mac:
+                    pr_addr_entry.delete(0, "end")
+                    pr_addr_entry.insert(0, mac)
+                    pr_type_var.set("bluetooth")
+                    messagebox.showinfo("Printer Ditemukan",
+                                        f"Printer Bluetooth ditemukan:\n{mac}\n\n"
+                                        "Klik Simpan lalu Test Print.", parent=printer_card)
+                else:
+                    messagebox.showwarning("Tidak Ditemukan",
+                                           "Tidak ada printer Bluetooth terdeteksi.\n"
+                                           "Pastikan printer sudah ter-pair dengan PC ini."
+                                           + (f"\n\n({err})" if err else ""),
+                                           parent=printer_card)
+
+            threading.Thread(target=worker, daemon=True).start()
+
         pr_row3 = ctk.CTkFrame(printer_card, fg_color="transparent")
         pr_row3.pack(fill="x", padx=20, pady=(0, 16))
         ctk.CTkButton(pr_row3, text="💾 Simpan", height=32, width=100,
                       fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
                       command=_save_printer_settings).pack(side="left", padx=4)
+        ctk.CTkButton(pr_row3, text="🔍 Cari Printer BT", height=32, width=150,
+                      fg_color=C_BTN, hover_color=C_ACCENT2,
+                      border_width=1, border_color=C_ACCENT2,
+                      font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                      command=_cari_printer_bt).pack(side="left", padx=4)
         ctk.CTkButton(pr_row3, text="🖨 Test Print", height=32, width=120,
                       fg_color=C_BTN, hover_color=C_ACCENT2,
                       border_width=1, border_color=C_ACCENT2,
@@ -18260,6 +19851,20 @@ class AutoRentApp(ctk.CTk):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+def _dump_exc(exc_type, exc_value, exc_tb):
+    """logcat: semua traceback (termasuk callback Tk) ditulis ke app_exceptions.log"""
+    try:
+        import traceback as _tb
+        with open(os.path.join(APP_BASE_DIR, "app_exceptions.log"), "a", encoding="utf-8") as _f:
+            _f.write(f"\n===== {datetime.now()} {exc_type.__name__}: {exc_value} =====\n")
+            _tb.print_exception(exc_type, exc_value, exc_tb, file=_f)
+    except Exception:
+        pass
+
+
+sys.excepthook = _dump_exc
+
 if __name__ == "__main__":
     app = AutoRentApp()
+    app.report_callback_exception = lambda exc, val, tb: _dump_exc(exc, val, tb)
     app.mainloop()

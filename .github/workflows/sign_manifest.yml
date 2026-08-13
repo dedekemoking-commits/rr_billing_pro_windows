@@ -1,0 +1,39 @@
+name: Sign Manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag (e.g. v2.4.8)'
+        required: true
+      sha256:
+        description: 'SHA256 of RRBILLINGPRO.exe'
+        required: true
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install cryptography
+      - name: Generate and sign manifest
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+        run: |
+          python scripts/generate_manifest_and_sign.py \
+            --version "${{ github.event.inputs.version }}" \
+            --asset_url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.version }}/RRBILLINGPRO.exe" \
+            --sha256 "${{ github.event.inputs.sha256 }}" \
+            --signing_key "${SIGNING_KEY}" \
+            --out manifest.json
+      - name: Upload manifest to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: manifest.json
+          tag_name: ${{ github.event.inputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
