@@ -25,10 +25,13 @@ jobs:
       - name: Generate and sign manifest
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+          VERSION_INPUT: ${{ github.event.inputs.version }}
         run: |
+          VERSION="${VERSION_INPUT#v}"
+          TAG="v${VERSION}"
           python scripts/generate_manifest_and_sign.py \
-            --version "${{ github.event.inputs.version }}" \
-            --asset_url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.version }}/RRBILLINGPRO.exe" \
+            --version "$VERSION" \
+            --asset_url "https://github.com/${{ github.repository }}/releases/download/${TAG}/RRBILLINGPRO.exe" \
             --sha256 "${{ github.event.inputs.sha256 }}" \
             --signing_key "${SIGNING_KEY}" \
             --out manifest.json
