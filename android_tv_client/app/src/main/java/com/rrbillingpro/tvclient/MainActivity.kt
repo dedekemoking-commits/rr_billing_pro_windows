@@ -2,18 +2,16 @@ package com.rrbillingpro.tvclient
 
 import android.Manifest
 import android.app.Activity
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import com.rrbillingpro.tvclient.overlay.OverlayWidget
+import com.rrbillingpro.tvclient.permission.OverlayPermission
 import com.rrbillingpro.tvclient.service.TvOverlayService
 import com.rrbillingpro.tvclient.util.Prefs
 
@@ -90,10 +88,8 @@ class MainActivity : Activity(), TvOverlayService.StateListener {
         Prefs.save(this, host, port, meja, autoStart = true)
         Prefs.saveAutoStart(this, true)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            tvNote.text = "⚠ Izin overlay belum aktif — overlay tidak akan muncul. " +
-                    "Tekan 'IZIN OVERLAY' lalu izinkan."
-            requestOverlayPermission()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !OverlayPermission.isGranted(this)) {
+            tvNote.text = "⚠ " + OverlayPermission.guideText()
         } else {
             tvNote.text = ""
         }
@@ -103,9 +99,8 @@ class MainActivity : Activity(), TvOverlayService.StateListener {
     }
 
     private fun requestOverlayPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            val uri = Uri.parse("package:$packageName")
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, uri))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !OverlayPermission.isGranted(this)) {
+            OverlayPermission.request(this)
         } else {
             tvNote.text = "Izin overlay sudah aktif ✓"
         }
@@ -139,6 +134,21 @@ class MainActivity : Activity(), TvOverlayService.StateListener {
         }
 
         tvStatus.text = sb.toString()
+        refreshOverlayNote()
+    }
+
+    /**
+     * Label izin overlay diperbarui OTOMATIS tiap 2 detik (statusRunnable),
+     * jadi tidak pernah basi: begitu izin diaktifkan di Pengaturan, label
+     * langsung berubah hijau tanpa perlu buka ulang aplikasi.
+     */
+    private fun refreshOverlayNote() {
+        val granted = OverlayPermission.isGranted(this)
+        tvNote.text = if (granted) {
+            "Izin overlay aktif ✓"
+        } else {
+            "⚠ " + OverlayPermission.guideText()
+        }
     }
 
     // ── Service state listener ───────────────────────────────────────────────

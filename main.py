@@ -1181,7 +1181,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.8"
+APP_VERSION = "2.4.10"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -1310,9 +1310,10 @@ class ConfigManager:
     def load():
         with _CONFIG_LOCK:
             if os.path.exists(CONFIG_FILE):
-                # Retry singkat: jika file sedang ditulis proses lain, baca ulang
-                # daripada mengembalikan {} (yang bisa menimpa config saat di-save).
-                for _attempt in range(10):
+                # Retry selama ~5 detik: jika file sedang ditulis proses lain,
+                # baca ulang daripada mengembalikan {} (yang bisa menimpa config
+                # saat di-save dan membuat fitur tampak "user tidak ditemukan").
+                for _attempt in range(100):
                     try:
                         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                             data = json.load(f)
@@ -1927,6 +1928,23 @@ class ADBHelper:
     _lock = threading.Lock()
     _reconnect_locks: dict[str, threading.Lock] = {}
     _reconnect_locks_guard = threading.Lock()
+    _adb_exe = None
+
+    @classmethod
+    def _adb_binary(cls):
+        """Path adb.exe: bundle lokal (bin/adb/adb.exe) dulu, fallback PATH.
+        Konsisten di semua PC user — versi adb lama sering gagal menangani
+        TV Android 11+ (ADB TLS / streaming install) yang menimbulkan
+        error samar seperti avc: denied di sisi TV."""
+        if cls._adb_exe:
+            return cls._adb_exe
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        bundled = os.path.join(base, "bin", "adb", "adb.exe")
+        cls._adb_exe = bundled if os.path.isfile(bundled) else "adb"
+        return cls._adb_exe
 
     @classmethod
     def _reconnect_lock(cls, ip: str) -> threading.Lock:
@@ -1997,7 +2015,7 @@ class ADBHelper:
     def _adb_connect(cls, ip, port=5555):
         import subprocess
         try:
-            r = subprocess.run(["adb", "connect", f"{ip}:{port}"],
+            r = subprocess.run([cls._adb_binary(), "connect", f"{ip}:{port}"],
                                capture_output=True, text=True, timeout=10,
                                **subprocess_no_window_kwargs())
             if "connected" in r.stdout.lower() or "already connected" in r.stdout.lower():
@@ -2100,7 +2118,7 @@ class ADBHelper:
     def adb_shell(cls, ip, command, timeout=15, port=5555):
         """Jalankan perintah ADB shell pada TV target."""
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:{port}", "shell", command],
+            r = subprocess.run([cls._adb_binary(), "-s", f"{ip}:{port}", "shell", command],
                                capture_output=True, text=True, timeout=timeout,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -2154,7 +2172,7 @@ class ADBHelper:
     def adb_push(cls, ip, local_path, remote_path="/sdcard/Download/"):
         """Push file ke TV via ADB."""
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:5555", "push", local_path, remote_path],
+            r = subprocess.run([cls._adb_binary(), "-s", f"{ip}:5555", "push", local_path, remote_path],
                                capture_output=True, text=True, timeout=120,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0:
@@ -2168,21 +2186,83 @@ class ADBHelper:
             return False, str(e)
 
     @classmethod
-    def adb_install(cls, ip, apk_path):
-        """Install APK ke TV via ADB."""
+    def _pm_install(cls, ip, remote_path, timeout=240):
+        """Jalankan pm install remote_path di TV via adb shell.
+        Mengembalikan (ok, pesan)."""
+        return cls.adb_shell(ip, "pm install -r " + remote_path, timeout=timeout)
+
+    @classmethod
+    def _ambil_diagnosa_avc(cls, ip, batas=25):
+        """Ambil baris SELinux avc: denied dari TV (dmesg + logcat) untuk
+        ditampilkan ke user — diagnosa cepat mengapa install ditolak ROM."""
+        bagian = []
         try:
-            r = subprocess.run(["adb", "-s", f"{ip}:5555", "install", "-r", apk_path],
+            ok, out = cls.adb_shell(
+                ip, "logcat -d -b all -t 500 2>/dev/null | grep -aiE 'avc|installd|PackageInstaller' | tail -%d" % batas,
+                timeout=25)
+            if ok and out:
+                bagian.append("— logcat —\n" + "\n".join(out.splitlines()[-batas:]))
+        except Exception:
+            pass
+        try:
+            ok, out = cls.adb_shell(ip, "dmesg | grep -aiE 'avc|denied' | tail -%d" % batas,
+                                    timeout=20)
+            if ok and out:
+                bagian.append("— dmesg —\n" + "\n".join(out.splitlines()[-batas:]))
+        except Exception:
+            pass
+        return "\n\n".join(bagian) if bagian else "(tidak ada log avc yang bisa diambil)"
+
+    @classmethod
+    def adb_install(cls, ip, apk_path):
+        """Install APK ke TV dengan urutan jalur anti-SELinux:
+
+        1. push ke /data/local/tmp (context shell_data_file — diizinkan
+           hampir semua ROM) lalu `pm install -r`.
+        2. kalau ROM menolak jalur tsb → push ke /sdcard/Download lalu
+           `pm install -r`.
+        3. kalau masih gagal dengan avc: denied → streaming adb install.
+        4. tetap gagal → lampirkan diagnosa dmesg/logcat avc di pesan error.
+        """
+        if not os.path.isfile(apk_path):
+            return False, "File APK tidak ditemukan"
+        remote_tmp = "/data/local/tmp/rr_tv_client.apk"
+        remote_sd = "/sdcard/Download/rr_tv_client.apk"
+
+        # 1) /data/local/tmp
+        ok, pesan = cls.adb_push(ip, apk_path, remote_tmp)
+        if ok:
+            ok2, pesan2 = cls._pm_install(ip, remote_tmp)
+            if ok2 and "Success" in (pesan2 or ""):
+                return True, pesan2.strip()
+            pesan = pesan + " | pm: " + (pesan2 or "-")
+        # 2) /sdcard/Download
+        ok, pesan = cls.adb_push(ip, apk_path, remote_sd)
+        if ok:
+            ok2, pesan2 = cls._pm_install(ip, remote_sd)
+            if ok2 and "Success" in (pesan2 or ""):
+                return True, pesan2.strip()
+            pesan = pesan + " | pm: " + (pesan2 or "-")
+        # 3) streaming adb install
+        try:
+            r = subprocess.run([cls._adb_binary(), "-s", f"{ip}:5555", "install", "-r", apk_path],
                                capture_output=True, text=True, timeout=180,
                                **subprocess_no_window_kwargs())
-            if r.returncode == 0:
+            if r.returncode == 0 and "Success" in (r.stdout or ""):
                 return True, r.stdout.strip()
-            return False, r.stderr.strip() or r.stdout.strip()
+            pesan = pesan + " | adb install: " + (r.stderr.strip() or r.stdout.strip())
         except subprocess.TimeoutExpired:
-            return False, "Timeout — install gagal"
+            pesan = pesan + " | adb install: Timeout"
         except FileNotFoundError:
-            return False, "adb.exe tidak ditemukan"
+            pesan = pesan + " | adb.exe tidak ditemukan"
         except Exception as e:
-            return False, str(e)
+            pesan = pesan + f" | adb install: {e}"
+        # 4) diagnosa avc
+        if "avc" in pesan.lower() or "denied" in pesan.lower():
+            diagnosa = cls._ambil_diagnosa_avc(ip)
+            return False, ("Install ditolak oleh pengaman ROM (SELinux avc: denied).\n\n"
+                           f"{pesan}\n\n{diagnosa}")
+        return False, pesan or "Instalasi ditolak TV (hasil tidak jelas)"
 
     @classmethod
     def adb_install_with_progress(cls, ip, apk_path, progress_cb=None):
@@ -2191,6 +2271,9 @@ class ADBHelper:
         Fase 1: push APK (0–80%) — persen di-parse dari output streaming adb.
         Fase 2: pm install (85–100%) — tanpa persen, ditandai indeterminate.
         progress_cb(persen: int, pesan: str) dipanggil dari thread ini.
+
+        Jalur target: /data/local/tmp dulu (anti avc: denied), fallback
+        /sdcard/Download, lalu streaming adb install.
         """
         def _set(pct, pesan):
             if progress_cb:
@@ -2201,44 +2284,69 @@ class ADBHelper:
 
         if not os.path.isfile(apk_path):
             return False, "File APK tidak ditemukan"
-        remote = "/sdcard/Download/rr_tv_client.apk"
-        _set(2, "Mengirim APK ke TV…")
+
+        jalur_gagal = []
+        for remote in ("/data/local/tmp/rr_tv_client.apk",
+                       "/sdcard/Download/rr_tv_client.apk"):
+            _set(2, f"Mengirim APK ke TV ({remote})…")
+            try:
+                proc = subprocess.Popen(
+                    [cls._adb_binary(), "-s", f"{ip}:5555", "push", apk_path, remote],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    **subprocess_no_window_kwargs())
+            except FileNotFoundError:
+                return False, "adb.exe tidak ditemukan"
+            except Exception as e:
+                return False, str(e)
+            try:
+                for line in iter(proc.stdout.readline, ""):
+                    m = re.search(r"\[\s*(\d+)\s*%\]", line or "")
+                    if m:
+                        try:
+                            pct = max(0, min(100, int(m.group(1))))
+                            _set(pct * 8 // 10, f"Mengirim APK ke TV… {pct}%")
+                        except Exception:
+                            pass
+                proc.wait(timeout=120)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return False, "Timeout — file APK terlalu besar"
+            if proc.returncode != 0:
+                jalur_gagal.append(f"{remote}: push ditolak (SELinux?)")
+                continue
+            _set(85, "Memasang APK… mohon tunggu (bisa 1–3 menit).")
+            ok, out = cls._pm_install(ip, remote)
+            if ok and "Success" in (out or ""):
+                _set(100, "✅ Selesai")
+                return True, out.strip()
+            jalur_gagal.append(f"{remote}: {out or 'pm install ditolak'}")
+
+        # Fallback streaming adb install
+        _set(86, "Mencoba jalur streaming…")
         try:
-            proc = subprocess.Popen(
-                ["adb", "-s", f"{ip}:5555", "push", apk_path, remote],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                **subprocess_no_window_kwargs())
+            r = subprocess.run([cls._adb_binary(), "-s", f"{ip}:5555",
+                                "install", "-r", apk_path],
+                               capture_output=True, text=True, timeout=180,
+                               **subprocess_no_window_kwargs())
+            if r.returncode == 0 and "Success" in (r.stdout or ""):
+                _set(100, "✅ Selesai")
+                return True, r.stdout.strip()
+            jalur_gagal.append("streaming: " + (r.stderr.strip() or r.stdout.strip()))
         except FileNotFoundError:
             return False, "adb.exe tidak ditemukan"
         except Exception as e:
-            return False, str(e)
-        try:
-            for line in iter(proc.stdout.readline, ""):
-                m = re.search(r"\[\s*(\d+)\s*%\]", line or "")
-                if m:
-                    try:
-                        pct = max(0, min(100, int(m.group(1))))
-                        _set(pct * 8 // 10, f"Mengirim APK ke TV… {pct}%")
-                    except Exception:
-                        pass
-            proc.wait(timeout=120)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return False, "Timeout — file APK terlalu besar"
-        if proc.returncode != 0:
-            return False, "Push APK ke TV gagal"
-        _set(85, "Memasang APK… mohon tunggu (bisa 1–3 menit).")
-        ok, out = cls.adb_shell(ip, "pm install -r " + remote, timeout=240)
-        if not ok:
-            return False, out or "pm install gagal"
-        if "Success" not in (out or ""):
-            return False, out or "Instalasi ditolak TV (hasil tidak jelas)"
-        _set(100, "✅ Selesai")
-        return True, out.strip()
+            jalur_gagal.append(f"streaming: {e}")
+
+        pesan = "\n".join(jalur_gagal)
+        if "avc" in pesan.lower() or "denied" in pesan.lower():
+            diagnosa = cls._ambil_diagnosa_avc(ip)
+            return False, ("Install ditolak oleh pengaman ROM (SELinux avc: denied).\n\n"
+                           f"{pesan}\n\n{diagnosa}")
+        return False, pesan or "Instalasi ditolak TV (hasil tidak jelas)"
 
     @classmethod
     def ping_host(cls, host, port=5555, timeout=3):
@@ -2545,33 +2653,16 @@ class DialogInstallAPK(ctk.CTkToplevel):
         fname = os.path.basename(apk_path)
         self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Install {fname} ke {ip}...", C_TEXT)
 
-        # Push APK dulu
-        self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 Push APK ke TV...", C_YELLOW)
-        ok, msg = ADBHelper.adb_push(ip, apk_path, "/sdcard/Download/")
-        if not ok:
-            self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Push gagal: {msg}", C_RED)
-            self.after(0, lambda: self.btn_install.configure(state="normal", text="📱 Install APK"))
-            self.after(0, lambda: self.progress.set(0))
-            return
-        self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Push selesai", C_GREEN)
-        self.after(0, lambda: self.progress.set(0.3))
-
-        # Install via ADB
+        # ADBHelper.adb_install sudah multi-jalur: /data/local/tmp →
+        # /sdcard/Download → streaming — dengan diagnosa avc bila ditolak.
         self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] 📲 Install APK (mohon tunggu)...", C_YELLOW)
         ok, msg = ADBHelper.adb_install(ip, apk_path)
         if ok:
             self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Install berhasil!", C_GREEN)
             self.after(0, lambda: self.progress.set(1))
         else:
-            # Coba install langsung dari path lokal
-            self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ Install remote gagal, coba langsung: {msg}", C_YELLOW)
-            ok2, msg2 = ADBHelper.adb_install(ip, apk_path)
-            if ok2:
-                self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Install berhasil!", C_GREEN)
-                self.after(0, lambda: self.progress.set(1))
-            else:
-                self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Install gagal: {msg2}", C_RED)
-                self.after(0, lambda: self.progress.set(0))
+            self._append_log(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Install gagal: {msg}", C_RED)
+            self.after(0, lambda: self.progress.set(0))
 
         self.after(0, lambda: self.btn_install.configure(state="normal", text="📱 Install APK"))
 
@@ -4641,6 +4732,21 @@ class LoginPage(ctk.CTkFrame):
                 except Exception:
                     pass
             if uname:
+                # Pastikan akun terdaftar di config lokal (username dari Firestore
+                # belum tentu ada di 'users'), agar ganti password & fitur lain jalan.
+                try:
+                    def _provisi(cfg):
+                        users = cfg.get("users")
+                        if not isinstance(users, dict):
+                            users = {}
+                        if uname not in users:
+                            users[uname] = {"password_enc": hash_password("google_" + uname),
+                                            "role": "admin", "email": email}
+                            cfg["users"] = users
+                        return cfg
+                    ConfigManager.update(_provisi)
+                except Exception:
+                    pass
                 self.on_login_success(uname, "admin")
             else:
                 self._show_register_google_dialog(email, nama)
@@ -6594,47 +6700,36 @@ class DialogStatusClient(ctk.CTkToplevel):
         """Unduh APK client terbaru lalu pasang via ADB.
 
         Sumber URL (prioritas):
-        1. Auto-detect: asset .apk pada release GitHub terbaru (dari
+        1. Config 'apk_tv_url' (URL APK langsung atau manifest.json).
+        2. Auto-detect: asset .apk pada release GitHub terbaru (dari
            'update_manifest_url', pola github.com/<owner>/<repo>).
-        2. Config 'apk_tv_url' (URL APK langsung atau manifest.json).
-        3. Dialog manual bila keduanya tidak tersedia.
+        3. URL resmi bawaan (fallback terakhir tanpa dialog manual).
         """
         if self._busy:
             return
         url = ""
         source = ""
-        # 1) Auto-detect dari GitHub release terbaru
-        manifest_url = str(ConfigManager.get("update_manifest_url") or "").strip()
-        if manifest_url:
-            try:
-                from scripts import check_update
-                found = check_update.find_latest_apk_url(manifest_url)
-                if found:
-                    url = found
-                    source = "GitHub release terbaru"
-            except Exception:
-                pass
-        # 2) Fallback: URL yang sudah diatur manual di config
+        # 1) URL yang sudah diatur di config (diisi otomatis saat rilis)
+        url = str(ConfigManager.get("apk_tv_url") or "").strip()
+        if url:
+            source = "config 'apk_tv_url'"
+        # 2) Auto-detect dari GitHub release terbaru
         if not url:
-            cfg_url = str(ConfigManager.get("apk_tv_url") or "").strip()
-            if cfg_url:
-                url = cfg_url
-                source = "config 'apk_tv_url'"
-        # 3) Fallback: minta URL manual
+            manifest_url = str(ConfigManager.get("update_manifest_url") or "").strip()
+            if manifest_url:
+                try:
+                    from scripts import check_update
+                    found = check_update.find_latest_apk_url(manifest_url)
+                    if found:
+                        url = found
+                        source = "GitHub release terbaru"
+                except Exception:
+                    pass
+        # 3) URL resmi bawaan (tanpa dialog manual)
         if not url:
-            dlg = ctk.CTkInputDialog(
-                text="URL APK client TV belum diatur (auto-detect GitHub tidak\n"
-                     "menemukan asset .apk di release terbaru).\n\n"
-                     "Tempel URL APK versi terbaru (atau manifest.json yang\n"
-                     "berisi asset_url / sha256), contoh:\n"
-                     "https://github.com/<user>/<repo>/releases/latest/download/tv_client.apk",
-                title="⬆ Upgrade APK TV — URL APK")
-            u = dlg.get_input()
-            if not u or not u.strip():
-                return
-            u = u.strip()
-            source = "URL manual"
-            url = u
+            url = ("https://github.com/dedekemoking-commits/rr_billing_pro_windows/"
+                   "releases/latest/download/RRBillingPro-TV.apk")
+            source = "URL resmi otomatis"
         if url:
             try:
                 ConfigManager.set("apk_tv_url", url)
@@ -12925,6 +13020,14 @@ class AutoRentApp(ctk.CTk):
     def _on_login(self, username, role):
         self.current_user = username
         self.current_role = role
+        self.current_user_email = ""
+        try:
+            users = ConfigManager.get("users", {})
+            rec = users.get(username) if isinstance(users, dict) else None
+            if isinstance(rec, dict):
+                self.current_user_email = str(rec.get("email", "") or "")
+        except Exception:
+            pass
         self.geometry("1280x800")
         self.resizable(True, True)
         self.state("zoomed")
@@ -13435,17 +13538,7 @@ class AutoRentApp(ctk.CTk):
         self._row_update.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(self._row_update, text="🔄", font=("Segoe UI Emoji", 14),
                      width=28, anchor="center").pack(side="left", padx=(2, 0))
-        ctk.CTkButton(self._row_update, text="  Update via Git", anchor="w", height=36,
-                      font=("Russo One", 11, "bold"),
-                      fg_color="transparent", hover_color="#1A4A1A",
-                      text_color="#00DD88", corner_radius=8,
-                      command=self._on_git_update).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
-        row_dl = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        row_dl.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(row_dl, text="⬇", font=("Segoe UI Emoji", 14),
-                     width=28, anchor="center").pack(side="left", padx=(2, 0))
-        ctk.CTkButton(row_dl, text="  Download & Install", anchor="w", height=36,
+        ctk.CTkButton(self._row_update, text="  Download & Install", anchor="w", height=36,
                       font=("Russo One", 10, "bold"),
                       fg_color="transparent", hover_color="#1A3A5A",
                       text_color="#3A8AFF", corner_radius=8,
@@ -13508,82 +13601,9 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             self.after(0, lambda e=e: messagebox.showerror("Cek Pembaruan - Error", str(e)))
     
-    def _on_git_update(self):
-        """Check and update via Git, run in background thread."""
-        threading.Thread(target=self._git_update_thread, daemon=True).start()
-    
-    def _git_update_thread(self):
-        """Background thread untuk check dan update via Git."""
-        try:
-            from scripts.git_updater import GitUpdater
-            
-            repo_path = os.path.dirname(os.path.abspath(__file__))
-            updater = GitUpdater(repo_path, remote="origin", branch="master")
-            
-            has_update, msg, info = updater.check_for_updates()
-            
-            if not has_update:
-                self.after(0, lambda: messagebox.showinfo("📡 Update Git", msg))
-                return
-            
-            commits_info = ""
-            if info and info.get("commits_info"):
-                commits_info = f"\n\nCommit:\n{info['commits_info'][:500]}"
-            
-            confirm_msg = (
-                f"{msg}\n"
-                f"Local: {info['local_commit']} → Remote: {info['remote_commit']}"
-                f"{commits_info}\n\n"
-                "Lanjutkan update dan restart aplikasi?"
-            )
-            
-            # Tanya user via main thread
-            import threading as _th
-            ev = _th.Event()
-            res = [False]
-            def _ask():
-                res[0] = messagebox.askyesno("📡 Update via Git", confirm_msg)
-                ev.set()
-            self.after(0, _ask)
-            ev.wait()
-            
-            if not res[0]:
-                self.after(0, lambda: messagebox.showinfo("Dibatalkan", "Update dibatalkan."))
-                return
-            
-            # Pull updates
-            self.after(0, lambda: messagebox.showinfo(
-                "Sedang Update", "Sedang pull updates dari Git...\nSilakan tunggu..."))
-            success, pull_msg = updater.pull_updates()
-            
-            if not success:
-                self.after(0, lambda: messagebox.showerror("❌ Update Error", f"Update gagal:\n{pull_msg}"))
-                return
-            
-            AuditLogger.log(
-                action="system_update",
-                username=self.current_user or "system",
-                status="success",
-                details={"type": "git", "message": pull_msg}
-            )
-            
-            self.after(0, lambda: messagebox.showinfo(
-                "✅ Update Berhasil",
-                f"Update berhasil!\n\n{pull_msg}\n\nAplikasi akan restart sekarang..."))
-            self.after(2000, lambda: self._do_restart())
-            
-        except ImportError as e:
-            self.after(0, lambda e=e: messagebox.showerror(
-                "❌ Module Error",
-                f"Git updater module tidak ditemukan:\n{e}\n\n"
-                "Pastikan scripts/git_updater.py ada."
-            ))
-        except Exception as e:
-            self.after(0, lambda e=e: messagebox.showerror("❌ Error", f"Update error:\n{str(e)}"))
-
     def _show_tab(self, key):
         role = self.current_role or "kasir"
-        kasir_allowed = {"dashboard", "warnet", "aktivasi", "riwayat"}
+        kasir_allowed = {"dashboard", "warnet", "aktivasi", "riwayat", "booking"}
         if role != "admin" and key not in kasir_allowed:
             messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat mengakses fitur ini.")
             return
@@ -17515,6 +17535,19 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkLabel(hdr, text="Halaman pelanggan: rrcctv.online/b/<username>",
                      font=FONT_SMALL, text_color=C_MUTED).pack(side="right", padx=18)
 
+        role_skrg = self.current_role or "kasir"
+        is_admin = role_skrg == "admin"
+        owner = (self.current_user or "").strip()
+        # Kasir melihat data pemilik (admin_utama) dalam mode lihat-saja
+        if not is_admin:
+            try:
+                _users = ConfigManager.get("users", {})
+                _rec = _users.get(self.current_user, {}) if isinstance(_users, dict) else {}
+                if isinstance(_rec, dict) and _rec.get("admin_utama"):
+                    owner = str(_rec["admin_utama"]).strip()
+            except Exception:
+                pass
+
         body = ctk.CTkFrame(f, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=10)
         body.grid_columnconfigure(0, weight=5)
@@ -17529,7 +17562,7 @@ class AutoRentApp(ctk.CTk):
 
         cfg = ConfigManager.load()
         psemua = cfg.get("profil_rental", {}) or {}
-        puser = psemua.get(self.current_user, {}) or {}
+        puser = psemua.get(owner, {}) or {}
         if not isinstance(puser, dict):
             puser = {}
 
@@ -17552,6 +17585,9 @@ class AutoRentApp(ctk.CTk):
                               border_color=C_BORDER, font=FONT_BODY, height=32)
         e_nama.insert(0, str(puser.get("nama_rental", "")))
         e_nama.pack(fill="x", padx=16, pady=(0, 6))
+        if not is_admin:
+            for _e in (e_nama_dana, e_dana, e_nama):
+                _e.configure(state="disabled")
 
         logo_box = {"b64": str(puser.get("logo", "") or "")}
         logo_row = ctk.CTkFrame(set_f, fg_color="transparent")
@@ -17562,12 +17598,13 @@ class AutoRentApp(ctk.CTk):
                                    font=FONT_SMALL,
                                    text_color=C_GREEN if logo_box["b64"] else C_MUTED, anchor="w")
         lbl_logo_st.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(logo_row, text="📁 Pilih", width=80, height=28,
-                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
-                      command=lambda: self._profil_pilih_logo(logo_box, lbl_logo_st)).pack(side="left", padx=(0, 5))
-        ctk.CTkButton(logo_row, text="🗑 Hapus", width=70, height=28,
-                      fg_color=C_RED, font=("Russo One", 9, "bold"),
-                      command=lambda: self._profil_hapus_logo(logo_box, lbl_logo_st)).pack(side="left")
+        if is_admin:
+            ctk.CTkButton(logo_row, text="📁 Pilih", width=80, height=28,
+                          fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                          command=lambda: self._profil_pilih_logo(logo_box, lbl_logo_st)).pack(side="left", padx=(0, 5))
+            ctk.CTkButton(logo_row, text="🗑 Hapus", width=70, height=28,
+                          fg_color=C_RED, font=("Russo One", 9, "bold"),
+                          command=lambda: self._profil_hapus_logo(logo_box, lbl_logo_st)).pack(side="left")
 
         qr_box = {"b64": str(puser.get("qr_pembayaran", "") or "")}
         qr_row = ctk.CTkFrame(set_f, fg_color="transparent")
@@ -17579,12 +17616,13 @@ class AutoRentApp(ctk.CTk):
                                  font=FONT_SMALL,
                                  text_color=C_GREEN if qr_box["b64"] else C_MUTED, anchor="w")
         lbl_qr_st.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(qr_row, text="📁 Pilih", width=80, height=28,
-                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
-                      command=lambda: self._profil_pilih_qr(qr_box, lbl_qr_st)).pack(side="left", padx=(0, 5))
-        ctk.CTkButton(qr_row, text="🗑 Hapus", width=70, height=28,
-                      fg_color=C_RED, font=("Russo One", 9, "bold"),
-                      command=lambda: self._profil_hapus_qr(qr_box, lbl_qr_st)).pack(side="left")
+        if is_admin:
+            ctk.CTkButton(qr_row, text="📁 Pilih", width=80, height=28,
+                          fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                          command=lambda: self._profil_pilih_qr(qr_box, lbl_qr_st)).pack(side="left", padx=(0, 5))
+            ctk.CTkButton(qr_row, text="🗑 Hapus", width=70, height=28,
+                          fg_color=C_RED, font=("Russo One", 9, "bold"),
+                          command=lambda: self._profil_hapus_qr(qr_box, lbl_qr_st)).pack(side="left")
         ctk.CTkLabel(set_f,
                      text="QR statis (QRIS / rekening) tampil di halaman web booking saat "
                           "pelanggan memilih metode Lunas / DP.",
@@ -17598,20 +17636,26 @@ class AutoRentApp(ctk.CTk):
                      font=FONT_SMALL, text_color=C_MUTED, justify="left", anchor="w",
                      wraplength=360).pack(anchor="w", padx=16, pady=(8, 4))
 
-        def _simpan_booking_set():
-            data = {
-                "nama_dana": sanitize_text(e_nama_dana.get()),
-                "no_dana": sanitize_text(e_dana.get()),
-                "nama_rental": sanitize_text(e_nama.get()),
-                "logo": logo_box["b64"],
-                "qr_pembayaran": qr_box["b64"],
-            }
-            self._simpan_profil_rental(data)
-            self._qr_push_menu_bg()
+        if is_admin:
+            def _simpan_booking_set():
+                data = {
+                    "nama_dana": sanitize_text(e_nama_dana.get()),
+                    "no_dana": sanitize_text(e_dana.get()),
+                    "nama_rental": sanitize_text(e_nama.get()),
+                    "logo": logo_box["b64"],
+                    "qr_pembayaran": qr_box["b64"],
+                }
+                self._simpan_profil_rental(data)
+                self._qr_push_menu_bg()
 
-        ctk.CTkButton(set_f, text="💾  Simpan & Push ke Web", height=36,
-                      fg_color=C_ACCENT2, font=("Russo One", 10, "bold"), text_color="white",
-                      command=_simpan_booking_set).pack(anchor="w", padx=16, pady=(10, 14))
+            ctk.CTkButton(set_f, text="💾  Simpan & Push ke Web", height=36,
+                          fg_color=C_ACCENT2, font=("Russo One", 10, "bold"), text_color="white",
+                          command=_simpan_booking_set).pack(anchor="w", padx=16, pady=(10, 14))
+        else:
+            ctk.CTkLabel(set_f, text="🔒  Mode Lihat — pengaturan hanya admin\n"
+                                     "(kasir dapat melihat riwayat & player)",
+                         font=FONT_LABEL, text_color=C_YELLOW, justify="left", anchor="w",
+                         wraplength=360).pack(anchor="w", padx=16, pady=(10, 14))
 
         # ── KANAN: RIWAYAT BOOKING ──────────────────────────────────────────
         riw_f = ctk.CTkFrame(body, fg_color=C_PANEL, corner_radius=14)
@@ -17645,6 +17689,15 @@ class AutoRentApp(ctk.CTk):
         if not uname:
             self._booking_riwayat_running = False
             return
+        # Kasir melihat booking milik pemiliknya (admin_utama)
+        if (self.current_role or "kasir") != "admin":
+            try:
+                _users = ConfigManager.get("users", {})
+                _rec = _users.get(self.current_user, {}) if isinstance(_users, dict) else {}
+                if isinstance(_rec, dict) and _rec.get("admin_utama"):
+                    uname = str(_rec["admin_utama"]).strip().lower()
+            except Exception:
+                pass
 
         def worker():
             docs = []
@@ -18651,19 +18704,6 @@ class AutoRentApp(ctk.CTk):
                             self.after(0, lambda m=msg: messagebox.showinfo("Pembaruan Tersedia", m))
                     except Exception:
                         pass
-                else:
-                    # Fallback: cek via Git
-                    try:
-                        from scripts.git_updater import GitUpdater
-                        repo_path = os.path.dirname(os.path.abspath(__file__))
-                        updater = GitUpdater(repo_path, remote="origin", branch="master")
-                        has_update, msg, info = updater.check_for_updates()
-                        if has_update:
-                            self.after(0, lambda m=msg: messagebox.showinfo(
-                                "📡 Update Tersedia",
-                                f"{m}\n\nKlik 'Update via Git' di sidebar untuk mengupdate."))
-                    except Exception:
-                        pass
             except Exception:
                 pass
             try:
@@ -18696,14 +18736,6 @@ class AutoRentApp(ctk.CTk):
                             has_update = True
                     except Exception:
                         pass
-                else:
-                    try:
-                        from scripts.git_updater import GitUpdater
-                        repo_path = os.path.dirname(os.path.abspath(__file__))
-                        updater = GitUpdater(repo_path, remote="origin", branch="master")
-                        has_update, msg, info = updater.check_for_updates()
-                    except Exception:
-                        pass
                 # Update sidebar notification dot
                 self.after(0, lambda hu=has_update: self._set_update_notification(hu))
             except Exception:
@@ -18723,26 +18755,21 @@ class AutoRentApp(ctk.CTk):
                 elif isinstance(w, ctk.CTkLabel) and not has_update:
                     w.configure(text="🔄")
 
+    DEFAULT_MANIFEST_URL = ("https://github.com/dedekemoking-commits/rr_billing_pro_windows/"
+                            "releases/latest/download/manifest.json")
+
     def _download_and_install_update(self):
         """Download & install update EXE RR Billing Pro dengan aman:
         manifest (tanda tangan RSA) -> konfirmasi -> unduh (cek sha256) -> ganti exe -> restart.
+        URL manifest diisi otomatis (URL resmi) bila belum diatur.
         """
-        manifest = ConfigManager.get('update_manifest_url') or ""
-        if not manifest.strip():
-            dlg = ctk.CTkInputDialog(
-                text="URL manifest.json belum diatur.\n\n"
-                     "Tempel URL manifest dari developer, contoh:\n"
-                     "https://github.com/<user>/<repo>/releases/latest/download/manifest.json",
-                title="⬇ Download & Install — URL Manifest")
-            url = dlg.get_input()
-            if not url or not url.strip():
-                return
-            url = url.strip()
+        manifest = str(ConfigManager.get('update_manifest_url') or "").strip()
+        if not manifest:
+            manifest = self.DEFAULT_MANIFEST_URL
             try:
-                ConfigManager.set('update_manifest_url', url)
+                ConfigManager.set('update_manifest_url', manifest)
             except Exception:
                 pass
-            manifest = url
         threading.Thread(target=self._download_install_thread,
                          args=(manifest,), daemon=True).start()
 
@@ -19339,6 +19366,14 @@ class AutoRentApp(ctk.CTk):
 
             ctk.CTkLabel(user_card, text="Ganti Password Akun Saya:",
                          font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(16, 4))
+            ctk.CTkLabel(user_card, text="Username (dibuat otomatis saat login — tidak bisa diubah):",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=20, pady=(0, 2))
+            self.entry_username_fix = ctk.CTkEntry(user_card, fg_color=C_BTN, text_color=C_ACCENT,
+                                                    border_color=C_BORDER, font=FONT_BODY,
+                                                    height=34, width=240)
+            self.entry_username_fix.insert(0, self.current_user or "")
+            self.entry_username_fix.configure(state="readonly")
+            self.entry_username_fix.pack(anchor="w", padx=20, pady=(0, 8))
             self.entry_new_pass = ctk.CTkEntry(user_card, placeholder_text="Password baru",
                                                 fg_color=C_BTN, text_color=C_ACCENT,
                                                 border_color=C_BORDER, font=FONT_BODY,
@@ -19353,25 +19388,44 @@ class AutoRentApp(ctk.CTk):
         if len(new_pass) < 6:
             messagebox.showwarning("⚠ Terlalu Pendek", "Password minimal 6 karakter.")
             return
-        users = ConfigManager.get("users", LoginPage.DEFAULT_USERS)
-        if self.current_user in users:
-            users[self.current_user]["password_enc"] = hash_password(new_pass)
-            ConfigManager.set("users", users)
+        user = self.current_user or ""
+        if not user:
+            messagebox.showerror("✖ Error", "Tidak ada akun yang sedang login.")
+            return
+        # Atomic load → mutate → save dalam satu lock. Jika akun (mis. dari login
+        # Google) belum ada di 'users', dibuat otomatis (role admin).
+        def mutator(cfg):
+            users = cfg.get("users")
+            if not isinstance(users, dict):
+                users = {}
+            if user not in users:
+                users[user] = {"password_enc": hash_password(new_pass),
+                               "role": "admin",
+                               "email": getattr(self, "current_user_email", "") or ""}
+            else:
+                users[user]["password_enc"] = hash_password(new_pass)
+            cfg["users"] = users
+            return cfg
+        try:
+            ConfigManager.update(mutator)
+        except Exception as e:
             AuditLogger.log(
                 action="password_change",
-                username=self.current_user,
-                status="success",
-                details={"initiated_by": "self"}
-            )
-            messagebox.showinfo("✅ Berhasil", "Password berhasil diubah!")
-        else:
-            AuditLogger.log(
-                action="password_change",
-                username=self.current_user or "",
+                username=user,
                 status="failed",
-                details={"reason": "user_not_found"}
+                details={"reason": f"save_error: {e}"}
             )
-            messagebox.showerror("✖ Error", "User tidak ditemukan di config.")
+            messagebox.showerror("✖ Error",
+                                 f"Gagal menyimpan password:\n{e}\n\n"
+                                 "Pastikan aplikasi punya izin tulis di folder config.")
+            return
+        AuditLogger.log(
+            action="password_change",
+            username=user,
+            status="success",
+            details={"initiated_by": "self"}
+        )
+        messagebox.showinfo("✅ Berhasil", "Password berhasil diubah!")
 
     # ── BACKUP / RESTORE ──────────────────────────────────────────────────
     def _export_backup(self):

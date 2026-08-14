@@ -5,13 +5,13 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.rrbillingpro.tvclient.permission.OverlayPermission
 
 /**
  * Overlay PIN "Panggil Operator/Kasir" — pojok KIRI atas layar TV.
@@ -107,8 +107,9 @@ class PinOverlay(private val context: Context) {
     }
 
     companion object {
+        @Deprecated("Gunakan OverlayPermission.isGranted() yang kompatibel semua ROM")
         fun canDrawOverlays(context: Context): Boolean =
-            Settings.canDrawOverlays(context)
+            OverlayPermission.isGranted(context)
     }
 
     private fun dp(value: Int): Int =

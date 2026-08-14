@@ -28,6 +28,7 @@ import com.rrbillingpro.tvclient.net.TimerEngine
 import com.rrbillingpro.tvclient.net.WebSocketManager
 import com.rrbillingpro.tvclient.overlay.OverlayWidget
 import com.rrbillingpro.tvclient.overlay.PinOverlay
+import com.rrbillingpro.tvclient.permission.OverlayPermission
 import com.rrbillingpro.tvclient.util.Prefs
 import org.json.JSONObject
 
@@ -378,7 +379,7 @@ class TvOverlayService : Service() {
                 timer?.start(msg.sisaDetik)
                 updateTimerUi(msg.sisaDetik)
                 updateNotification("${msg.mejaId} — ${OverlayWidget.formatHms(msg.sisaDetik)}")
-                if (!OverlayWidget.canDrawOverlays(this)) {
+                if (!OverlayPermission.isGranted(this)) {
                     updateNotification("⚠ Izin overlay belum aktif — aktifkan di Pengaturan")
                 }
             }

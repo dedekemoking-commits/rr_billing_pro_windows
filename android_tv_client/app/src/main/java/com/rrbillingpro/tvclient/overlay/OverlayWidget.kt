@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -12,6 +11,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import com.rrbillingpro.tvclient.R
+import com.rrbillingpro.tvclient.permission.OverlayPermission
 
 /**
  * Floating Overlay Widget (sudut kanan atas) — dibangun dengan WindowManager
@@ -78,7 +78,8 @@ class OverlayWidget(private val context: Context) {
         } catch (e: Exception) {
             root = null
             Log.w("RRBillingTV", "Gagal menampilkan overlay: ${e.message} — " +
-                    "cek izin Display over other apps")
+                    "cek izin \u201cTampilkan di atas aplikasi lain\u201d " +
+                    "(Settings.canDrawOverlays=${OverlayPermission.isGranted(context)})")
         }
     }
 
@@ -126,8 +127,9 @@ class OverlayWidget(private val context: Context) {
     }
 
     companion object {
+        @Deprecated("Gunakan OverlayPermission.isGranted() yang kompatibel semua ROM")
         fun canDrawOverlays(context: Context): Boolean =
-            Settings.canDrawOverlays(context)
+            OverlayPermission.isGranted(context)
 
         fun formatHms(seconds: Int): String {
             val s = if (seconds < 0) 0 else seconds
