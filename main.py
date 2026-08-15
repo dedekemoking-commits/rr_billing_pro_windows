@@ -1208,7 +1208,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.12"
+APP_VERSION = "2.4.13"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -11503,13 +11503,15 @@ class AutoRentApp(ctk.CTk):
                             continue
                 except Exception:
                     pass
+                pus = (ConfigManager.load().get("profil_rental", {}) or {}).get(owner, {}) or {}
+                if not isinstance(pus, dict):
+                    pus = {}
                 FirestoreClient().set_document(
                     f"call_meta/{owner}",
                     {"tv_status": tv_status,
                      "devices": devices,
                      "daftar_tv": self._get_daftar_tv_nama(),
-                     "no_hp": str((ConfigManager.load().get("profil_rental", {}) or {})
-                                 .get(self.current_user, {}).get("no_hp", "") or "").strip(),
+                     "no_hp": str(pus.get("no_hp") or pus.get("hp") or "").strip(),
                      "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
                     merge=True)
             except Exception as e:
@@ -12396,7 +12398,7 @@ class AutoRentApp(ctk.CTk):
                 owner = self._resolve_license_user()
                 if not owner:
                     return
-                pus = (ConfigManager.load().get("profil_rental", {}) or {}).get(self.current_user, {}) or {}
+                pus = (ConfigManager.load().get("profil_rental", {}) or {}).get(owner, {}) or {}
                 if not isinstance(pus, dict):
                     pus = {}
                 nama_rental = str(pus.get("nama_rental", "") or "").strip() or "RR Billing Pro"
@@ -12421,7 +12423,10 @@ class AutoRentApp(ctk.CTk):
                     "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 for k in ("nama_dana", "no_dana", "alamat", "no_hp"):
-                    v = str(pus.get(k, "") or "").strip()
+                    if k == "no_hp":
+                        v = str(pus.get("no_hp") or pus.get("hp") or "").strip()
+                    else:
+                        v = str(pus.get(k, "") or "").strip()
                     if v:
                         data[k] = v
                 if str(pus.get("qr_pembayaran", "") or "").strip():
@@ -19269,7 +19274,7 @@ class AutoRentApp(ctk.CTk):
         e_nama_pemilik = _field_profil(rental_card, "👤 Nama Pemilik",
                                        profil_user.get("nama_pemilik", ""))
         e_hp = _field_profil(rental_card, "📱 No HP / WhatsApp",
-                             profil_user.get("hp", ""))
+                             str(profil_user.get("hp") or profil_user.get("no_hp") or ""))
         e_email = _field_profil(rental_card, "📧 Email / Gmail",
                                 profil_user.get("email", ""))
 
@@ -19282,14 +19287,18 @@ class AutoRentApp(ctk.CTk):
         e_alamat.insert("1.0", profil_user.get("alamat", ""))
 
         def _simpan_profil_form():
+            _hp = sanitize_text(e_hp.get())
             data = {
                 "nama_rental": sanitize_text(e_nama_rental.get()),
                 "nama_pemilik": sanitize_text(e_nama_pemilik.get()),
-                "hp": sanitize_text(e_hp.get()),
+                "hp": _hp,
+                "no_hp": _hp,
                 "email": sanitize_text(e_email.get()).lower(),
                 "alamat": sanitize_text(e_alamat.get("1.0", "end")),
             }
             self._simpan_profil_rental(data)
+            self._qr_push_menu_bg()
+            self._booking_push_tv_status()
 
         ctk.CTkButton(rental_card, text="💾  Simpan Profil", height=36,
                       fg_color=C_ACCENT2, font=("Russo One", 10, "bold"),
