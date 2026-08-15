@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import threading
 import time
 from datetime import datetime
@@ -106,6 +107,14 @@ class TvWsHub:
         # meja_id -> dict detail_transaksi untuk dikirim ulang saat reconnect.
         self._locked: dict[str, dict] = {}
         self._locked_lock = threading.Lock()
+
+        # R4: meja yang SUDAH pernah dikirimi video promosi bawaan (sekali per
+        # run server) — mencegah replay SHOW_MEDIA saat reconnect blip jaringan.
+        self._media_sent_once: set[str] = set()
+
+        # Folder log debug R4 — diisi main.py (app_log_dir) supaya konsisten
+        # dengan app.log; None = fallback (folder exe / folder file ini).
+        self._r4_log_dir: Optional[str] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -358,6 +367,26 @@ class TvWsHub:
                                        locked.get("detail_transaksi", {})))
         else:
             cmds.append(self._msg_stop(meja_id))
+            # R4: video promosi bawaan (user NON-LIFETIME: trial/bulanan/tahunan)
+            # — kirim SEKALI saat TV pertama terhubung dalam keadaan idle supaya
+            # video sampai ke TV tanpa aksi kasir. Tidak replay pada reconnect
+            # (flag _media_sent_once); replay hanya saat TV bangun dari tidur
+            # (perilaku APK R3: MediaActivity.putar saat ACTION_SCREEN_ON).
+            try:
+                app = getattr(self, "app", None)
+                if app is None:
+                    self._r4_log(meja_id, "app=None")
+                elif app._lisensi_lifetime():
+                    self._r4_log(meja_id, "lifetime=True (skip)")
+                else:
+                    url = app._promo_default_media_url()
+                    self._r4_log(meja_id, "url=%r sent_once=%s" % (url, meja_id in self._media_sent_once))
+                    if url and meja_id not in self._media_sent_once:
+                        self._media_sent_once.add(meja_id)
+                        cmds.append({"action": "SHOW_MEDIA", "meja_id": meja_id,
+                                     "type": "video", "url": url})
+            except Exception as e:
+                self._r4_log(meja_id, "EXC %r" % (e,))
 
         if self._state_extra is not None:
             try:
@@ -367,6 +396,34 @@ class TvWsHub:
             except Exception:
                 _LOGGER.exception("state_extra error")
         return cmds
+
+    def _r4_log(self, meja_id: str, pesan: str) -> None:
+        """Log debug R4 (SHOW_MEDIA bawaan) ke tv_ws_hub_debug.log di folder
+        aplikasi — membantu diagnosa tanpa console (EXE tanpa window).
+        Folder: _r4_log_dir (diisi main.py) → exe/folder file → LOCALAPPDATA."""
+        try:
+            import os
+            base = self._r4_log_dir
+            if not base:
+                if getattr(sys, "frozen", False):
+                    base = os.path.dirname(os.path.abspath(sys.executable))
+                else:
+                    base = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(base, "tv_ws_hub_debug.log")
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write("[R4] %s %s: %s\n"
+                            % (meja_id, time.strftime("%H:%M:%S"), pesan))
+            except OSError:
+                fallback = os.path.join(
+                    os.environ.get("LOCALAPPDATA", ""), "RRBillingPro")
+                os.makedirs(fallback, exist_ok=True)
+                with open(os.path.join(fallback, "tv_ws_hub_debug.log"),
+                          "a", encoding="utf-8") as f:
+                    f.write("[R4] %s %s: %s\n"
+                            % (meja_id, time.strftime("%H:%M:%S"), pesan))
+        except Exception:
+            pass
 
     def _find_kartu(self, meja_id: str):
         app = self.app

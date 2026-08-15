@@ -1031,11 +1031,11 @@ C_BTN    = _default_theme["btn"]
 C_BORDER = _default_theme["border"]
 C_ORANGE = _default_theme["orange"]
 
-FONT_TITLE  = ("Russo One",  18, "bold")
-FONT_SUB    = ("Russo One",  12, "bold")
-FONT_BODY   = ("Courier New", 12)
-FONT_SMALL  = ("Courier New", 10)
-FONT_LABEL  = ("Consolas",  11)
+FONT_TITLE  = ("Russo One",  20, "bold")
+FONT_SUB    = ("Russo One",  14, "bold")
+FONT_BODY   = ("Courier New", 14)
+FONT_SMALL  = ("Courier New", 12)
+FONT_LABEL  = ("Consolas",  13)
 
 # ─── FILE KONFIGURASI ─────────────────────────────────────────────────────────
 def get_app_base_dir() -> str:
@@ -1051,9 +1051,36 @@ def app_path(filename: str) -> str:
     return os.path.join(APP_BASE_DIR, filename)
 
 
+def _qris_file() -> str:
+    """Path file qris.png (QR pembayaran aktivasi): folder aplikasi → bundle
+    PyInstaller (_MEIPASS). Return "" bila tidak ada di keduanya."""
+    for base in (APP_BASE_DIR, getattr(sys, "_MEIPASS", "")):
+        if base:
+            p = os.path.join(base, "qris.png")
+            if os.path.isfile(p):
+                return p
+    return ""
+
+
 CONFIG_FILE   = app_path("rr_billing_config.json")
 LICENSE_FILE  = app_path("rr_billing_license.json")
 RIWAYAT_FILE  = app_path("rr_billing_riwayat.json")
+
+# ─── SKALA UI (font & widget) ─────────────────────────────────────────────
+# ui_scale: perbesar font/widget untuk layar PC beresolusi tinggi (font
+# 10px -> 13px pada 1.30). Diatur lewat rr_billing_config.json; fallback 1.30.
+def _load_ui_scale() -> float:
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as _f:
+            v = json.load(_f).get("ui_scale")
+        return max(1.0, min(2.0, float(v)))
+    except Exception:
+        return 1.30
+
+
+UI_SCALE = _load_ui_scale()
+ctk.set_widget_scaling(UI_SCALE)
+ctk.set_window_scaling(UI_SCALE)
 
 # ─── DATA HARGA (default) ─────────────────────────────────────────────────────
 # Harga dikelompokkan per "Grup Tarif" (mis. PS3, PS4, Room VIP),
@@ -1181,7 +1208,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.10"
+APP_VERSION = "2.4.12"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -6957,52 +6984,52 @@ class KartuTV(tk.Canvas):
 
         # TV name
         self._ids['tv_name'] = self.create_text(10, y+10,
-            text=display_label, font=("Russo One", 11, "bold"),
+            text=display_label, font=("Russo One", 13, "bold"),
             fill="white", anchor="w", tags="tv_name")
 
         # Badge status pembayaran (sebelah nama)
         self._ids['paid_badge'] = self.create_text(10, y+10,
-            text="", font=("Courier New", 8, "bold"),
+            text="", font=("Courier New", 10, "bold"),
             fill=C_GREEN, anchor="w", tags="paid_badge")
 
         # "Nama" button
         self._draw_canvas_btn("ganti_nama", W-126, y-2, 76, 24, "Nama",
-            "black", "white", ("Russo One", 8, "bold"), self._buka_ganti_nama)
+            "black", "white", ("Russo One", 10, "bold"), self._buka_ganti_nama)
 
         # "✖" button
         self._draw_canvas_btn("hapus", W-46, y-2, 36, 24, "✖",
-            "black", "white", ("Russo One", 8, "bold"), self._confirm_hapus)
+            "black", "white", ("Russo One", 10, "bold"), self._confirm_hapus)
 
         y += 26
         # IP + badge
         self._ids['ip_footer'] = self.create_text(10, y+6,
-            text=f"IP: {self.ip}", font=("Courier New", 8, "bold"),
+            text=f"IP: {self.ip}", font=("Courier New", 10, "bold"),
             fill="white", anchor="w", tags="ip_footer")
         _method = ADBHelper.get_connection_method(self.ip)
         _badge_text = "ONLINE" if _method == "atpv2" else "ADB"
         _badge_color = "#00D68F" if _method == "atpv2" else "#FFAA00"
         self._ids['metode_badge'] = self.create_text(W-10, y+6,
-            text=_badge_text, font=("Courier New", 8, "bold"),
+            text=_badge_text, font=("Courier New", 10, "bold"),
             fill=_badge_color, anchor="e", tags="metode_badge")
-        self._ids['online_dot'] = self.create_text(W-30, y+6,
-            text="●", font=("Courier New", 8, "bold"),
+        self._ids['online_dot'] = self.create_text(W-60, y+6,
+            text="●", font=("Courier New", 10, "bold"),
             fill=C_GREEN, anchor="e", tags="online_dot")
-        self._ids['cli_badge'] = self.create_text(W-58, y+6,
-            text="CLI✗", font=("Courier New", 8, "bold"),
+        self._ids['cli_badge'] = self.create_text(W-82, y+6,
+            text="CLI✗", font=("Courier New", 10, "bold"),
             fill=C_MUTED, anchor="e", tags="cli_badge")
         y = hdr_y + hdr_h + 4
 
         # ── Status row ──────────────────────────────────────────────────────
         srow_y = y
         self._ids['lbl_power'] = self.create_text(8, y+10,
-            text="● HIDEN", font=("Courier New", 9, "bold"),
+            text="● HIDEN", font=("Courier New", 11, "bold"),
             fill=C_GREEN, anchor="w", tags="lbl_power")
         self._ids['lbl_grup'] = self.create_text(80, y+10,
-            text=f"\u21bb Reguler", font=("Courier New", 9, "bold"),
+            text=f"\u21bb Reguler", font=("Courier New", 11, "bold"),
             fill=C_ACCENT2, anchor="w", tags="lbl_grup")
         self.tag_bind("lbl_grup", "<Button-1>", lambda e: self._buka_ganti_grup())
         self._ids['lbl_paket'] = self.create_text(W-8, y+10,
-            text="\u2014", font=("Courier New", 8),
+            text="\u2014", font=("Courier New", 10),
             fill=C_MUTED, anchor="e", tags="lbl_paket")
         y += 24
 
@@ -7014,7 +7041,7 @@ class KartuTV(tk.Canvas):
 
         # ── Estimasi ─────────────────────────────────────────────────────────
         self._ids['lbl_estimasi'] = self.create_text(W//2, y+6,
-            text="", font=("Courier New", 8),
+            text="", font=("Courier New", 10),
             fill=C_YELLOW, anchor="center", tags="lbl_estimasi")
         y += 16
 
@@ -7035,7 +7062,7 @@ class KartuTV(tk.Canvas):
             ("apk", "APK", "black", "white", self._buka_status_client),
         ]
         for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs1):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, bg, fg, ("Courier New", 8, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, bg, fg, ("Courier New", 10, "bold"), cmd)
         y = r1y + btn_h + 4
 
         # ── Button Row 2 ────────────────────────────────────────────────────
@@ -7052,7 +7079,7 @@ class KartuTV(tk.Canvas):
             ("pindah", "Pindah", "black", "white", self._klik_pindah, False),
         ]
         for i, (key, txt, bg, fg, cmd, disabled) in enumerate(btn_defs2):
-            self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 9, "bold"), cmd)
             if disabled:
                 self._disable_btn(key)
         y = r2y + btn_h + 4
@@ -7069,7 +7096,7 @@ class KartuTV(tk.Canvas):
             ("qr", "📱 QR", "black", "white", self._buka_qr_kartu),
         ]
         for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
-            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 9, "bold"), cmd)
         y = r3y + btn_h + 6
         # Kasir tidak boleh mengubah IP TV / media promosi / logo
         if self.role != "admin":
@@ -7878,7 +7905,7 @@ class KartuTV(tk.Canvas):
         tk.Label(win, text="Menganalisis & menyiapkan video...").pack(pady=(14, 6))
         bar = ttk.Progressbar(win, mode="indeterminate", length=380)
         bar.pack(padx=20, pady=4)
-        lbl_status = tk.Label(win, text="", font=("Segoe UI", 9))
+        lbl_status = tk.Label(win, text="", font=("Segoe UI", 11))
         lbl_status.pack(pady=2)
         state = {"batal": False, "mulai": time.time()}
 
@@ -7972,7 +7999,7 @@ class KartuTV(tk.Canvas):
         tk.Label(win, text="Mengunduh ffmpeg untuk normalisasi video...").pack(pady=(14, 6))
         bar = ttk.Progressbar(win, mode="determinate", length=400, maximum=100)
         bar.pack(padx=20, pady=4)
-        lbl = tk.Label(win, text="0%", font=("Segoe UI", 9))
+        lbl = tk.Label(win, text="0%", font=("Segoe UI", 11))
         lbl.pack()
         win.update_idletasks()
 
@@ -9107,7 +9134,7 @@ class KartuWarnet(tk.Canvas):
 
         # Badge status pembayaran (sebelah nama)
         self._ids['paid_badge'] = self.create_text(10, hdr_y+12,
-            text="", font=("Courier New", 8, "bold"),
+            text="", font=("Courier New", 10, "bold"),
             fill=C_GREEN, anchor="w", tags="paid_badge")
 
         # PC status text
@@ -9122,20 +9149,20 @@ class KartuWarnet(tk.Canvas):
         pc_text = "● Connected" if pc_connected else "● Disconnected"
         pc_color = C_GREEN if pc_connected else C_RED
         self._ids['lbl_pc_status'] = self.create_text(W-52, hdr_y+12,
-            text=pc_text, font=("Courier New", 9, "bold"),
+            text=pc_text, font=("Courier New", 11, "bold"),
             fill=pc_color, anchor="e", tags="lbl_pc_status")
 
         # Delete button
         self._draw_canvas_btn("hapus", W-44, hdr_y+4, 36, 24, "✖",
-            C_RED, C_RED, ("Russo One", 8, "bold"), self._confirm_hapus)
+            C_RED, C_RED, ("Russo One", 10, "bold"), self._confirm_hapus)
 
         y = hdr_y + hdr_h + 4
         # Status row
         self._ids['lbl_grup'] = self.create_text(70, y+10,
-            text=f"\u21bb {self.nama_grup}", font=("Courier New", 9, "bold"),
+            text=f"\u21bb {self.nama_grup}", font=("Courier New", 11, "bold"),
             fill=C_ACCENT2, anchor="w", tags="lbl_grup")
         self._ids['lbl_paket'] = self.create_text(W-8, y+10,
-            text="\u2014", font=("Courier New", 8),
+            text="\u2014", font=("Courier New", 10),
             fill=C_MUTED, anchor="e", tags="lbl_paket")
         y += 24
 
@@ -9147,7 +9174,7 @@ class KartuWarnet(tk.Canvas):
 
         # Estimasi
         self._ids['lbl_estimasi'] = self.create_text(W//2, y+6,
-            text="", font=("Courier New", 8),
+            text="", font=("Courier New", 10),
             fill=C_YELLOW, anchor="center", tags="lbl_estimasi")
         y += 16
 
@@ -9161,7 +9188,7 @@ class KartuWarnet(tk.Canvas):
             ("status", "ON", C_BTN, self._toggle_power),
         ]
         for i, (key, txt, col, cmd) in enumerate(btn_defs1):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, col, col, ("Russo One", 8, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, col, col, ("Russo One", 10, "bold"), cmd)
         y = r1y + btn_h + 4
 
         # Button Row 2
@@ -9175,7 +9202,7 @@ class KartuWarnet(tk.Canvas):
             ("pindah", "Pindah PC", C_BTN, C_ACCENT2, self._klik_pindah, False),
         ]
         for i, (key, txt, bg, fg, cmd, disabled) in enumerate(btn_defs2):
-            self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 8, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 10, "bold"), cmd)
             if disabled:
                 self._disable_btn(key)
         y = r2y + btn_h + 4
@@ -9190,7 +9217,7 @@ class KartuWarnet(tk.Canvas):
             ("bayar_belum", "⏳ BELUM BAYAR", "black", "white", lambda: self._set_paid(False)),
         ]
         for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
-            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 7, "bold"), cmd)
+            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 9, "bold"), cmd)
             self._disable_btn(key)
             self.tag_bind(f"btn_{key}", "<Enter>", lambda e, k=key: self._update_bayar_buttons())
             self.tag_bind(f"btn_{key}", "<Leave>", lambda e, k=key: self._update_bayar_buttons())
@@ -10227,6 +10254,20 @@ class AutoRentApp(ctk.CTk):
         self.resizable(False, False)
         self.configure(fg_color=C_BG)
 
+        # Font default widget tkinter (dialog tk.Toplevel dkk) ikut diperbesar.
+        try:
+            import tkinter.font as _tkfont
+            for _name in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                          "TkHeadingFont", "TkTooltipFont", "TkCaptionFont",
+                          "TkSmallCaptionFont", "TkIconFont"):
+                try:
+                    _tkfont.nametofont(_name).configure(
+                        size=_tkfont.nametofont(_name).cget("size") + 3)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # ── Set ikon window dari logo.png ─────────────────────────────────────
         set_window_icon(self)
 
@@ -10263,6 +10304,10 @@ class AutoRentApp(ctk.CTk):
         self._bg_image_path = cfg.get("app_bg_image", "")
         self._bersihkan_grup_warnet_bocor()
 
+        # QR pembayaran aktivasi: pastikan qris.png selalu ada di folder app
+        # (disalin dari bundle EXE bila folder baru/deploy tanpa file).
+        self._ensure_bundled_qris()
+
         # ── Start Warnet Socket Server ──────────────────────────────────────────
         ws_port = cfg.get("warnet_ws_port", 5001)
         self.warnet_server = WarnetSocketServer(app=self, ws_port=ws_port)
@@ -10285,6 +10330,7 @@ class AutoRentApp(ctk.CTk):
                     get_nama_rental=self._get_nama_rental_dinamis,
                     state_extra=self._media_state_extra,
                 )
+                self.tv_ws_hub._r4_log_dir = app_log_dir()
                 self.tv_ws_hub.start()
                 self.tv_test_api = TvTestApi(self.tv_ws_hub, port=cfg.get("warnet_tv_api_port", 8081))
                 self.tv_test_api.start()
@@ -10402,6 +10448,23 @@ class AutoRentApp(ctk.CTk):
         if cur.get("type") == "video" and cur.get("filename"):
             promo_url = base + quote(cur["filename"])
         return logo_url, promo_url
+
+    def _promo_default_media_url(self) -> str:
+        """URL video promosi BAWAAN (NON-LIFETIME) — dipakai hub TV untuk
+        mengirim SHOW_MEDIA sekali saat TV baru terhubung (idle). Kosong bila
+        server media tidak jalan / video default tidak ada."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            return ""
+        path = os.path.join(ms.media_dir, PROMO_VIDEO_DEFAULT)
+        if not os.path.isfile(path):
+            return ""
+        base = f"http://{self._get_lan_ip()}:{ms.port}/media/"
+        try:
+            versi = int(os.path.getmtime(path))
+        except Exception:
+            versi = 0
+        return f"{base}{quote(PROMO_VIDEO_DEFAULT)}?v={versi}"
 
     def _tv_ip_watcher_tick(self):
         """Pantau perubahan IP LAN (dipanggil tiap 30 detik via self.after).
@@ -10626,6 +10689,24 @@ class AutoRentApp(ctk.CTk):
             ctypes.windll.kernel32.SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN)
         except Exception:
             pass
+
+    def _ensure_bundled_qris(self) -> None:
+        """Pastikan qris.png (QR pembayaran aktivasi) SELALU ada di folder app.
+
+        Saat dijalankan sebagai EXE onefile, gambar tersimpan di bundle
+        _MEIPASS (folder temp) — disalin ke folder aplikasi supaya dialog QR
+        pembayaran selalu bekerja tanpa menyalin file manual ke tiap deploy."""
+        try:
+            if os.path.isfile(app_path("qris.png")):
+                return
+            meipass = getattr(sys, "_MEIPASS", "")
+            src = os.path.join(meipass, "qris.png") if meipass else ""
+            if src and os.path.isfile(src):
+                import shutil
+                shutil.copyfile(src, app_path("qris.png"))
+                print(f"[QRIS] qris.png disalin dari bundle ke {APP_BASE_DIR}")
+        except Exception as e:
+            print(f"[QRIS] ensure qris gagal: {e}")
 
     def _ensure_default_promo(self) -> None:
         """Pastikan video promosi bawaan (pilihan user NON-LIFETIME) SELALU ada
@@ -11427,6 +11508,8 @@ class AutoRentApp(ctk.CTk):
                     {"tv_status": tv_status,
                      "devices": devices,
                      "daftar_tv": self._get_daftar_tv_nama(),
+                     "no_hp": str((ConfigManager.load().get("profil_rental", {}) or {})
+                                 .get(self.current_user, {}).get("no_hp", "") or "").strip(),
                      "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
                     merge=True)
             except Exception as e:
@@ -12133,8 +12216,19 @@ class AutoRentApp(ctk.CTk):
 
         wrap = ctk.CTkFrame(win, fg_color=C_PANEL, corner_radius=8)
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        # Style lokal supaya font tabel riwayat QR ikut besar walau tab Riwayat
+        # belum pernah dibuka (style "Treeview" global baru dibuat di sana).
+        _st = ttk.Style()
+        _st.configure("QRDiag.Treeview",
+                      background=C_CARD, fieldbackground=C_CARD,
+                      foreground=C_TEXT, rowheight=32,
+                      font=("Consolas", 12))
+        _st.configure("QRDiag.Treeview.Heading",
+                      background=C_PANEL, foreground=C_ACCENT,
+                      font=("Russo One", 11, "bold"), relief="flat")
         cols = ("waktu", "tv", "jenis", "item", "qty", "harga", "status", "catatan")
-        tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="extended")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                            selectmode="extended", style="QRDiag.Treeview")
         tree.heading("waktu", text="Waktu")
         tree.heading("tv", text="TV")
         tree.heading("jenis", text="Jenis")
@@ -12326,7 +12420,7 @@ class AutoRentApp(ctk.CTk):
                     "stok_min": getattr(self, "stok_min", {}) or {},
                     "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
-                for k in ("nama_dana", "no_dana", "alamat"):
+                for k in ("nama_dana", "no_dana", "alamat", "no_hp"):
                     v = str(pus.get(k, "") or "").strip()
                     if v:
                         data[k] = v
@@ -13001,6 +13095,11 @@ class AutoRentApp(ctk.CTk):
 
     # ── Login ──────────────────────────────────────────────────────────────────
     def _show_login(self):
+        # Login tampil dengan skala asli (sebelum pembesaran ui_scale) — ukuran
+        # teks & jendela dikembalikan ke semula; main layout pakai UI_SCALE lagi
+        # saat _on_login.
+        ctk.set_widget_scaling(1.0)
+        ctk.set_window_scaling(1.0)
         self._stop_license_poller()
         self._stop_call_poller()
         self._stop_session_poller()
@@ -13018,6 +13117,10 @@ class AutoRentApp(ctk.CTk):
         login.pack(fill="both", expand=True)
 
     def _on_login(self, username, role):
+        # Kembalikan skala UI (font besar) untuk layout utama — login sudah
+        # selesai dibuat dengan skala 1.0 (lihat _show_login).
+        ctk.set_widget_scaling(UI_SCALE)
+        ctk.set_window_scaling(UI_SCALE)
         self.current_user = username
         self.current_role = role
         self.current_user_email = ""
@@ -13412,9 +13515,9 @@ class AutoRentApp(ctk.CTk):
 
     # ── Layout ─────────────────────────────────────────────────────────────────
     def _build_layout(self):
-        self.sidebar = ctk.CTkFrame(self, width=185, fg_color=C_PANEL, corner_radius=0)
+        self.sidebar = ctk.CTkScrollableFrame(self, width=185, fg_color=C_PANEL,
+                                              corner_radius=0, label_text="")
         self.sidebar.pack(side="left", fill="y")
-        self.sidebar.pack_propagate(False)
 
         self.content = ctk.CTkFrame(self, fg_color=C_BG, corner_radius=0)
         self.content.pack(side="left", fill="both", expand=True)
@@ -14147,9 +14250,11 @@ class AutoRentApp(ctk.CTk):
         total_all = sum(m.get('total', 0) for m in user_metas)
         paid_count = sum(1 for m in user_metas if m.get('paid', True))
         unpaid_count = sum(1 for m in user_metas if not m.get('paid', True))
+        def _no_rp(n):
+            return f"{n:,.0f}".replace(",", ".")
         summary_text = (
-            f"Total TV: {fmt_rp(total_tv_paket)}  |  Total Warnet: {fmt_rp(total_warnet_paket)}  |  "
-            f"Total Makanan & Minuman: {fmt_rp(total_pesanan)}  |  TOTAL: {fmt_rp(total_all)}"
+            f"TV Rp {_no_rp(total_tv_paket)}  |  PC Rp {_no_rp(total_warnet_paket)}  |  "
+            f"F&B Rp {_no_rp(total_pesanan)}  |  Total Rp {_no_rp(total_all)}"
         )
         # Keep a short summary in the left label as before
         short_text = f"Total Transaksi: {len(user_indices)}  |  Total Pendapatan: {fmt_rp(total_all)}"
@@ -14328,41 +14433,50 @@ class AutoRentApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════════
     def _setup_warnet(self):
         f = self.frames["warnet"]
-        hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
+        hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=96, corner_radius=0)
         hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="💻  DASHBOARD WARNET",
-                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
-        self.lbl_total_warnet = ctk.CTkLabel(hdr, text="Total Kursi: 0",
+        hdr.pack_propagate(False)
+        # Baris 1: judul + statistik (sebelah kiri)
+        row1 = ctk.CTkFrame(hdr, fg_color="transparent")
+        row1.pack(fill="x", pady=(10, 2))
+        ctk.CTkLabel(row1, text="💻  DASHBOARD WARNET",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18)
+        self.lbl_total_warnet = ctk.CTkLabel(row1, text="Total Kursi: 0",
                                              font=FONT_BODY, text_color=C_MUTED)
         self.lbl_total_warnet.pack(side="left", padx=20)
-        self.lbl_socket_warnet = ctk.CTkLabel(hdr, text="Client: Belum tersambung",
+        self.lbl_socket_warnet = ctk.CTkLabel(row1, text="Client: Belum tersambung",
                                                font=FONT_BODY, text_color=C_MUTED)
         self.lbl_socket_warnet.pack(side="left", padx=12)
-        self.btn_tambah_warnet = ctk.CTkButton(hdr, text="➕  Tambah Kursi", width=150, height=34,
+
+        # Baris 2: tombol aksi — baris sendiri supaya semua terlihat (tidak
+        # terpotong di kiri meski window sempit / font membesar).
+        row2 = ctk.CTkFrame(hdr, fg_color="transparent")
+        row2.pack(fill="x", pady=(4, 8))
+        self.btn_tambah_warnet = ctk.CTkButton(row2, text="➕  Tambah Kursi", width=150, height=32,
                                              fg_color=C_ACCENT2, hover_color="#5A0FCC",
                                              font=("Russo One", 10, "bold"),
                                              command=self._buka_dialog_tambah_warnet)
-        self.btn_tambah_warnet.pack(side="right", padx=8, pady=10)
+        self.btn_tambah_warnet.pack(side="right", padx=8)
         if (self.current_role or "kasir") != "admin":
             self.btn_tambah_warnet.pack_forget()
-        self.btn_deploy_client = ctk.CTkButton(hdr, text="🚀 Deploy Client", width=145, height=34,
+        self.btn_deploy_client = ctk.CTkButton(row2, text="🚀 Deploy Client", width=145, height=32,
                                                 fg_color=C_GREEN, hover_color="#2F7A2F",
                                                 font=("Russo One", 10, "bold"),
                                                 text_color="#000000",
                                                 command=self._open_deploy_client_dialog)
-        self.btn_deploy_client.pack(side="right", padx=8, pady=10)
-        self.btn_upload_logo = ctk.CTkButton(hdr, text="🖼 Logo Lock", width=120, height=34,
+        self.btn_deploy_client.pack(side="right", padx=8)
+        self.btn_upload_logo = ctk.CTkButton(row2, text="🖼 Logo Lock", width=120, height=32,
                                                 fg_color=C_ACCENT, hover_color="#5A0FCC",
                                                 font=("Russo One", 10, "bold"),
                                                 command=self._buka_upload_logo)
-        self.btn_upload_logo.pack(side="right", padx=8, pady=10)
+        self.btn_upload_logo.pack(side="right", padx=8)
         if (self.current_role or "kasir") != "admin":
             self.btn_upload_logo.pack_forget()
         self.btn_warnet_admin_code = ctk.CTkButton(
-            hdr,
+            row2,
             text="🔐 Kode Client",
             width=140,
-            height=34,
+            height=32,
             fg_color=C_BTN,
             hover_color=C_ACCENT2,
             border_width=1,
@@ -14371,7 +14485,7 @@ class AutoRentApp(ctk.CTk):
             text_color=C_ACCENT2,
             command=self._open_warnet_admin_code_generator,
         )
-        self.btn_warnet_admin_code.pack(side="right", padx=10, pady=10)
+        self.btn_warnet_admin_code.pack(side="right", padx=10)
         self._schedule_warnet_status_refresh()
  
         self.scroll_warnet = ctk.CTkScrollableFrame(f, fg_color=C_BG)
@@ -16583,11 +16697,11 @@ class AutoRentApp(ctk.CTk):
 
         btn_row = ctk.CTkFrame(hdr, fg_color="transparent")
         btn_row.pack(side="right", padx=18, pady=10)
-        ctk.CTkButton(btn_row, text="Import Cloud 6hr", width=140, height=36,
+        ctk.CTkButton(btn_row, text="🔗 rrcctv.online/laporan", width=190, height=36,
                       fg_color="#1A1A4A", hover_color="#0A0A3A",
                       border_width=1, border_color=C_ACCENT,
                       font=("Russo One", 10, "bold"), text_color=C_ACCENT,
-                      command=self._import_riwayat_from_cloud).pack(side="left", padx=4)
+                      command=lambda: webbrowser.open("https://rrcctv.online/laporan")).pack(side="left", padx=4)
         ctk.CTkButton(btn_row, text="Export Excel", width=140, height=36,
                       fg_color="#1A4A1A", hover_color="#0A3A0A",
                       border_width=1, border_color=C_GREEN,
@@ -16696,12 +16810,21 @@ class AutoRentApp(ctk.CTk):
         style.theme_use("clam")
         style.configure("Game.Treeview",
                         background=C_CARD, fieldbackground=C_CARD,
-                        foreground=C_TEXT, rowheight=28,
-                        font=("Consolas", 10))
+                        foreground=C_TEXT, rowheight=38,
+                        font=("Consolas", 14))
         style.configure("Game.Treeview.Heading",
                         background=C_PANEL, foreground=C_ACCENT,
-                        font=("Russo One", 9, "bold"), relief="flat")
+                        font=("Russo One", 12, "bold"), relief="flat")
         style.map("Game.Treeview", background=[("selected", C_ACCENT2)])
+        # Treeview tanpa style eksplisit (mis. dialog riwayat QR) — ikut
+        # diperbesar supaya terbaca di layar PC resolusi tinggi.
+        style.configure("Treeview",
+                        background=C_CARD, fieldbackground=C_CARD,
+                        foreground=C_TEXT, rowheight=32,
+                        font=("Consolas", 12))
+        style.configure("Treeview.Heading",
+                        background=C_PANEL, foreground=C_ACCENT,
+                        font=("Russo One", 11, "bold"), relief="flat")
 
         cols = ("Waktu", "Kasir", "TV/PC", "Paket", "Pesanan", "Diskon", "Total", "Status")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", style="Game.Treeview")
@@ -17532,8 +17655,6 @@ class AutoRentApp(ctk.CTk):
         hdr.pack_propagate(False)
         ctk.CTkLabel(hdr, text="📅  BOOKING ONLINE",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
-        ctk.CTkLabel(hdr, text="Halaman pelanggan: rrcctv.online/b/<username>",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(side="right", padx=18)
 
         role_skrg = self.current_role or "kasir"
         is_admin = role_skrg == "admin"
@@ -17547,6 +17668,20 @@ class AutoRentApp(ctk.CTk):
                     owner = str(_rec["admin_utama"]).strip()
             except Exception:
                 pass
+
+        # Halaman pelanggan: link rrcctv.online/b/<username> — terisi otomatis
+        # dengan username login dan bisa diklik (buka browser).
+        owner_slug = owner.lower().strip()
+        if owner_slug:
+            ctk.CTkButton(hdr, text=f"🔗 rrcctv.online/b/{owner_slug}", height=30,
+                          fg_color="transparent", hover_color="#1E1E4A",
+                          border_width=1, border_color=C_ACCENT2,
+                          font=FONT_SMALL, text_color=C_ACCENT2,
+                          command=lambda: webbrowser.open(f"https://rrcctv.online/b/{owner_slug}")
+                          ).pack(side="right", padx=18)
+        else:
+            ctk.CTkLabel(hdr, text="Halaman pelanggan: rrcctv.online/b/<username>",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(side="right", padx=18)
 
         body = ctk.CTkFrame(f, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=10)
@@ -17592,37 +17727,54 @@ class AutoRentApp(ctk.CTk):
         logo_box = {"b64": str(puser.get("logo", "") or "")}
         logo_row = ctk.CTkFrame(set_f, fg_color="transparent")
         logo_row.pack(fill="x", padx=16, pady=(4, 2))
-        ctk.CTkLabel(logo_row, text="🖼 Logo (header halaman booking)",
+        ctk.CTkLabel(logo_row, text="🖼 Logo Header",
                      font=FONT_LABEL, text_color=C_MUTED, anchor="w").pack(anchor="w", pady=(0, 4))
-        lbl_logo_st = ctk.CTkLabel(logo_row, text="✔ Logo terpasang" if logo_box["b64"] else "Belum ada logo",
-                                   font=FONT_SMALL,
-                                   text_color=C_GREEN if logo_box["b64"] else C_MUTED, anchor="w")
-        lbl_logo_st.pack(side="left", padx=(0, 8))
+        # Ikon status saja (tanpa teks) — di-pack sekali di paling kiri, tidak
+        # pernah dipak/pack_forget lagi supaya tombol di sebelahnya tetap tampil.
+        lbl_logo_icon = ctk.CTkLabel(logo_row,
+                                     text="✔" if logo_box["b64"] else "✖",
+                                     font=FONT_SUB, width=24,
+                                     text_color=C_GREEN if logo_box["b64"] else C_MUTED,
+                                     anchor="w")
+        lbl_logo_icon.pack(side="left", padx=(0, 6))
+
+        def _sync_logo_icon():
+            ada = bool(logo_box["b64"])
+            lbl_logo_icon.configure(text="✔" if ada else "✖",
+                                    text_color=C_GREEN if ada else C_MUTED)
+
         if is_admin:
-            ctk.CTkButton(logo_row, text="📁 Pilih", width=80, height=28,
+            ctk.CTkButton(logo_row, text="📁 Pilih", width=90, height=28,
                           fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
-                          command=lambda: self._profil_pilih_logo(logo_box, lbl_logo_st)).pack(side="left", padx=(0, 5))
-            ctk.CTkButton(logo_row, text="🗑 Hapus", width=70, height=28,
+                          command=lambda: (self._profil_pilih_logo(logo_box, lbl_logo_icon), _sync_logo_icon())).pack(side="left", padx=(0, 5))
+            ctk.CTkButton(logo_row, text="🗑 Hapus", width=80, height=28,
                           fg_color=C_RED, font=("Russo One", 9, "bold"),
-                          command=lambda: self._profil_hapus_logo(logo_box, lbl_logo_st)).pack(side="left")
+                          command=lambda: (self._profil_hapus_logo(logo_box, lbl_logo_icon), _sync_logo_icon())).pack(side="left")
 
         qr_box = {"b64": str(puser.get("qr_pembayaran", "") or "")}
         qr_row = ctk.CTkFrame(set_f, fg_color="transparent")
         qr_row.pack(fill="x", padx=16, pady=(4, 2))
         ctk.CTkLabel(qr_row, text="📸 QR Kode Pembayaran (statis — tampil di web booking)",
                      font=FONT_LABEL, text_color=C_MUTED, anchor="w").pack(anchor="w", pady=(0, 4))
-        lbl_qr_st = ctk.CTkLabel(qr_row,
-                                 text="✔ QR pembayaran terpasang" if qr_box["b64"] else "Belum ada QR pembayaran",
-                                 font=FONT_SMALL,
-                                 text_color=C_GREEN if qr_box["b64"] else C_MUTED, anchor="w")
-        lbl_qr_st.pack(side="left", padx=(0, 8))
+        lbl_qr_icon = ctk.CTkLabel(qr_row,
+                                   text="✔" if qr_box["b64"] else "✖",
+                                   font=FONT_SUB, width=24,
+                                   text_color=C_GREEN if qr_box["b64"] else C_MUTED,
+                                   anchor="w")
+        lbl_qr_icon.pack(side="left", padx=(0, 6))
+
+        def _sync_qr_icon():
+            ada = bool(qr_box["b64"])
+            lbl_qr_icon.configure(text="✔" if ada else "✖",
+                                  text_color=C_GREEN if ada else C_MUTED)
+
         if is_admin:
-            ctk.CTkButton(qr_row, text="📁 Pilih", width=80, height=28,
+            ctk.CTkButton(qr_row, text="📁 Pilih", width=90, height=28,
                           fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
-                          command=lambda: self._profil_pilih_qr(qr_box, lbl_qr_st)).pack(side="left", padx=(0, 5))
-            ctk.CTkButton(qr_row, text="🗑 Hapus", width=70, height=28,
+                          command=lambda: (self._profil_pilih_qr(qr_box, lbl_qr_icon), _sync_qr_icon())).pack(side="left", padx=(0, 5))
+            ctk.CTkButton(qr_row, text="🗑 Hapus", width=80, height=28,
                           fg_color=C_RED, font=("Russo One", 9, "bold"),
-                          command=lambda: self._profil_hapus_qr(qr_box, lbl_qr_st)).pack(side="left")
+                          command=lambda: (self._profil_hapus_qr(qr_box, lbl_qr_icon), _sync_qr_icon())).pack(side="left")
         ctk.CTkLabel(set_f,
                      text="QR statis (QRIS / rekening) tampil di halaman web booking saat "
                           "pelanggan memilih metode Lunas / DP.",
@@ -18345,8 +18497,8 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkLabel(dlg, text=f"{nama_paket}  —  {harga_str}",
                      font=("Russo One", 14, "bold"), text_color=C_TEXT).pack(pady=(0, 6))
 
-        qris_path = app_path("qris.png")
-        if os.path.exists(qris_path):
+        qris_path = _qris_file()
+        if qris_path:
             try:
                 from PIL import Image
                 img = Image.open(qris_path)
@@ -18477,8 +18629,8 @@ class AutoRentApp(ctk.CTk):
 
     def _tampilkan_qris(self):
         """Tampilkan dialog popup gambar QRIS pembayaran."""
-        qris_path = app_path("qris.png")
-        if not os.path.exists(qris_path):
+        qris_path = _qris_file()
+        if not qris_path:
             messagebox.showinfo(
                 "🟦 QRIS Tidak Ditemukan",
                 "File gambar QRIS belum diatur.\n\n"
@@ -19078,6 +19230,15 @@ class AutoRentApp(ctk.CTk):
             ctk.CTkLabel(row, text=f"{label}:", font=FONT_SUB,
                          text_color=C_MUTED, width=120, anchor="w").pack(side="left")
             ctk.CTkLabel(row, text=val, font=FONT_BODY, text_color=C_TEXT).pack(side="left")
+        alamat_row = ctk.CTkFrame(card, fg_color="transparent")
+        alamat_row.pack(fill="x", padx=30, pady=3)
+        ctk.CTkLabel(alamat_row, text="Alamat:", font=FONT_SUB,
+                     text_color=C_MUTED, width=120, anchor="w").pack(side="left")
+        lbl_alamat_web = ctk.CTkLabel(alamat_row, text="🔗 rrcctv.online",
+                                      font=FONT_BODY, text_color=C_ACCENT2, cursor="hand2")
+        lbl_alamat_web.pack(side="left")
+        lbl_alamat_web.bind("<Button-1>",
+                            lambda e: webbrowser.open("https://rrcctv.online"))
         ctk.CTkLabel(card, text="© 2026 RR CCTV — All Rights Reserved",
                      font=FONT_SMALL, text_color=C_MUTED).pack(pady=(16, 24))
 
@@ -19903,22 +20064,122 @@ class AutoRentApp(ctk.CTk):
                       border_width=1, border_color=C_BORDER, font=("Russo One", 11), text_color=C_MUTED,
                       command=_cancel).pack(pady=(0, 12), padx=30, fill="x")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── LOG APLIKASI (app.log — selalu ada di setiap run) ─────────────────────────
+_APP_LOG_HANDLER = None  # logging.handlers.RotatingFileHandler
+
+
+def app_log_dir() -> str:
+    """Folder log aplikasi: folder exe bila writable; fallback %LOCALAPPDATA%
+    (folder exe terkunci, mis. Program Files) supaya log tetap tercipta."""
+    base = APP_BASE_DIR
+    try:
+        probe = os.path.join(base, ".log_write_test")
+        with open(probe, "a", encoding="utf-8"):
+            pass
+        os.remove(probe)
+        return base
+    except Exception:
+        fallback = os.path.join(os.environ.get("LOCALAPPDATA", ""), "RRBillingPro")
+        try:
+            os.makedirs(fallback, exist_ok=True)
+            return fallback
+        except Exception:
+            return base
+
+
+class _TeeOut:
+    """Redirect stdout/stderr: tulis ke stream asli (console dev) DAN ke
+    app.log — semua print() aplikasi terekam walau EXE tanpa window."""
+
+    def __init__(self, stream, level=logging.INFO):
+        self._stream = stream
+        self._level = level
+
+    def write(self, data):
+        try:
+            if _APP_LOG_HANDLER is not None and data and data.strip() != "":
+                _APP_LOG_HANDLER.emit(logging.LogRecord(
+                    "app.out", self._level, "", 0, str(data).rstrip("\n"),
+                    None, None))
+        except Exception:
+            pass
+        try:
+            self._stream.write(data)
+            self._stream.flush()
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return False
+
+    @property
+    def buffer(self):
+        return getattr(self._stream, "buffer", None)
+
+    @staticmethod
+    def install():
+        if not getattr(_TeeOut, "_saved", None):
+            _TeeOut._saved = (sys.stdout, sys.stderr)
+        sys.stdout = _TeeOut(_TeeOut._saved[0], logging.INFO)
+        sys.stderr = _TeeOut(_TeeOut._saved[1], logging.WARNING)
+
+
+def setup_app_logging() -> str:
+    """Init log aplikasi: RotatingFileHandler app.log (2MB x 3, utf-8) di
+    root logger + redirect stdout/stderr. Return path file log (selalu ada)."""
+    global _APP_LOG_HANDLER
+    try:
+        from logging.handlers import RotatingFileHandler
+        log_dir = app_log_dir()
+        path = os.path.join(log_dir, "app.log")
+        _APP_LOG_HANDLER = RotatingFileHandler(
+            path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        _APP_LOG_HANDLER.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(_APP_LOG_HANDLER)
+        _LOGGER.setLevel(logging.INFO)
+        _LOGGER.info("=== RRBILLINGPRO v%s — mulai %s (log: %s) ===",
+                     APP_VERSION, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                     path)
+        _TeeOut.install()
+        return path
+    except Exception as e:
+        print(f"[LOG] setup gagal: {e}")
+        return ""
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 def _dump_exc(exc_type, exc_value, exc_tb):
-    """logcat: semua traceback (termasuk callback Tk) ditulis ke app_exceptions.log"""
+    """logcat: semua traceback (termasuk callback Tk) ditulis ke app_exceptions.log
+    + ikut terekam di app.log."""
     try:
         import traceback as _tb
-        with open(os.path.join(APP_BASE_DIR, "app_exceptions.log"), "a", encoding="utf-8") as _f:
+        with open(os.path.join(app_log_dir(), "app_exceptions.log"),
+                  "a", encoding="utf-8") as _f:
             _f.write(f"\n===== {datetime.now()} {exc_type.__name__}: {exc_value} =====\n")
             _tb.print_exception(exc_type, exc_value, exc_tb, file=_f)
+    except Exception:
+        pass
+    try:
+        logging.getLogger("app.exc").error(
+            "EXCEPTION %s: %s", exc_type.__name__, exc_value,
+            exc_info=(exc_type, exc_value, exc_tb))
     except Exception:
         pass
 
 
 sys.excepthook = _dump_exc
 
+
 if __name__ == "__main__":
+    setup_app_logging()
     app = AutoRentApp()
     app.report_callback_exception = lambda exc, val, tb: _dump_exc(exc, val, tb)
     app.mainloop()
