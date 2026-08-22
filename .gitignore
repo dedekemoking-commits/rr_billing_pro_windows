@@ -72,10 +72,19 @@ invoices_bukti/
 android_tv_certs/
 signing_test_private.pem
 
-# Folder kiriman update / web / dashboard lokal (bukan untuk repo bersama)
+# Folder kiriman update / dashboard lokal (bukan untuk repo bersama)
 Update_20*/
-billing_web/
 monitoring_dashboard/
+
+# ── Web Kasir (billing_web) — source ikut repo, runtime data diabaikan ──
+!billing_web/
+billing_web/__pycache__/
+billing_web/*.log
+billing_web/*.lock
+billing_web/rr_billing_config.json
+billing_web/rr_billing_license.json
+billing_web/receipts/
+billing_web/wheels/
 
 # Android build artifacts
 android_tv_client/.gradle/

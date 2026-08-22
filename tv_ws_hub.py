@@ -101,7 +101,7 @@ class TvWsHub:
 
         # meja_id -> {websocket, address, nama, device, last_seen, transport}
         self.clients: dict[str, dict] = {}
-        self._clients_lock = threading.Lock()
+        self._clients_lock = threading.RLock()
 
         # State lock yang dipegang hub (bertahan walau client reconnect):
         # meja_id -> dict detail_transaksi untuk dikirim ulang saat reconnect.
@@ -558,6 +558,22 @@ class TvWsHub:
     def send_hide_media(self, meja_id: str) -> bool:
         return self._send_to(meja_id, {"action": "HIDE_MEDIA", "meja_id": meja_id})
 
+    def broadcast_show_media(self, media_type: str, url: str) -> int:
+        """Kirim SHOW_MEDIA ke semua client terhubung; return jumlah terkirim."""
+        sent = 0
+        for mid in self.get_connected_ids():
+            if self.send_show_media(mid, media_type, url):
+                sent += 1
+        return sent
+
+    def broadcast_hide_media(self) -> int:
+        """Kirim HIDE_MEDIA ke semua client terhubung; return jumlah terkirim."""
+        sent = 0
+        for mid in self.get_connected_ids():
+            if self.send_hide_media(mid):
+                sent += 1
+        return sent
+
     def send_show_pin(self, meja_id: str, pin: str) -> bool:
         """Tampilkan PIN panggil operator/kasir di pojok KIRI atas layar TV."""
         ok = self._send_to(meja_id, {"action": "SHOW_PIN", "meja_id": meja_id, "pin": pin})
@@ -621,18 +637,13 @@ class TvWsHub:
         if not self._running or not self._loop_thread:
             return False
         with self._clients_lock:
-            target = self.clients.get(meja_id)
-            if target is None:
-                # Label kartu "1" vs meja client "TV 1" / "MEJA 1" / "MEJA_1":
-                # fallback supaya perintah dari kasir tetap sampai ke client.
-                for cand in (f"TV {meja_id}", f"MEJA {meja_id}", f"MEJA_{meja_id}"):
-                    target = self.clients.get(cand)
-                    if target is not None:
-                        meja_id = cand
-                        break
-                if target is not None and "meja_id" in message:
-                    # Sesuaikan label di pesan (popup PIN / overlay) dengan
-                    # nama client yang sebenarnya ("TV 1"), bukan label kartu.
+            resolved = self._resolve_meja_id(meja_id)
+            target = self.clients.get(resolved) if resolved else None
+            if target is not None and resolved != meja_id:
+                # Label kartu "TV1" vs meja client "TV 1": sesuaikan label di
+                # pesan (popup PIN / overlay) dengan nama client sebenarnya.
+                meja_id = resolved
+                if "meja_id" in message:
                     message["meja_id"] = meja_id
         if not target:
             return False
@@ -664,14 +675,37 @@ class TvWsHub:
     def get_connected_tvs(self) -> list[dict]:
         return [self._client_info(mid) for mid in self.get_connected_ids()]
 
+    def _resolve_meja_id(self, meja_id: str):
+        """Cari key client sungguhan: exact, lalu "TV X" / "MEJA X" / "MEJA_X"
+        (kartu kasir pakai "TV1" tapi client APK daftarkan "TV 1").
+        Terakhir: normalisasi longgar (buang spasi/underscore + lowercase)
+        agar "TV1", "tv 1", "TV_1" semuanya cocok."""
+        with self._clients_lock:
+            if meja_id in self.clients:
+                return meja_id
+            for cand in (f"TV {meja_id}", f"MEJA {meja_id}", f"MEJA_{meja_id}"):
+                if cand in self.clients:
+                    return cand
+
+            def norm(s: str) -> str:
+                return "".join(str(s).split()).lower().replace("_", "")
+
+            target = norm(meja_id)
+            if target:
+                for mid in list(self.clients.keys()):
+                    if norm(mid) == target:
+                        return mid
+        return None
+
     def is_meja_connected(self, meja_id: str) -> bool:
         with self._clients_lock:
-            return meja_id in self.clients
+            return self._resolve_meja_id(meja_id) is not None
 
     def get_screen_state(self, meja_id: str) -> Optional[bool]:
         """Status layar TV dari APK: True=nyala, False=mati, None=tidak diketahui."""
         with self._clients_lock:
-            c = self.clients.get(meja_id)
+            key = self._resolve_meja_id(meja_id)
+            c = self.clients.get(key) if key else None
         if not c:
             return None
         return c.get("screen_on")
