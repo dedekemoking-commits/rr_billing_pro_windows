@@ -2317,6 +2317,50 @@ def _qr_panggilan_masuk(doc):
         _qr_log(f"panggilan masuk error: {e}")
 
 
+def _booking_poll_loop():
+    """Polling Firestore 'bookings' — booking status BARU (belum dikonfirmasi)
+    diberitahukan ke kasir via event 'booking_baru' (toast + beep di UI)."""
+    seen = set()
+    while True:
+        try:
+            owner = (STORE._resolve_license_user() or "").strip().lower()
+            if owner:
+                docs = FirestoreClient().query_all("bookings", limit=50,
+                                                   order_field="createdAt") or []
+                ids_baru = set()
+                for d in docs:
+                    if str(d.get("owner", "")).strip().lower() != owner:
+                        continue
+                    did = str(d.get("_id", ""))
+                    if str(d.get("status", "")) != "baru":
+                        continue
+                    ids_baru.add(did)
+                    if did in seen:
+                        continue
+                    seen.add(did)
+                    try:
+                        STORE.notify("booking_baru", {"label": str(d.get("namaPelanggan", "") or "")},
+                                     did=did, nama=str(d.get("namaPelanggan", "") or ""),
+                                     perangkat=str(d.get("perangkat", "") or ""),
+                                     tanggal=str(d.get("tanggal", "") or ""),
+                                     jam=str(d.get("jam", ""))[:5])
+                        applog(f"[BOOKING BARU] {did[:8].upper()} | "
+                               f"{d.get('namaPelanggan', '')} | {d.get('perangkat', '')} "
+                               f"{d.get('tanggal', '')} {d.get('jam', '')}")
+                    except Exception:
+                        pass
+                seen &= ids_baru   # buang id yang sudah diproses/ditolak
+        except Exception as e:
+            _LOGGER.warning("Booking poll error: %s", e)
+        time.sleep(20)
+
+
+def _start_booking_poller():
+    threading.Thread(target=_booking_poll_loop, daemon=True,
+                     name="BookingPoller").start()
+    applog("[BOOKING] Poller dimulai (bookings, status baru)")
+
+
 def _start_call_poller():
     try:
         from firestore_sync import CallPoller
@@ -2627,6 +2671,10 @@ def start_servers():
         _start_call_poller()
     except Exception as e:
         _qr_log(f"CallPoller gagal: {e}")
+    try:
+        _start_booking_poller()
+    except Exception as e:
+        _LOGGER.warning("Booking poller gagal: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -3058,8 +3106,84 @@ def api_sesi(kind, key):
             applog(f"[SESI MULAI] {s.label} | total={s.snapshot().get('total')} | "
                    f"paid={s.snapshot().get('paid')} | kasir={STORE.user}")
             return jsonify({"ok": True, "sesi": s.snapshot()})
-        if act == "member_mulai":
-            # Mulai sesi dari saldo waktu member (tanpa paket reguler)
+        if act == "booking":
+            # Mulai sesi dari booking online (port _mulai_booking, main.py)
+            if s.kind != "tv":
+                return jsonify({"error": "Booking hanya untuk kartu TV."}), 400
+            if not s.sesi_kosong():
+                return jsonify({"error": f"{s.label} masih ada sesi aktif."}), 400
+            did = str(data.get("did", "") or "").strip()
+            if not did:
+                return jsonify({"error": "id booking wajib diisi"}), 400
+            try:
+                b = FirestoreClient().get_document(f"bookings/{did}") or {}
+            except Exception as e:
+                return jsonify({"error": f"Gagal ambil booking: {e}"}), 500
+            if not b or not str(b.get("status", "")):
+                return jsonify({"error": "Booking tidak ditemukan."}), 404
+            owner = (STORE._resolve_license_user() or "").strip().lower()
+            if str(b.get("owner", "")).strip().lower() != owner:
+                return jsonify({"error": "Booking bukan milik akun ini."}), 403
+            if str(b.get("status", "")) != "dikonfirmasi":
+                return jsonify({"error": "Booking belum dikonfirmasi / ditolak."}), 400
+            if str(b.get("perangkat", "") or "").strip() != s.label:
+                return jsonify({"error": f"Booking untuk {b.get('perangkat')}, bukan {s.label}."}), 400
+            if b.get("sesiDimulai"):
+                return jsonify({"error": "Sesi booking sudah pernah dimulai."}), 400
+            paket_nm = str(b.get("paket", "") or "")
+            pd = s.paket_data()
+            info = pd.get(paket_nm)
+            if not info:
+                return jsonify({"error": f"Paket '{paket_nm}' tidak ada di grup {s.nama_grup}. "
+                                         f"Perbarui tarif atau tolak booking."}), 400
+            paket_harga = int(info.get("harga", 0))
+            paket_menit = int(info.get("menit", 0))
+            try:
+                pesanan = {str(k): int(v) for k, v in (b.get("pesanan", {}) or {}).items()}
+            except Exception:
+                pesanan = {}
+            all_menu = s.all_menu()
+            total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            metode = str(b.get("metode", "") or "")
+            sb = str(b.get("statusBayar", "") or "")
+            paid = bool(metode == "lunas" or sb == "lunas_transfer")
+            try:
+                s.start_paket(paket_nm, paket_harga, paket_menit, pesanan, total_pesanan,
+                              diskoni=0, diskoni_mode="nominal", paid=paid)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            s.set_paid(paid)
+            # Tandai riwayat dengan 📅 + id booking (port _format_riwayat_row booking)
+            idx = getattr(s, "_last_transaction_item", None)
+            if idx is not None and 0 <= idx < len(STORE.riwayat_transaksi):
+                try:
+                    row = list(STORE.riwayat_transaksi[idx])
+                    row[3] = f"📅 {row[3]}"
+                    STORE.riwayat_transaksi[idx] = tuple(row)
+                    meta = STORE.riwayat_meta[idx]
+                    meta["booking_id"] = did
+                    meta["booking_nama"] = str(b.get("namaPelanggan", "") or "")
+                    meta["booking_dp"] = int(b.get("nominalDp", 0) or 0)
+                    STORE.save_riwayat()
+                    threading.Thread(target=STORE._upsert_tx_cloud_from_index,
+                                     args=(idx,), daemon=True).start()
+                except Exception as e:
+                    _LOGGER.warning("Tandai booking di riwayat gagal: %s", e)
+            # Tandai booking sudah dimulai (Firestore)
+            try:
+                FirestoreClient().set_document(
+                    f"bookings/{did}",
+                    {"sesiDimulai": True, "sesiLabel": s.label,
+                     "kasir": STORE.user or "",
+                     "updatedAt": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                    merge=True)
+            except Exception as e:
+                _LOGGER.warning("Tandai sesiDimulai gagal: %s", e)
+            applog(f"[SESI BOOKING MULAI] {s.label} | {b.get('namaPelanggan', '')} | "
+                   f"paket={paket_nm} | total={s.total_setelah_diskon()} | "
+                   f"paid={paid} | kasir={STORE.user}")
+            return jsonify({"ok": True, "sesi": s.snapshot()})
+        if act == "member_mulai":            # Mulai sesi dari saldo waktu member (tanpa paket reguler)
             if not s.sesi_kosong():
                 return jsonify({"error": f"{s.label} masih ada sesi aktif."}), 400
             err = STORE.mulai_sesi_member(s, str(data.get("member_hp", "") or ""),
@@ -5222,6 +5346,61 @@ def api_booking_list():
         })
     rows.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
     return jsonify({"rows": rows, "owner": owner, "username": STORE.user})
+
+
+@app.route("/api/booking/aktif")
+@require_auth
+def api_booking_aktif():
+    """Booking valid untuk satu label TV: status dikonfirmasi, belum
+    sesiDimulai, jam mulai belum lewat — port _booking_fetch_valid (main.py)."""
+    label = str(request.args.get("label", "") or "").strip()
+    if not label:
+        return jsonify({"rows": [], "label": ""})
+    owner = (STORE._resolve_license_user() or "").strip().lower()
+    rows = []
+    if owner:
+        try:
+            docs = FirestoreClient().query_all("bookings", limit=100,
+                                               order_field="createdAt") or []
+        except Exception as e:
+            _LOGGER.warning("Booking aktif error: %s", e)
+            docs = []
+        now = datetime.datetime.now()
+        for d in docs:
+            if str(d.get("owner", "")).strip().lower() != owner:
+                continue
+            if str(d.get("status", "")) != "dikonfirmasi":
+                continue
+            if str(d.get("perangkat", "") or "").strip() != label:
+                continue
+            if d.get("sesiDimulai"):
+                continue
+            tgl = str(d.get("tanggal", "") or "").strip()
+            jam = str(d.get("jam", "") or "").strip()[:5]
+            try:
+                mulai = datetime.datetime.strptime(f"{tgl} {jam}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                mulai = None
+            if mulai is not None and mulai < now:
+                continue  # jam sudah lewat → buang (sama seperti desktop)
+            rows.append({
+                "_id": str(d.get("_id", "")),
+                "namaPelanggan": str(d.get("namaPelanggan", "") or ""),
+                "noHp": str(d.get("noHp", "") or ""),
+                "perangkat": str(d.get("perangkat", "") or ""),
+                "tanggal": tgl,
+                "jam": jam,
+                "grup": str(d.get("grup", "") or ""),
+                "paket": str(d.get("paket", "") or ""),
+                "pesanan": d.get("pesanan", {}) or {},
+                "metode": str(d.get("metode", "") or ""),
+                "statusBayar": str(d.get("statusBayar", "") or ""),
+                "sisaBayar": int(d.get("sisaBayar", 0) or 0),
+                "nominalDp": int(d.get("nominalDp", 0) or 0),
+                "totalHarga": int(d.get("totalHarga", 0) or 0),
+            })
+        rows.sort(key=lambda x: x.get("jam", ""))
+    return jsonify({"rows": rows, "label": label})
 
 
 @app.route("/api/booking/<did>", methods=["POST"])
