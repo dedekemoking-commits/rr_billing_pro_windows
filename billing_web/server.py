@@ -14,6 +14,7 @@ keduanya punya state sesi in-memory sendiri & menulis file yang sama.
 
 import os
 import sys
+import re
 import json
 import time
 import math
@@ -1803,6 +1804,15 @@ class Store:
         res, err = self.verify_member(member_hp, member_pin)
         if err:
             return err
+        # ── Cegah member yang sama aktif di dua tempat sekaligus ──
+        for other in self.all_sesi():
+            if other is sesi:
+                continue
+            if (getattr(other, "mode_member", False)
+                    and getattr(other, "member_hp", None) == res["hp"]
+                    and not other.sesi_kosong()):
+                return (f"Member {res['nama']} sedang aktif bermain di {other.label}. "
+                        "Selesaikan sesi tersebut dulu sebelum dipakai di sini.")
         sesi_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         members = self._members_dict()
         m = members.get(res["hp"])
@@ -2350,6 +2360,18 @@ def _booking_poll_loop():
                     except Exception:
                         pass
                 seen &= ids_baru   # buang id yang sudah diproses/ditolak
+                # Prune event booking_baru basi (sudah dikonfirmasi/ditolak)
+                # agar tidak diputar ulang ke UI setelah login/restart.
+                try:
+                    with STORE._lock:
+                        alive = [ev for ev in STORE.events
+                                 if ev.get("type") != "booking_baru"
+                                 or ev.get("did") in ids_baru]
+                        if len(alive) != len(STORE.events):
+                            STORE.events = alive
+                            STORE._version += 1
+                except Exception:
+                    pass
         except Exception as e:
             _LOGGER.warning("Booking poll error: %s", e)
         time.sleep(20)
@@ -4429,6 +4451,18 @@ def _qr_apply_item_ke_kartu(sesi, tipe, nama, qty, harga_item, paid):
         return True, (f"TV {sesi.label}: paket '{nama}' +{menit:g} mnt → "
                       f"total {M.fmt_rp(sesi.total_setelah_diskon())} ({lbl}).")
     else:
+        # F&B saat kartu KOSONG & LUNAS → catat langsung sebagai transaksi
+        # tersendiri di riwayat (pembukuan bersih); tidak menempel ke kartu
+        # supaya tidak dihitung dobel saat paket nanti dimulai.
+        if sesi.sesi_kosong() and paid:
+            subtotal = harga_item * qty
+            try:
+                sesi.store.catat(sesi.label, nama, {nama: qty}, subtotal,
+                                 source="tv", paid=True)
+                return True, (f"TV {sesi.label}: {nama} LUNAS "
+                              f"({M.fmt_rp(subtotal)}) langsung dicatat di riwayat.")
+            except Exception as e:
+                _LOGGER.warning("Catat F&B QR langsung gagal: %s", e)
         sesi.tambah_pesanan({nama: qty}, paid=paid)
         lbl = "LUNAS" if paid else "TAGIHAN"
         if sesi.sesi_kosong():
@@ -4513,7 +4547,10 @@ def api_panggilan_aksi():
                 it["paid"] = bool(paid)
                 if not paid:
                     it["lunas"] = False
-        row["status"] = "selesai"
+        row["status"] = "selesai" if paid else "tagihan"
+        row["paid"] = bool(paid)
+        if not paid:
+            row["lunas"] = False
     else:
         try:
             idx = int(idx)
@@ -4526,7 +4563,9 @@ def api_panggilan_aksi():
             if not paid:
                 it["lunas"] = False
             if all(str(x.get("status", "baru")) == "sudah" for x in items if isinstance(x, dict)):
-                row["status"] = "selesai"
+                semua_paid = all(bool(x.get("paid", False)) for x in items if isinstance(x, dict))
+                row["status"] = "selesai" if semua_paid else "tagihan"
+                row["paid"] = semua_paid
             else:
                 row["status"] = "baru"
         else:
@@ -4534,6 +4573,206 @@ def api_panggilan_aksi():
     row["item"] = row.get("item") or [str(x.get("nama", "")) for x in items if isinstance(x, dict)]
     _qr_log_save(rows)
     return jsonify({"ok": True, "status": row.get("status"), "tv": row.get("tv", ""), "pesan": pesan})
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  INSTALL / UPGRADE APK CLIENT TV VIA ADB (port DialogInstallAPK desktop)
+# ─────────────────────────────────────────────────────────────────────
+APK_JOBS = {}                                   # job_id -> status dict
+APK_JOBS_LOCK = threading.Lock()
+APK_PACKAGE = "com.rrbillingpro.tvclient"
+APK_URL_DEFAULT = ("https://github.com/dedekemoking-commits/rr_billing_pro_windows/"
+                   "releases/latest/download/RRBillingPro-TV.apk")
+
+
+def _apk_url_terbaru():
+    """Sumber APK terbaru: config 'apk_tv_url' → auto-detect GitHub release → bawaan."""
+    url = str(M.ConfigManager.get("apk_tv_url") or "").strip()
+    if url:
+        return url, "config 'apk_tv_url'"
+    manifest_url = str(M.ConfigManager.get("update_manifest_url") or "").strip()
+    if manifest_url:
+        try:
+            from scripts import check_update
+            found = check_update.find_latest_apk_url(manifest_url)
+            if found:
+                return found, "GitHub release terbaru"
+        except Exception:
+            pass
+    return APK_URL_DEFAULT, "URL resmi otomatis"
+
+
+def _apk_job_update(job, pct, msg):
+    job["progress"] = max(0, min(100, int(pct or 0)))
+    job["message"] = str(msg)
+
+
+def _apk_job_runner(job_id, ip, apk_path=None, url=None):
+    with APK_JOBS_LOCK:
+        job = APK_JOBS.get(job_id)
+    if not job:
+        return
+    tmpdir = tempfile.mkdtemp(prefix="rr_web_apk_")
+    try:
+        def cb(pct, msg):
+            _apk_job_update(job, pct, msg)
+
+        if url and not apk_path:
+            from scripts import check_update
+            apk_path = os.path.join(tmpdir, "tv_client.apk")
+
+            def _dl(d, t):
+                pct = int(d * 78 // max(t, 1))
+                _apk_job_update(job, pct, f"Mengunduh APK… {pct}%")
+            check_update.download_asset(url, apk_path, None, progress_cb=_dl)
+            _apk_job_update(job, 80, "Unduhan selesai — memeriksa versi…")
+            # Anti-downgrade: bandingkan versionCode sumber vs TV
+            try:
+                new_code, new_name = check_update.read_apk_version(apk_path)
+            except Exception:
+                new_code, new_name = None, None
+            sukses_c, _stc, _pc = M.ADBHelper.cek_dan_reconnect(ip)
+            if new_code is not None and sukses_c:
+                ok3, out3 = M.ADBHelper.adb_shell(
+                    ip, f"dumpsys package {APK_PACKAGE}")
+                m = re.search(r"versionCode=(\d+)", out3 or "")
+                cur_code = int(m.group(1)) if m else None
+                if cur_code is not None and new_code <= cur_code:
+                    job["state"] = "selesai"
+                    job["progress"] = 100
+                    job["message"] = (f"Tidak perlu upgrade — TV sudah memakai "
+                                      f"v{cur_code} (sumber v{new_name or new_code}).")
+                    return
+        elif not apk_path:
+            job["state"] = "gagal"
+            job["message"] = "File APK tidak tersedia."
+            return
+
+        _apk_job_update(job, 2, "Menghubungkan ADB ke TV…")
+        sukses, _st, pesan_c = M.ADBHelper.cek_dan_reconnect(ip)
+        if not sukses:
+            job["state"] = "gagal"
+            job["message"] = (f"TV tidak terhubung ADB ({ip}:5555). "
+                              "Pairing/WiFi-ADB TV dulu lalu coba lagi. "
+                              + str(pesan_c)[:100])
+            return
+
+        _apk_job_update(job, 82, "Memasang APK via ADB… (bisa 1-3 menit)")
+        ok, pesan = M.ADBHelper.adb_install_with_progress(ip, apk_path, cb)
+        if not ok:
+            if "INSTALL_FAILED_VERSION_DOWNGRADE" in (pesan or ""):
+                pesan = "Versi APK lebih lama dari yang terpasang di TV — upgrade ditolak."
+            job["state"] = "gagal"
+            job["message"] = str(pesan)
+            return
+        versi = ""
+        try:
+            ok2, out2 = M.ADBHelper.adb_shell(ip, f"dumpsys package {APK_PACKAGE}")
+            m = re.search(r"versionName=([0-9.]+)", out2 or "")
+            if m:
+                versi = m.group(1)
+        except Exception:
+            pass
+        job["state"] = "selesai"
+        job["progress"] = 100
+        job["message"] = f"✅ APK terpasang di {ip}." + (f" Versi: v{versi}" if versi else "")
+    except Exception as e:
+        job["state"] = "gagal"
+        job["message"] = str(e)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _apk_mulai(label, **kw):
+    s = _qr_cari_sesi(label)
+    if s is None or not getattr(s, "ip", ""):
+        return jsonify({"error": f"TV '{label}' tidak ditemukan / tanpa IP."}), 404
+    jid = "apk_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    with APK_JOBS_LOCK:
+        APK_JOBS[jid] = {"state": "mulai", "progress": 0,
+                         "message": "Menyiapkan…", "tv": label, "ts": time.time()}
+    threading.Thread(target=_apk_job_runner,
+                     args=(jid, s.ip), kwargs=kw,
+                     daemon=True, name=f"ApkJob-{label}").start()
+    return jsonify({"ok": True, "job": jid})
+
+
+@app.route("/api/tv/apk/status")
+@require_admin
+@require_auth
+def api_tv_apk_status():
+    label = str(request.args.get("label", "") or "").strip()
+    s = _qr_cari_sesi(label)
+    if s is None or not getattr(s, "ip", ""):
+        return jsonify({"error": f"TV '{label}' tidak ditemukan / tanpa IP."}), 404
+    ip = s.ip
+    out = {"label": label, "ip": ip,
+           "ws_online": bool(getattr(s, "ws_online", False))}
+    sukses, _st, pesan = M.ADBHelper.cek_dan_reconnect(ip)
+    out["adb"] = bool(sukses)
+    if sukses:
+        ok, outp = M.ADBHelper.adb_shell(ip, f"dumpsys package {APK_PACKAGE}")
+        m_c = re.search(r"versionCode=(\d+)", outp or "")
+        m_n = re.search(r"versionName=([0-9.]+)", outp or "")
+        out["terpasang"] = bool(ok and (m_c or m_n))
+        out["versionCode"] = int(m_c.group(1)) if m_c else None
+        out["versionName"] = m_n.group(1) if m_n else None
+    else:
+        out["terpasang"] = None
+        out["pesan"] = str(pesan)[:120]
+    return jsonify(out)
+
+
+@app.route("/api/tv/apk/upload", methods=["POST"])
+@require_admin
+@require_auth
+def api_tv_apk_upload():
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".apk"):
+        return jsonify({"error": "Pilih file .apk"}), 400
+    d = tempfile.mkdtemp(prefix="rr_web_apk_")
+    path = os.path.join(d, "tv_client.apk")
+    f.save(path)
+    return jsonify({"ok": True, "path": path})
+
+
+@app.route("/api/tv/apk/install", methods=["POST"])
+@require_admin
+@require_auth
+def api_tv_apk_install():
+    data = request.get_json(silent=True) or {}
+    label = str(data.get("label", "") or "").strip()
+    path = str(data.get("path", "") or "").strip()
+    if not label or not path or not os.path.isfile(path):
+        return jsonify({"error": "label + file APK wajib diisi"}), 400
+    return _apk_mulai(label, apk_path=path)
+
+
+@app.route("/api/tv/apk/upgrade", methods=["POST"])
+@require_admin
+@require_auth
+def api_tv_apk_upgrade():
+    data = request.get_json(silent=True) or {}
+    label = str(data.get("label", "") or "").strip()
+    if not label:
+        return jsonify({"error": "label wajib diisi"}), 400
+    url, _src = _apk_url_terbaru()
+    try:
+        M.ConfigManager.set("apk_tv_url", url)
+    except Exception:
+        pass
+    return _apk_mulai(label, url=url)
+
+
+@app.route("/api/tv/apk/job/<jid>")
+@require_admin
+@require_auth
+def api_tv_apk_job(jid):
+    with APK_JOBS_LOCK:
+        j = APK_JOBS.get(jid)
+        if j is None:
+            return jsonify({"error": "job tidak ditemukan"}), 404
+        return jsonify(dict(j))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -5272,6 +5511,16 @@ def _push_call_meta():
                     data[k] = v
             if str(pus.get("qr_pembayaran", "") or "").strip():
                 data["qr_pembayaran"] = str(pus.get("qr_pembayaran", "")).strip()
+            # Status operasional: situs booking pakai ini untuk menonaktifkan
+            # tanggal libur di kalender & menampilkan jam buka saat tutup.
+            _ops = _booking_ops()
+            data["booking_ops"] = {
+                "mode": str(_ops.get("mode", "buka")),
+                "jam_buka": str(_ops.get("jam_buka", "08:00")),
+                "jam_tutup": str(_ops.get("jam_tutup", "22:00")),
+                "libur_mulai": str(_ops.get("libur_mulai", "")),
+                "buka_kembali": str(_ops.get("buka_kembali", "")),
+            }
             FirestoreClient().set_document(f"call_meta/{owner}", data, merge=True)
         except Exception as e:
             _LOGGER.warning("Push call_meta gagal: %s", e)
@@ -5309,6 +5558,136 @@ def api_pin():
 # ─────────────────────────────────────────────────────────────────────────
 #  BOOKING ONLINE (tab Booking — port _booking_riwayat_* / _simpan_profil_rental)
 # ─────────────────────────────────────────────────────────────────────────
+def _booking_ops():
+    """Status operasional rental untuk booking (buka/libur/tutup + jam buka)."""
+    ops = dict(M.ConfigManager.get("booking_ops", {}) or {})
+    if not str(ops.get("jam_buka", "") or "").strip():
+        ops["jam_buka"] = "08:00"
+    if not str(ops.get("jam_tutup", "") or "").strip():
+        ops["jam_tutup"] = "22:00"
+    if not str(ops.get("mode", "") or "").strip():
+        ops["mode"] = "buka"
+    return ops
+
+
+def _booking_ops_push():
+    """Push status operasional ke Firestore (rental_status/{owner}) supaya
+    situs booking pelanggan bisa menampilkan pemberitahuan libur/tutup/jam buka."""
+    try:
+        owner = (STORE._resolve_license_user() or "").strip().lower()
+        if not owner:
+            return
+        data = dict(_booking_ops())
+        data["owner"] = owner
+        data["updatedAt"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        FirestoreClient().set_document(f"rental_status/{owner}", data, merge=True)
+        applog(f"[BOOKING OPS] push rental_status/{owner} mode={data.get('mode')}")
+    except Exception as e:
+        _LOGGER.warning("Push rental_status gagal: %s", e)
+
+
+@app.route("/api/booking/ops")
+@require_auth
+def api_booking_ops_get():
+    return jsonify({"ops": _booking_ops()})
+
+
+@app.route("/api/booking/ops", methods=["POST"])
+@require_admin
+@require_auth
+def api_booking_ops_set():
+    """Aksi status booking: libur / tutup / buka / jam.
+    - libur: {libur_mulai: YYYY-MM-DD, buka_kembali: YYYY-MM-DD} → situs menampilkan tanggal buka kembali.
+    - tutup: rental offline sementara → situs menampilkan jam buka rental.
+    - buka : normal kembali.   - jam: set jam_buka & jam_tutup default."""
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action", "") or "").strip()
+    ops = _booking_ops()
+    nows = datetime.datetime.now()
+    if action == "libur":
+        mulai = str(data.get("libur_mulai", "") or "").strip() or nows.strftime("%Y-%m-%d")
+        kembali = str(data.get("buka_kembali", "") or "").strip()
+        for v in (mulai, kembali):
+            if v:
+                try:
+                    datetime.datetime.strptime(v, "%Y-%m-%d")
+                except ValueError:
+                    return jsonify({"error": "format tanggal harus YYYY-MM-DD"}), 400
+        if kembali and kembali < mulai:
+            return jsonify({"error": "Tanggal buka kembali tidak boleh sebelum tanggal libur."}), 400
+        ops.update({"mode": "libur", "libur_mulai": mulai, "buka_kembali": kembali})
+    elif action == "tutup":
+        ops["mode"] = "tutup"
+        ops["libur_mulai"] = ""
+        ops["buka_kembali"] = ""
+    elif action == "buka":
+        ops["mode"] = "buka"
+        ops["libur_mulai"] = ""
+        ops["buka_kembali"] = ""
+    elif action == "jam":
+        jb = str(data.get("jam_buka", "") or "").strip()
+        jt = str(data.get("jam_tutup", "") or "").strip()
+        for v in (jb, jt):
+            try:
+                datetime.datetime.strptime(v, "%H:%M")
+            except ValueError:
+                return jsonify({"error": "format jam harus HH:MM"}), 400
+        if jb >= jt:
+            return jsonify({"error": "Jam buka harus lebih awal dari jam tutup."}), 400
+        ops["jam_buka"], ops["jam_tutup"] = jb, jt
+    else:
+        return jsonify({"error": "action harus libur/tutup/buka/jam"}), 400
+    ops["updated"] = nows.strftime("%Y-%m-%d %H:%M:%S")
+    M.ConfigManager.set("booking_ops", ops)
+    threading.Thread(target=_booking_ops_push, daemon=True).start()
+    threading.Thread(target=_push_call_meta, daemon=True).start()
+    return jsonify({"ok": True, "ops": ops})
+
+
+@app.route("/api/booking/ops/beacon", methods=["POST"])
+def api_booking_ops_beacon():
+    """Dikirim navigator.sendBeacon saat tab kasir (admin, mode BUKA) ditutup:
+    set rental TUTUP otomatis. Token lewat query string — sendBeacon tak bisa
+    memasang header. Popup 'Rental Belum Buka' saat app dibuka lagi menutup
+    loop-nya bila kasir salah tutup/refresh."""
+    tok = request.args.get("token", "").strip()
+    if not tok or tok not in TOKENS:
+        return "", 401
+    try:
+        ops = _booking_ops()
+        if str(ops.get("mode", "buka")) == "buka":
+            ops["mode"] = "tutup"
+            ops["libur_mulai"] = ""
+            ops["buka_kembali"] = ""
+            ops["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            M.ConfigManager.set("booking_ops", ops)
+            threading.Thread(target=_booking_ops_push, daemon=True).start()
+            applog("[BOOKING OPS] auto-TUTUP via beacon (tab kasir ditutup)")
+    except Exception as e:
+        _LOGGER.warning("Beacon tutup error: %s", e)
+    return "", 204
+
+
+@app.route("/api/booking/ops/local-close", methods=["POST"])
+def api_booking_ops_local_close():
+    """Khusus jendela aplikasi kasir (wrapper pywebview): dipanggil saat jendela
+    ditutup → set rental TUTUP otomatis. Aman karena Flask bind ke 127.0.0.1."""
+    try:
+        ops = _booking_ops()
+        if str(ops.get("mode", "buka")) == "buka":
+            ops["mode"] = "tutup"
+            ops["libur_mulai"] = ""
+            ops["buka_kembali"] = ""
+            ops["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            M.ConfigManager.set("booking_ops", ops)
+            threading.Thread(target=_booking_ops_push, daemon=True).start()
+            threading.Thread(target=_push_call_meta, daemon=True).start()
+            applog("[BOOKING OPS] auto-TUTUP via jendela aplikasi ditutup")
+    except Exception as e:
+        _LOGGER.warning("Local close error: %s", e)
+    return "", 204
+
+
 @app.route("/api/booking")
 @require_auth
 def api_booking_list():
@@ -5345,7 +5724,8 @@ def api_booking_list():
             "bukti": bukti if bukti.startswith("data:image/") else "",
         })
     rows.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
-    return jsonify({"rows": rows, "owner": owner, "username": STORE.user})
+    return jsonify({"rows": rows, "owner": owner, "username": STORE.user,
+                    "ops": _booking_ops()})
 
 
 @app.route("/api/booking/aktif")
@@ -5403,6 +5783,129 @@ def api_booking_aktif():
     return jsonify({"rows": rows, "label": label})
 
 
+def _booking_menit(grup, paket):
+    """Durasi booking (menit) dari tarif grup; default 60 jika tak dikenal."""
+    cfg = M.ConfigManager.load()
+    tarif = (cfg.get("grup_tarif", {}) or {}).get(str(grup or "")) \
+            or (cfg.get("grup_tarif_warnet", {}) or {}).get(str(grup or "")) or {}
+    try:
+        m = int(((tarif.get(str(paket or "")) or {}).get("menit")) or 0)
+    except Exception:
+        m = 0
+    return m if m > 0 else 60
+
+
+def _booking_range(b):
+    """(mulai, akhir) datetime dari dokumen booking; None jika tidak valid."""
+    tgl = str(b.get("tanggal", "") or "").strip()
+    jam = str(b.get("jam", "") or "").strip()[:5]
+    try:
+        mulai = datetime.datetime.strptime(f"{tgl} {jam}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    return mulai, mulai + datetime.timedelta(minutes=_booking_menit(b.get("grup"), b.get("paket")))
+
+
+def _booking_overlaps(fc, owner, perangkat, tanggal, mulai, akhir, exclude_id=""):
+    """Daftar booking aktif lain (baru/dikonfirmasi) yang bentrok waktu pada TV sama."""
+    out = []
+    try:
+        docs = fc.query_all("bookings", limit=100, order_field="createdAt") or []
+    except Exception as e:
+        _LOGGER.warning("Booking overlap query error: %s", e)
+        return out
+    for d in docs:
+        if str(d.get("_id", "")) == exclude_id:
+            continue
+        if str(d.get("owner", "")).strip().lower() != owner:
+            continue
+        if str(d.get("perangkat", "") or "").strip() != perangkat:
+            continue
+        if str(d.get("tanggal", "") or "").strip() != tanggal:
+            continue
+        if str(d.get("status", "")) == "ditolak":
+            continue
+        r = _booking_range(d)
+        if r and mulai < r[1] and r[0] < akhir:
+            out.append((d, r))
+    return out
+
+
+def _booking_bentrok_msg(fc, did):
+    """Pesan bentrok untuk konfirmasi booking did, atau None jika aman."""
+    try:
+        b = fc.get_document(f"bookings/{did}") or {}
+    except Exception as e:
+        _LOGGER.warning("Booking bentrok fetch error: %s", e)
+        return None
+    if not b:
+        return None
+    owner = str(b.get("owner", "")).strip().lower()
+    r = _booking_range(b)
+    if not r or not owner:
+        return None
+    mulai, akhir = r
+    perangkat = str(b.get("perangkat", "") or "").strip()
+    tanggal = str(b.get("tanggal", "") or "").strip()
+    ov = _booking_overlaps(fc, owner, perangkat, tanggal, mulai, akhir, exclude_id=did)
+    if not ov:
+        return None
+    d, (dm, da) = ov[0]
+    return (f"Bentrok jadwal: {perangkat} sudah dibooking {tanggal} "
+            f"{dm.strftime('%H:%M')}-{da.strftime('%H:%M')} oleh "
+            f"{d.get('namaPelanggan', '-')} (kode {str(d.get('_id', ''))[:8].upper()}). "
+            f"Pilih TV lain atau tolak booking ini.")
+
+
+@app.route("/api/booking/cek")
+@require_auth
+def api_booking_cek():
+    """Cek ketersediaan slot booking (dipakai aplikasi pembuat booking sebelum
+    membuat booking): ?perangkat=TV 1&tanggal=2026-08-24&jam=08:00&paket=5 Jam[&grup=PS3]"""
+    perangkat = str(request.args.get("perangkat", "") or "").strip()
+    tanggal = str(request.args.get("tanggal", "") or "").strip()
+    jam = str(request.args.get("jam", "") or "").strip()[:5]
+    paket = str(request.args.get("paket", "") or "").strip()
+    grup = str(request.args.get("grup", "") or "").strip()
+    if not (perangkat and tanggal and jam and paket):
+        return jsonify({"error": "perangkat, tanggal, jam, paket wajib diisi"}), 400
+    if not grup:
+        cfg = M.ConfigManager.load()
+        for g, t in list((cfg.get("grup_tarif", {}) or {}).items()) + \
+                     list((cfg.get("grup_tarif_warnet", {}) or {}).items()):
+            if isinstance(t, dict) and paket in t:
+                grup = g
+                break
+    fake = {"tanggal": tanggal, "jam": jam, "paket": paket, "grup": grup}
+    r = _booking_range(fake)
+    if not r:
+        return jsonify({"error": "format tanggal/jam tidak valid (YYYY-MM-DD, HH:MM)"}), 400
+    mulai, akhir = r
+    ops = _booking_ops()
+    if str(ops.get("mode", "buka")) != "buka":
+        alasan = ("Rental LIBUR" + (f" s/d {ops.get('buka_kembali')}" if ops.get("buka_kembali") else "")
+                  ) if ops.get("mode") == "libur" else \
+                 (f"Rental TUTUP — buka kembali {ops.get('jam_buka')}-{ops.get('jam_tutup')}")
+        return jsonify({"tersedia": False, "alasan": alasan, "ops": ops,
+                        "perangkat": perangkat, "tanggal": tanggal, "jam": jam,
+                        "durasi_menit": int((akhir - mulai).total_seconds() // 60),
+                        "bentrok": []})
+    owner = (STORE._resolve_license_user() or "").strip().lower()
+    ov = _booking_overlaps(FirestoreClient(), owner, perangkat, tanggal,
+                           mulai, akhir) if owner else []
+    return jsonify({
+        "tersedia": not ov,
+        "perangkat": perangkat,
+        "tanggal": tanggal,
+        "jam": jam,
+        "durasi_menit": int((akhir - mulai).total_seconds() // 60),
+        "bentrok": [{"kode": str(d.get("_id", ""))[:8].upper(),
+                     "nama": d.get("namaPelanggan", ""),
+                     "mulai": dm.strftime("%H:%M"),
+                     "selesai": da.strftime("%H:%M")} for d, (dm, da) in ov],
+    })
+
+
 @app.route("/api/booking/<did>", methods=["POST"])
 @require_auth
 def api_booking_aksi(did):
@@ -5416,6 +5919,10 @@ def api_booking_aksi(did):
             status = str(data.get("status", "") or "").strip()
             if status not in ("dikonfirmasi", "ditolak"):
                 return jsonify({"error": "status harus dikonfirmasi/ditolak"}), 400
+            if status == "dikonfirmasi":
+                bentrok = _booking_bentrok_msg(fc, did)
+                if bentrok:
+                    return jsonify({"error": bentrok}), 409
             fc.set_document(f"bookings/{did}", {
                 "status": status,
                 "kasir": STORE.user or "",
@@ -5866,8 +6373,9 @@ if __name__ == "__main__":
     start_servers()
     STORE.start_ticker()
     try:
-        import webbrowser
-        threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
+        if os.environ.get("RRB_NO_BROWSER") != "1":
+            import webbrowser
+            threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
     except Exception:
         pass
     app.run(host=HOST, port=PORT, threaded=True, debug=False, use_reloader=False)
