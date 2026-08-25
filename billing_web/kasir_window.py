@@ -1,4 +1,4 @@
-﻿"""RR Billing Pro â€” Jendela Aplikasi Kasir (wrapper pywebview, frameless).
+﻿"""RR Billing Pro — Jendela Aplikasi Kasir (wrapper pywebview, frameless).
 
 - Server.py dijalankan sebagai proses anak (tanpa auto-buka browser).
 - Title bar milik Windows diganti titlebar HTML yang ikut tema aplikasi.
@@ -23,12 +23,12 @@ URL = "http://localhost:8000"   # WAJIB localhost (bukan 127.0.0.1) agar login G
 ICON_ICO = os.path.join(BASE, "static", "logo.ico")
 ICON_PNG = os.path.join(BASE, "static", "logo.png")
 
-# Referensi jendela disimpan di sini (closure modul) â€” BUKAN sebagai atribut
+# Referensi jendela disimpan di sini (closure modul) — BUKAN sebagai atribut
 # objek Api! pywebview merefleksikan seluruh atribut instance Api saat membangun
 # window.pywebview.api; objek Window/.NET di dalamnya menyebabkan deadlock UI.
 _ST = {"win": None}
 
-# Perekam stack semua thread tiap 60 detik â€” untuk diagnosis bila macet.
+# Perekam stack semua thread tiap 60 detik — untuk diagnosis bila macet.
 try:
     _fh = open(os.path.join(tempfile.gettempdir(), "kasir_stacks.log"), "w", buffering=1)
     faulthandler.dump_traceback_later(60, repeat=True, file=_fh)
@@ -70,7 +70,7 @@ def matikan_server(proc):
 
 class Api:
     """Jembatan JS â†” Python.
-    SEMUA operasi form dieksekusi di UI thread via BeginInvoke â€”
+    SEMUA operasi form dieksekusi di UI thread via BeginInvoke —
     jangan pernah sentuh form langsung dari thread js_api (deadlock!)."""
 
     def __init__(self):
@@ -120,7 +120,7 @@ class Api:
             pass
 
     def exit_app(self, mode=None):
-        # TANPA panggilan jaringan di sini â€” tutup rental dilakukan oleh
+        # TANPA panggilan jaringan di sini — tutup rental dilakukan oleh
         # handler closed setelah jendela benar-benar tertutup.
         self.exit_mode = mode or "saja"
 
@@ -131,6 +131,21 @@ class Api:
             except Exception:
                 pass
         threading.Thread(target=_close, daemon=True).start()
+
+    def focus(self):
+        """Majukan jendela kasir ke depan (dipanggil UI saat booking masuk)."""
+        def _do():
+            try:
+                from System.Windows.Forms import FormWindowState
+                form = getattr(self._w, "native", None)
+                if not form:
+                    return
+                if form.WindowState == FormWindowState.Minimized:
+                    form.WindowState = FormWindowState.Normal
+                form.Activate()
+            except Exception:
+                pass
+        self._ui(_do)
 
     def minimize(self):
         def _do():
@@ -259,11 +274,11 @@ def main():
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
         if not tunggu_server():
-            print("Server gagal start â€” cek billing_web/web_app.log")
+            print("Server gagal start — cek billing_web/web_app.log")
             matikan_server(proc)
             sys.exit(1)
     else:
-        print("Server sudah berjalan â€” memakai instance yang ada.")
+        print("Server sudah berjalan — memakai instance yang ada.")
 
     import webview
 
@@ -284,7 +299,7 @@ def main():
                 from System.Drawing import Bitmap
                 bmp = Bitmap.FromFile(ICON_PNG)
                 form.Icon = Icon.FromHandle(bmp.GetHicon())
-            form.Text = "RR Billing Pro â€” Kasir"
+            form.Text = "RR Billing Pro — Kasir"
         except Exception as e:
             print("Ikon jendela gagal:", e)
         api._apply_bg()
@@ -305,12 +320,12 @@ def main():
         return False             # batalkan penutupan (non-blocking)
 
     win = webview.create_window(
-        "RR Billing Pro â€” Kasir",
+        "RR Billing Pro — Kasir",
         URL,
         width=1366,
         height=860,
         min_size=(1100, 700),
-        confirm_close=False,     # dialog generik dimatikan â€” pakai popup sendiri
+        confirm_close=False,     # dialog generik dimatikan — pakai popup sendiri
         js_api=api,
         background_color="#05060e",
         frameless=True,          # tanpa title bar Windows â†’ titlebar HTML ikut tema

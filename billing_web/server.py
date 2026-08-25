@@ -43,7 +43,8 @@ import mimetypes
 mimetypes.add_type("font/woff2", ".woff2")
 
 import main as M  # noqa: E402  (ConfigManager, fmt_rp, hitung_tarif_per_menit, verify_password, ...)
-from rr_license import LicenseManager  # noqa: E402 — lisensi & aktivasi (sama dengan desktop)
+from rr_license import LicenseManager  # noqa: E402
+WEB_APP_VERSION = "2.4.15"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
@@ -708,6 +709,8 @@ class Store:
         self._locked_until = {}
         self._member_fails = {}          # identifier member -> jumlah PIN salah
         self._member_locked_until = {}   # identifier member -> datetime lockout
+        self._lic_cache = {"t": 0.0, "status": None}   # cache status lisensi (TTL 5 dtk)
+        self._lic_restore_last = 0.0   # throttle adopsi lisensi cloud (1x/menit)
         self.hub = None                # TvWsHub (TV Android), diisi start_servers()
         self.warnet = None             # WarnetServerWeb (PC warnet), diisi start_servers()
         self.media = None              # TvMediaServer (media promosi TV), diisi start_servers()
@@ -1570,6 +1573,7 @@ class Store:
                 for u, x in users.items()] if isinstance(users, dict) else []
 
     # ── member (saldo waktu) ────────────────────────────────────────────
+    _JENIS_MEMBER = ("VIP", "PS3", "PS4")
     _DEFAULT_TOPUP = [
         {"nama": "1 Jam", "menit": 60, "harga": 5000},
         {"nama": "2 Jam", "menit": 120, "harga": 9000},
@@ -1591,6 +1595,7 @@ class Store:
             out.append({
                 "hp": hp,
                 "nama": str(m.get("nama", "")),
+                "jenis": str(m.get("jenis", "VIP") or "VIP").strip().upper(),
                 "saldo_menit": int(m.get("saldo_menit", 0) or 0),
                 "dibuat": m.get("dibuat", ""),
                 "terakhir_aktif": m.get("terakhir_aktif", ""),
@@ -1599,21 +1604,25 @@ class Store:
         out.sort(key=lambda x: x["nama"].lower())
         return out
 
-    def create_member(self, nama, hp, pin):
+    def create_member(self, nama, hp, pin, jenis="VIP"):
         nama = str(nama or "").strip()
         hp = str(hp or "").strip()
         pin = str(pin or "").strip()
+        jenis = str(jenis or "VIP").strip().upper()
         if not nama:
             return None, "Nama member wajib diisi."
         if not hp.isdigit() or not (8 <= len(hp) <= 15):
             return None, "No HP/WA tidak valid (8–15 digit angka)."
         if not (pin.isdigit() and 4 <= len(pin) <= 6):
             return None, "PIN harus 4–6 digit angka."
+        if jenis not in self._JENIS_MEMBER:
+            return None, "Jenis member harus salah satu dari: " + ", ".join(self._JENIS_MEMBER) + "."
         members = self._members_dict()
         if hp in members:
             return None, f"No HP {hp} sudah terdaftar."
         members[hp] = {
             "nama": nama,
+            "jenis": jenis,
             "pin_enc": M.hash_password(pin),
             "saldo_menit": 0,
             "dibuat": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1626,10 +1635,10 @@ class Store:
             return cfg
 
         M.ConfigManager.update(_mut)
-        applog(f"[MEMBER DAFTAR] {nama} ({hp}) | kasir={self.user}")
-        return {"hp": hp, "nama": nama}, None
+        applog(f"[MEMBER DAFTAR] {nama} ({hp}) | jenis={jenis} | kasir={self.user}")
+        return {"hp": hp, "nama": nama, "jenis": jenis}, None
 
-    def update_member(self, hp, nama=None, pin=None):
+    def update_member(self, hp, nama=None, pin=None, jenis=None):
         hp = str(hp or "").strip()
         members = self._members_dict()
         m = members.get(hp)
@@ -1639,6 +1648,13 @@ class Store:
         if nama is not None and str(nama).strip() and str(nama).strip() != m.get("nama"):
             m["nama"] = str(nama).strip()
             changed.append(f"nama->{m['nama']}")
+        if jenis is not None and str(jenis).strip():
+            jenis = str(jenis).strip().upper()
+            if jenis not in self._JENIS_MEMBER:
+                return None, "Jenis member harus salah satu dari: " + ", ".join(self._JENIS_MEMBER) + "."
+            if jenis != m.get("jenis"):
+                m["jenis"] = jenis
+                changed.append(f"jenis->{jenis}")
         if pin:
             pin = str(pin).strip()
             if not (pin.isdigit() and 4 <= len(pin) <= 6):
@@ -1709,13 +1725,34 @@ class Store:
         return {"hp": hp, "nama": str(m.get("nama", "")),
                 "saldo_menit": int(m.get("saldo_menit", 0) or 0)}, None
 
-    def topup_paket_list(self):
-        lst = M.ConfigManager.get("member_topup", None)
-        if not isinstance(lst, list) or not lst:
-            return [dict(p) for p in self._DEFAULT_TOPUP]
-        return [dict(p) for p in lst if isinstance(p, dict)]
+    def topup_semua_jenis(self):
+        """Daftar paket isi ulang per jenis member {VIP:[...], PS3:[...], PS4:[...]}.
+        Migrasi otomatis: jenis yang belum diatur mewarisi `member_topup` lama
+        (atau default) supaya tidak ada jenis tanpa harga."""
+        cfg_jenis = M.ConfigManager.get("member_topup_jenis", None)
+        if not isinstance(cfg_jenis, dict):
+            cfg_jenis = {}
+        legacy = M.ConfigManager.get("member_topup", None)
+        base = ([dict(p) for p in legacy]
+                if isinstance(legacy, list) and legacy
+                else [dict(p) for p in self._DEFAULT_TOPUP])
+        out = {}
+        for j in self._JENIS_MEMBER:
+            lst = cfg_jenis.get(j)
+            out[j] = ([dict(p) for p in lst]
+                      if isinstance(lst, list) and lst else [dict(p) for p in base])
+        return out
 
-    def save_topup_paket(self, paket_list):
+    def topup_paket_list(self, jenis=""):
+        jenis = str(jenis or "").strip().upper() or "VIP"
+        if jenis not in self._JENIS_MEMBER:
+            jenis = "VIP"
+        return self.topup_semua_jenis()[jenis]
+
+    def save_topup_paket(self, paket_list, jenis="VIP"):
+        jenis = str(jenis or "VIP").strip().upper() or "VIP"
+        if jenis not in self._JENIS_MEMBER:
+            return None, "Jenis harus salah satu dari: " + ", ".join(self._JENIS_MEMBER) + "."
         norm = []
         for p in paket_list or []:
             try:
@@ -1729,21 +1766,29 @@ class Store:
             norm.append({"nama": nm, "menit": menit, "harga": harga})
 
         def _mut(cfg):
-            cfg["member_topup"] = norm
+            semua = cfg.get("member_topup_jenis")
+            if not isinstance(semua, dict):
+                semua = {}
+                cfg["member_topup_jenis"] = semua
+            semua[jenis] = norm
             return cfg
 
         M.ConfigManager.update(_mut)
-        applog(f"[TOPUP PAKET] {len(norm)} paket disimpan | admin={self.user}")
+        applog(f"[TOPUP PAKET] jenis={jenis} | {len(norm)} paket disimpan | admin={self.user}")
         return norm, None
 
     def topup_member(self, hp, paket_nama):
-        """Isi ulang saldo waktu member: tambah menit + catat transaksi."""
+        """Isi ulang saldo waktu member: tambah menit + catat transaksi.
+        Paket dicari dari daftar harga sesuai JENIS member."""
         hp = str(hp or "").strip()
         members = self._members_dict()
         m = members.get(hp)
         if not isinstance(m, dict):
             return None, "Member tidak ditemukan."
-        pkt = next((p for p in self.topup_paket_list() if p.get("nama") == paket_nama), None)
+        jenis = str(m.get("jenis", "VIP") or "VIP").strip().upper() or "VIP"
+        if jenis not in self._JENIS_MEMBER:
+            jenis = "VIP"
+        pkt = next((p for p in self.topup_paket_list(jenis) if p.get("nama") == paket_nama), None)
         if not pkt:
             return None, f"Paket isi ulang '{paket_nama}' tidak ada."
         menit = int(pkt.get("menit", 0))
@@ -1774,9 +1819,9 @@ class Store:
             self.save_riwayat()
         except Exception:
             pass
-        applog(f"[MEMBER TOPUP] {m.get('nama')} ({hp}) | {pkt['nama']} "
+        applog(f"[MEMBER TOPUP] {m.get('nama')} ({hp}) jenis={jenis} | {pkt['nama']} "
                f"+{menit} mnt {M.fmt_rp(harga)} | saldo={m['saldo_menit']} mnt | kasir={self.user}")
-        return {"hp": hp, "nama": m.get("nama"),
+        return {"hp": hp, "nama": m.get("nama"), "jenis": jenis,
                 "saldo_menit": m["saldo_menit"],
                 "topup": {"paket": pkt["nama"], "menit": menit, "harga": harga}}, None
 
@@ -1964,13 +2009,18 @@ class Store:
         return {
             "user": self.user,
             "role": self.role,
+            "has_password": self._has_password(),
+            "lic_status": str((self._lic_check() or {}).get("status", "unknown")),
+            "lic_pesan": str((self._lic_cache.get("status") or {}).get("pesan", "")),
+            "lic_sisa_hari": int((self._lic_cache.get("status") or {}).get("sisa_hari", 0) or 0),
             "menu_makanan": self.menu_makanan,
             "menu_minuman": self.menu_minuman,
             "stok": self.stok,
             "stok_min": self.stok_min,
             "groups_tv": self.daftar_grup_tv(),
             "groups_warnet": self.daftar_grup_warnet(),
-            "member_topup": self.topup_paket_list(),
+            "member_topup": self.topup_paket_list("VIP"),
+            "member_topup_jenis": self.topup_semua_jenis(),
             "tv": tvs,
             "warnet": warnet,
             "events": list(self.events),
@@ -1984,6 +2034,173 @@ class Store:
             return self.warnet.is_pc_online(sesi.pc_id)
         except Exception:
             return False
+
+    def _has_password(self):
+        """True bila akun yang sedang login punya password lokal (bukan
+        akun Google tanpa password) — dipakai UI untuk mode Buat Password."""
+        try:
+            u = (M.ConfigManager.get("users", {}) or {}).get(self.user)
+            if not isinstance(u, dict):
+                return False
+            return bool(u.get("password_enc") or u.get("password"))
+        except Exception:
+            return True
+
+    # ── lisensi real-time ──────────────────────────────────────────────
+    _LIC_TTL = 5.0   # detik — polling state tiap 1 dtk tetap ringan
+
+    def _lic_check(self):
+        """Status lisensi dengan cache TTL pendek supaya UI bisa memantau
+        real-time tanpa membaca config/verifikasi berat di setiap request.
+        Bila status lokal bukan 'active', coba adopsi lisensi cloud dulu
+        (aktivasi lewat rrbillingpro.exe / Android) — maksimal 1x per menit."""
+        now = time.time()
+        c = self._lic_cache
+        if c.get("status") is not None and now - c.get("t", 0.0) < self._LIC_TTL:
+            return c["status"]
+        try:
+            st = LicenseManager.get_status(current_user=self._resolve_license_user())
+        except Exception as e:
+            st = {"status": "unknown", "sisa_hari": 0, "pesan": f"Error: {e}"}
+        if str(st.get("status", "")) != "active":
+            if now - getattr(self, "_lic_restore_last", 0.0) >= self._LIC_RESTORE_EVERY:
+                self._lic_restore_last = now
+                try:
+                    if self._lic_cloud_restore():
+                        st = LicenseManager.get_status(
+                            current_user=self._resolve_license_user())
+                except Exception as e:
+                    _LOGGER.warning("Cloud license restore error: %s", e)
+        self._lic_cache = {"t": now, "status": st}
+        return st
+
+    def _lic_invalidate(self):
+        """Buang cache status lisensi (dipanggil setelah aktivasi/revoke)."""
+        self._lic_cache = {"t": 0.0, "status": None}
+
+    def _lic_ok(self):
+        """False bila trial/lisensi habis — blokir transaksi baru saja;
+        sesi yang sudah berjalan dibiarkan sampai selesai."""
+        st = self._lic_check()
+        ok = str(st.get("status", "")) in ("active", "trial")
+        return ok, st
+
+    # ── adopsi lisensi dari cloud (port 'Cloud license restore' main.py) ──
+    _EDITION_RANK = {"BULANAN": 0, "3BULAN": 1, "TAHUNAN": 2, "LIFETIME": 3}
+    _LIC_RESTORE_EVERY = 60.0   # detik minimal antar percobaan restore cloud
+
+    def _lic_edition_from_max_tv(self, lic, max_tv):
+        """maxTv tidak valid (<=0) → jangan ubah edition; LIFETIME jangan
+        diturunkan. Pola sama dengan _save_edition_from_max_tv di main.py."""
+        if max_tv >= 999999:
+            new = "LIFETIME"
+        elif max_tv >= 15:
+            new = "TAHUNAN"
+        elif max_tv >= 10:
+            new = "3BULAN"
+        elif max_tv > 0:
+            new = "BULANAN"
+        else:
+            return
+        old = str(lic.get("edition", "")).strip().upper() if "edition" in lic else ""
+        if old and self._EDITION_RANK.get(old, -1) >= self._EDITION_RANK.get(new, -1):
+            return
+        lic["edition"] = new
+
+    def _lic_write_cloud(self, expires_at, kode_aktivasi="", max_tv=0, promo_add_tv=0):
+        """Tulis lisensi hasil adopsi cloud ke file lisensi lokal web."""
+        import datetime as _dt
+        try:
+            fmt = lambda x: x if "T" in x else x + "T00:00:00"
+            expires = _dt.datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=_dt.timezone.utc)
+            if expires <= _dt.datetime.now(_dt.timezone.utc):
+                return False
+        except Exception:
+            return False
+        lic = LicenseManager.load() or {}
+        resolved = (self._resolve_license_user() or "").strip()
+        existing_user = str(lic.get("username", ""))
+        # Lisensi milik user lain TIDAK ditimpa, kecuali yang login sekarang
+        # adalah admin_utama pemilik data mesin ini (pola main.py).
+        if lic.get("aktif") and existing_user and existing_user != resolved:
+            admin_utama = ""
+            try:
+                for _u in (M.ConfigManager.get("users", {}) or {}).values():
+                    if isinstance(_u, dict) and _u.get("admin_utama"):
+                        admin_utama = _u.get("admin_utama")
+            except Exception:
+                pass
+            if not (admin_utama and resolved == admin_utama):
+                return False
+        lic["aktif"] = True
+        old_exp_raw = str(lic.get("expiry", "") or "")
+        try:
+            if not old_exp_raw:
+                lic["expiry"] = expires_at
+            else:
+                old_exp = _dt.datetime.fromisoformat(fmt(old_exp_raw).replace("Z", "+00:00"))
+                new_exp = _dt.datetime.fromisoformat(fmt(expires_at).replace("Z", "+00:00"))
+                if new_exp > old_exp:
+                    lic["expiry"] = expires_at
+        except Exception:
+            lic["expiry"] = expires_at
+        lic["firebase_sync"] = True
+        lic["binding_mode"] = "username"
+        lic["username"] = resolved
+        self._lic_edition_from_max_tv(lic, int(max_tv or 0))
+        if kode_aktivasi:
+            lic["kode_aktivasi"] = str(kode_aktivasi)
+        lic["promo_add_tv"] = int(promo_add_tv or 0) or int(lic.get("promo_add_tv", 0) or 0)
+        lic["promo_add_warnet"] = lic.get("promo_add_tv", 0)
+        LicenseManager.save(lic)
+        applog(f"[LISENSI] Adopsi lisensi CLOUD untuk {resolved} "
+               f"(s/d {expires_at}, sumber: desktop/Android)")
+        return True
+
+    def _lic_cloud_restore(self):
+        """Cek Firestore: bila akun ini sudah punya lisensi aktif yang
+        diaktifkan lewat aplikasi desktop (rrbillingpro.exe) / Android,
+        adopsi ke file lisensi lokal web supaya status sinkron real-time."""
+        user = (self._resolve_license_user() or "").strip()
+        if not user:
+            return False
+        try:
+            fc = FirestoreClient()
+        except Exception as e:
+            _LOGGER.warning("Cloud license restore dilewati (Firestore): %s", e)
+            return False
+        try:
+            ls = fc.fetch_license_status_by_username(user)
+            if ls and ls.get("status") == "active" and ls.get("expiresAt"):
+                return self._lic_write_cloud(
+                    ls["expiresAt"], max_tv=ls.get("maxTv") or 0,
+                    promo_add_tv=ls.get("promoAddTv") or 0)
+        except Exception as e:
+            _LOGGER.warning("Cloud license restore (licenseStatus) gagal: %s", e)
+        try:
+            ld = fc.get_document(f"licenses/{user}")
+            if ld and ld.get("expiry") and not ld.get("revoked"):
+                if self._lic_write_cloud(ld["expiry"],
+                                         kode_aktivasi=str(ld.get("kode", "") or ""),
+                                         max_tv=int(ld.get("maxTv") or 0)):
+                    return True
+        except Exception as e:
+            _LOGGER.warning("Cloud license restore (licenses/) gagal: %s", e)
+        try:
+            invs = fc.query_where_equal("invoices", "username", user)
+            for iv in invs or []:
+                if iv.get("revoked"):
+                    continue
+                if (str(iv.get("status", "")).upper() == "CONFIRMED"
+                        and iv.get("expiry")):
+                    if self._lic_write_cloud(iv["expiry"],
+                                             kode_aktivasi=str(iv.get("kodeLisensi", "") or "")):
+                        return True
+        except Exception as e:
+            _LOGGER.warning("Cloud license restore (invoices/) gagal: %s", e)
+        return False
 
     def riwayat(self, q=None, limit=500, tgl=None, mode=None, kasir=None):
         q = (q or "").strip().lower()
@@ -3101,6 +3318,13 @@ def api_sesi(kind, key):
         return jsonify({"error": "sesi tidak ditemukan"}), 404
     data = request.get_json(silent=True) or {}
     act = data.get("action")
+    # ── Lisensi: blokir transaksi BARU bila trial/lisensi habis.
+    #    Sesi yang sudah berjalan (pause/resume/selesai/bayar) tetap boleh.
+    if act in ("paket", "booking", "member_mulai", "shop"):
+        ok_lic, st = STORE._lic_ok()
+        if not ok_lic:
+            return jsonify({"error": "⛔ Trial habis — Aktifkan lisensi di tab Aktivasi "
+                                     "untuk melanjutkan transaksi baru."}), 403
     with STORE._lock:
         if act == "paket":
             paket_nm = data.get("paket", "")
@@ -3538,7 +3762,7 @@ def api_member():
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         res, err = STORE.create_member(data.get("nama", ""), data.get("hp", ""),
-                                       data.get("pin", ""))
+                                       data.get("pin", ""), data.get("jenis", "VIP"))
         if err:
             return jsonify({"error": err}), 400
         return jsonify(res)
@@ -3556,7 +3780,8 @@ def api_member_edit(hp):
             return jsonify({"error": err}), 400
         return jsonify(res)
     data = request.get_json(silent=True) or {}
-    res, err = STORE.update_member(hp, nama=data.get("nama"), pin=data.get("pin"))
+    res, err = STORE.update_member(hp, nama=data.get("nama"), pin=data.get("pin"),
+                                   jenis=data.get("jenis"))
     if err:
         return jsonify({"error": err}), 400
     return jsonify(res)
@@ -3580,17 +3805,23 @@ def api_member_topup():
         if STORE.role != "admin":
             return jsonify({"error": "hanya admin"}), 403
         data = request.get_json(silent=True) or {}
-        res, err = STORE.save_topup_paket(data.get("paket", []))
+        res, err = STORE.save_topup_paket(data.get("paket", []),
+                                          data.get("jenis", "VIP"))
         if err:
             return jsonify({"error": err}), 400
-        return jsonify({"ok": True, "paket": res})
-    return jsonify({"paket": STORE.topup_paket_list()})
+        return jsonify({"ok": True, "jenis": data.get("jenis", "VIP"), "paket": res})
+    return jsonify({"semua": STORE.topup_semua_jenis(),
+                    "paket": STORE.topup_paket_list(request.args.get("jenis", "VIP"))})
 
 
 @app.route("/api/member/topup/beli", methods=["POST"])
 @require_auth
 def api_member_topup_beli():
     """Kasir memproses pembelian paket isi ulang untuk member."""
+    ok_lic, _st = STORE._lic_ok()
+    if not ok_lic:
+        return jsonify({"error": "⛔ Trial habis — Aktifkan lisensi di tab Aktivasi "
+                                 "untuk melanjutkan transaksi baru."}), 403
     data = request.get_json(silent=True) or {}
     res, err = STORE.topup_member(data.get("hp", ""), data.get("paket", ""))
     if err:
@@ -4153,18 +4384,26 @@ def api_settings_password():
     old = str(data.get("old", ""))
     new = str(data.get("new", ""))
     users = M.ConfigManager.get("users", {}) or {}
-    u = users.get(STORE.user) or {}
+    u = users.get(STORE.user)
     if not isinstance(u, dict):
-        return jsonify({"error": "akun tidak ditemukan"}), 404
-    old_hash = u.get("password_enc") or u.get("password", "") or ""
-    if not M.verify_password(old, old_hash):
-        return jsonify({"error": "Password lama salah"}), 401
+        # Akun login Google belum punya record lokal → buat sekarang
+        u = {"password_enc": "", "role": STORE.role or "admin",
+             "admin_utama": "" if (STORE.role or "admin") == "admin" else STORE.user}
+        users[STORE.user] = u
+        applog(f"[USER BUAT] {STORE.user} dibuat otomatis saat buat password")
+    has_pw = bool(u.get("password_enc") or u.get("password"))
+    if has_pw:
+        # Sudah ada password → wajib verifikasi password lama
+        if not M.verify_password(old, u.get("password_enc") or ""):
+            return jsonify({"error": "Password lama salah"}), 401
+    # Belum punya password (akun Google) → boleh langsung buat
     if len(new) < 6:
         return jsonify({"error": "Password baru minimal 6 karakter"}), 400
     u["password_enc"] = M.hash_password(new)
     cfg = M.ConfigManager.load()
     cfg["users"] = users
     M.ConfigManager.save(cfg)
+    applog(f"[PASSWORD] {'buat' if not has_pw else 'ganti'} | user={STORE.user}")
     return jsonify({"ok": True})
 
 
@@ -5422,7 +5661,7 @@ def api_profil():
         "pin_updated": (sec.get("pin_hapus_updated", "") if isinstance(sec, dict) else ""),
         "qr_page_url": str((_cfg.get("qr_page_url") or "") or "").strip(),
         "theme": theme,
-        "versi": str(getattr(M, "APP_VERSION", "2.4.11")),
+        "versi": WEB_APP_VERSION,
         "developer": "RR CCTV",
         "kontak": "0812-7064-7744",
         "website": "rrcctv.online",
@@ -5539,8 +5778,8 @@ def api_pin():
     sec = dict(cfg.get("security") or {}) if isinstance(cfg.get("security"), dict) else {}
     if act == "set":
         pin = str(data.get("pin", "") or "").strip()
-        if not pin.isdigit() or not (4 <= len(pin) <= 6):
-            return jsonify({"error": "PIN harus 4-6 digit angka"}), 400
+        if not pin.isdigit() or len(pin) != 4:
+            return jsonify({"error": "PIN harus tepat 4 digit angka"}), 400
         sec["pin_hapus"] = pin
         sec["pin_hapus_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
     elif act == "hapus":
@@ -6009,7 +6248,7 @@ def api_backup_export():
     except Exception:
         pass
     backup = {
-        "app_version": str(getattr(M, "APP_VERSION", "2.4.11")),
+        "app_version": WEB_APP_VERSION,
         "exported_at": datetime.datetime.now().isoformat(),
         "exported_by": STORE.user or "unknown",
         "config": export_cfg,
@@ -6247,6 +6486,7 @@ def api_aktivasi_act():
         pass
     if not sukses:
         return jsonify({"error": pesan}), 400
+    STORE._lic_invalidate()
     threading.Thread(target=_sync_aktivasi_cloud, args=(kode,), daemon=True).start()
     return jsonify({"ok": True, "message": pesan})
 
@@ -6280,6 +6520,7 @@ def api_aktivasi_revoke():
         lic_data["revoked"] = True
         lic_data["revoked_at"] = datetime.datetime.now().isoformat()
         LicenseManager.save(lic_data)
+        STORE._lic_invalidate()
         try:
             M.AuditLogger.log(
                 action="license_revoked",
