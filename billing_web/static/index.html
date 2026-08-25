@@ -520,6 +520,7 @@ $("btnLogin").onclick=function(){
   });
 };
 $("lgPass").addEventListener("keydown",function(e){ if(e.key==="Enter") $("btnLogin").click(); });
+$("btnGoogle").onclick=function(){ startGoogleSignIn(); };
 $("btnToDaftar").onclick=function(){ $("authSwitch").classList.add("reg"); $("loginStatus").textContent=""; setTimeout(function(){ $("rgUser").focus(); },320); };
 $("btnToLogin").onclick=function(){ $("authSwitch").classList.remove("reg"); $("loginStatus").textContent=""; setTimeout(function(){ $("lgUser").focus(); },320); };
 $("btnRegister").onclick=function(){
@@ -607,9 +608,10 @@ function finishGoogleLogin(user){
 function startGoogleSignIn(){
   $("loginStatus").textContent="Mengalihkan ke Google…";
   loadGoogleSDK(function(){
-    firebase.auth().setPersistence(firebase.auth.Auth.Persistence.NONE).then(function(){
+    firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(function(){
       var prov=new firebase.auth.GoogleAuthProvider();
       prov.addScope("email"); prov.addScope("profile");
+      prov.setCustomParameters({prompt:"select_account"});
       return firebase.auth().signInWithRedirect(prov);
     }).catch(function(e){ $("loginStatus").textContent=" "+(e.message||e); });
   });
@@ -618,9 +620,15 @@ function startGoogleSignIn(){
 function googleBootCheck(){
   loadGoogleSDK(function(){
     try{
+      console.log("[GLOGIN] memanggil getRedirectResult", "ss:", Object.keys(sessionStorage).join(","), "ls:", Object.keys(localStorage).join(","));
       firebase.auth().getRedirectResult().then(function(res){
+        console.log("[GLOGIN] hasil:", res && res.user ? res.user.email : JSON.stringify(res||null));
         if(res && res.user && !TOKEN){ finishGoogleLogin(res.user); }
-      }).catch(function(e){ $("loginStatus").textContent=" "+(e.message||e); });
+        else if(!res || !res.user){ $("loginStatus").textContent=""; }
+      }).catch(function(e){
+        console.log("[GLOGIN] error:", e.code, e.message);
+        $("loginStatus").textContent=" "+(e.code||"")+" "+(e.message||e);
+      });
     }catch(e){}
   });
 }

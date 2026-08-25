@@ -172,6 +172,83 @@ class Api:
         self._ui(_do)   # modal move-loop berjalan di UI thread
 
 
+def _patch_edgechrome_no_tracking_prevention():
+    """Matikan Tracking Prevention WebView2 yang memblokir storage
+    iframe Firebase saat login Google (getRedirectResult null)."""
+    try:
+        import webview.platforms.edgechromium as ec
+        from Microsoft.Web.WebView2.Core import (
+            CoreWebView2Environment,
+            CoreWebView2EnvironmentOptions,
+        )
+        if getattr(ec.EdgeChrome, "_no_tp_patched", False):
+            return
+
+        def _init_no_tp(self, form, window, cache_dir):
+            self.pywebview_window = window
+            self.webview = ec.WebView2()
+            props = ec.CoreWebView2CreationProperties()
+
+            runtime_path = ec.webview_settings['WEBVIEW2_RUNTIME_PATH']
+            if runtime_path:
+                if not os.path.isabs(runtime_path):
+                    runtime_path = os.path.join(ec.get_app_root(), runtime_path)
+                if os.path.exists(runtime_path):
+                    props.BrowserExecutableFolder = runtime_path
+
+            props.UserDataFolder = cache_dir
+            self.user_data_folder = props.UserDataFolder
+            props.set_IsInPrivateModeEnabled(ec._state['private_mode'])
+            props.AdditionalBrowserArguments = ''
+            if ec.webview_settings['ALLOW_FILE_URLS']:
+                props.AdditionalBrowserArguments += ' --allow-file-access-from-files'
+            if ec.webview_settings['REMOTE_DEBUGGING_PORT'] is not None:
+                props.AdditionalBrowserArguments += (
+                    f' --remote-debugging-port={ec.webview_settings["REMOTE_DEBUGGING_PORT"]}'
+                )
+
+            self.webview.CreationProperties = props
+            self.form = form
+            form.Controls.Add(self.webview)
+
+            self.js_results = {}
+            self.js_result_semaphore = ec.Semaphore(0)
+            self.webview.Dock = ec.WinForms.DockStyle.Fill
+            self.webview.BringToFront()
+            self.webview.CoreWebView2InitializationCompleted += self.on_webview_ready
+            self.webview.NavigationStarting += self.on_navigation_start
+            self.webview.NavigationCompleted += self.on_navigation_completed
+            self.webview.WebMessageReceived += self.on_script_notify
+            self.syncContextTaskScheduler = ec.TaskScheduler.FromCurrentSynchronizationContext()
+            self.webview.DefaultBackgroundColor = ec.Color.FromArgb(
+                255,
+                int(window.background_color.lstrip('#')[0:2], 16),
+                int(window.background_color.lstrip('#')[2:4], 16),
+                int(window.background_color.lstrip('#')[4:6], 16),
+            )
+            if window.transparent:
+                self.webview.DefaultBackgroundColor = ec.Color.Transparent
+
+            self.url = None
+            self.ishtml = False
+            self.html = ec.DEFAULT_HTML
+
+            opts = CoreWebView2EnvironmentOptions()
+            opts.EnableTrackingPrevention = False
+            opts.AdditionalBrowserArguments = (
+                '--disable-features=ThirdPartyStoragePartitioning,'
+                'PartitionedStorage,ElasticOverscroll'
+            )
+            env = CoreWebView2Environment.CreateAsync(None, cache_dir, opts).Result
+            self.webview.EnsureCoreWebView2Async(env)
+
+        _init_no_tp.__name__ = "__init__"
+        ec.EdgeChrome.__init__ = _init_no_tp
+        ec.EdgeChrome._no_tp_patched = True
+    except Exception as e:
+        print("Patch Tracking Prevention gagal:", e)
+
+
 def main():
     proc = None
     if not server_sudah_jalan():
@@ -189,6 +266,8 @@ def main():
         print("Server sudah berjalan â€” memakai instance yang ada.")
 
     import webview
+
+    _patch_edgechrome_no_tracking_prevention()
 
     api = Api()
 
@@ -249,7 +328,7 @@ def main():
         matikan_server(proc)
 
     win.events.closed += on_closed
-    webview.start()
+    webview.start(private_mode=False)
 
     # fallback jika loop selesai tanpa event closed terpicu
     if api.exit_mode != "saja":
@@ -259,3 +338,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
