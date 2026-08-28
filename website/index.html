@@ -1,0 +1,220 @@
+﻿<!DOCTYPE html>
+<html lang="id">
+<head><script>if(location.protocol==="http:"&&location.hostname!=='localhost'){location.replace("https://"+location.host+location.pathname+location.search);}</script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="RR Billing Pro — Aplikasi billing PS3/PS4/TV & warnet paling lengkap. Kartu Android TV, QR panggil kasir, sinkron laporan real-time via cloud. Unduh sekarang!">
+  <title>RR Billing Pro — Aplikasi Billing PS3/PS4/TV & Warnet</title>
+  <link rel="icon" href="assets/img/logo.png" type="image/png">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260813g">
+  <script src="assets/js/gsap.min.js" defer></script>
+  <script src="assets/js/promo-slider.js?v=20260816b" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore-compat.js"></script>
+
+  <link rel=preconnect href=https://fonts.googleapis.com>
+  <link rel=preconnect href=https://fonts.gstatic.com crossorigin>
+  <link href=https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap rel=stylesheet>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/img/logo.png" alt="Logo RR Billing Pro">
+        RR BILLING PRO
+      </a>
+      <div class="nav-links" id="navLinks">
+        <a href="index.html">Beranda</a>
+        <a href="download.html">Download</a>
+        <a href="harga.html">Harga &amp; Lisensi</a>
+        <a href="laporan.html">Laporan</a>
+        <a href="booking.html">Booking</a>
+        <a href="kontak.html">Kontak</a>
+        <a href="mitra.html">Mitra</a>
+        <a href="download.html" class="btn btn-primary">Unduh Sekarang</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="container">
+      <div class="hero-grid">
+        <div>
+          <h1>Aplikasi Billing <span class="grad">PS3 / PS4 / TV &amp; Warnet</span> No.1</h1>
+          <p class="lead">
+            Kelola rental PS dan warnet dalam satu aplikasi: kartu Android TV, QR panggil kasir,
+            menu makanan &amp; minuman, laporan pendapatan real-time, sampai sinkron data ke cloud
+            yang bisa dipantau dari HP.
+          </p>
+          <div class="hero-cta">
+            <a href="download.html" class="btn btn-primary btn-lg">⬇ Unduh Gratis</a>
+            <a href="harga.html" class="btn btn-outline btn-lg">Lihat Harga Paket</a>
+          </div>
+          <div class="hero-stats">
+            <div class="stat"><b>2.4.15</b><span>Versi Terbaru</span></div>
+            <div class="stat"><b>± 61 MB</b><span>Ukuran Installer</span></div>
+            <div class="stat"><b>3 Hari</b><span>Masa Trial Gratis</span></div>
+            <div class="stat"><b id="statMembers">—</b><span>Rental Telah Bergabung</span></div>
+          </div>
+        </div>
+        <div id="promoSlider">
+          <div class="ds-stage">
+            <div class="slides" id="slides"></div>
+            <div class="content" id="content">
+              <div class="tagline" id="slideTag">— RR BILLING PRO</div>
+              <h4 id="slideTitle"></h4>
+              <p id="slideDesc"></p>
+              <div class="cta-row">
+                <a class="btn-explore" id="ctaBtn" href="#">Lihat Demo</a>
+                <span class="counter" id="counter">01 / 08</span>
+              </div>
+            </div>
+          </div>
+          <div class="cards-wrap">
+            <div class="cards-track" id="cardsTrack"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <section id="fitur">
+    <div class="container">
+      <div class="section-head">
+        <h2>Fitur Lengkap untuk Bisnis Rental Anda</h2>
+        <p>Semua yang Anda butuhkan untuk mengelola PS, TV, dan warnet — dalam satu aplikasi.</p>
+      </div>
+      <div class="features">
+        <div class="feat"><div class="icon"><img src="assets/img/feat-tv.jpg" alt="Billing PS / TV"></div><h3>Billing PS3 / PS4 / TV</h3><p>Paket per menit, tagihan otomatis, kontrol jarak jauh lewat kartu Android TV client.</p></div>
+        <div class="feat"><div class="icon"><img src="assets/img/feat-pc.jpg" alt="Billing Warnet / PC"></div><h3>Billing Warnet / PC</h3><p>Kunci otomatis saat waktu habis, sesi main bebas, dan kendali dari dashboard kasir.</p></div>
+        <div class="feat"><div class="icon"><img src="assets/img/feat-qr.jpg?v=20260816" alt="QR Panggil Kasir"></div><h3>QR Panggil Kasir</h3><p>Pelanggan di TV cukup scan QR — keluhan, tambah paket, atau pesan makanan langsung masuk ke kasir.</p></div>
+        <div class="feat"><div class="icon"><img src="assets/img/feat-food.jpg" alt="Menu Makanan & Minuman"></div><h3>Menu Makanan &amp; Minuman</h3><p>Pesanan dicatat otomatis ke tagihan sesi, lengkap dengan stok dan laporan penjualan.</p></div>
+        <div class="feat"><div class="icon"><img src="assets/img/feat-cloud.jpg?v=20260816" alt="Sinkron Cloud & Laporan"></div><h3>Sinkron Cloud &amp; Laporan</h3><p>Riwayat transaksi tersinkron ke cloud — pantau pendapatan dari HP kapan saja.</p></div>
+        <div class="feat"><div class="icon"><img src="assets/img/feat-tvapk.jpg?v=20260816" alt="Detail APK RR Billing TV"></div><h3>Detail APK RR Billing TV</h3><p>Aplikasi kartu Android TV: paket per menit, tagihan otomatis, QR panggil kasir, layar terkunci dengan rincian tagihan saat waktu habis, dan popup timer sisa waktu di pojok layar.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section style="background: var(--bg-2);" id="video">
+    <div class="container">
+      <div class="section-head">
+        <h2>Lihat Aplikasinya</h2>
+        <p>Video promosi yang berjalan otomatis di layar TV saat waktu luang.</p>
+      </div>
+      <div class="video-wrap">
+        <div class="video-embed">
+          <video controls playsinline preload="metadata" poster="assets/img/slider/slide-ps-tv.jpg" style="position:absolute;inset:0;width:100%;height:100%;background:#000">
+            <source src="assets/img/slider/promo.mp4" type="video/mp4">
+          </video>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="section-head">
+        <h2>Siap Memulai?</h2>
+        <p>Unduh sekarang, nikmati trial 3 hari penuh — semua fitur tanpa potongan.</p>
+      </div>
+      <div style="text-align:center">
+        <a href="download.html" class="btn btn-primary btn-lg">⬇ Unduh RR Billing Pro</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container foot-inner">
+      <span>© 2026 RR Billing Pro — rrcctv.online</span>
+      <span>Hubungi kami: <a href="https://wa.me/6282180208414" target="_blank">WhatsApp 0821-8020-8414</a></span>
+    </div>
+  </footer>
+
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Pratinjau gambar">
+    <button class="lb-close" id="lbClose" aria-label="Tutup">×</button>
+    <figure class="lb-figure">
+      <img id="lbImg" src="" alt="">
+      <figcaption class="lb-caption">
+        <h3 id="lbTitle"></h3>
+        <p id="lbDesc"></p>
+      </figcaption>
+    </figure>
+  </div>
+
+  <script>
+    (function () {
+      var box = document.getElementById('lightbox');
+      var img = document.getElementById('lbImg');
+      var closeBtn = document.getElementById('lbClose');
+      var lastFocus = null;
+
+      function open(src, alt, title, desc) {
+        lastFocus = document.activeElement;
+        img.src = src;
+        img.alt = alt || '';
+        document.getElementById('lbTitle').textContent = title || '';
+        document.getElementById('lbDesc').textContent = desc || '';
+        box.classList.add('open');
+        document.body.style.overflow = 'hidden';
+        closeBtn.focus();
+      }
+      function close() {
+        box.classList.remove('open');
+        document.body.style.overflow = '';
+        if (lastFocus) lastFocus.focus();
+      }
+
+      document.querySelectorAll('.feat').forEach(function (card) {
+        var iconEl = card.querySelector('.icon');
+        var imgEl = card.querySelector('.icon img');
+        if (!iconEl || !imgEl) return;
+        var title = (card.querySelector('h3') || {}).textContent || '';
+        var desc = (card.querySelector('p') || {}).textContent || '';
+        iconEl.addEventListener('click', function () {
+          open(imgEl.currentSrc || imgEl.src, imgEl.alt, title, desc);
+        });
+      });
+
+      closeBtn.addEventListener('click', close);
+      box.addEventListener('click', function (e) {
+        if (e.target === box) close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && box.classList.contains('open')) close();
+      });
+    })();
+  </script>  <script>
+    // Jumlah "Rental Telah Bergabung" dari web_members/summary (Firestore)
+    (function () {
+      var el = document.getElementById('statMembers');
+      if (!el) return;
+      function hide() {
+        var stat = el.closest('.stat');
+        if (stat) stat.style.display = 'none';
+      }
+      try {
+        if (typeof firebase === 'undefined' || !firebase.apps.length) {
+          firebase.initializeApp({
+            apiKey: 'AIzaSyAqOxWEBD9_AqaMiMtFwbyTvh-d_mdVofQ',
+            authDomain: 'rrbillingpro.firebaseapp.com',
+            projectId: 'rrbillingpro'
+          });
+        }
+        firebase.firestore().doc('web_members/summary').get()
+          .then(function (snap) {
+            if (snap.exists && typeof snap.data().count === 'number') {
+              el.textContent = snap.data().count;
+            } else {
+              hide();
+            }
+          })
+          .catch(hide);
+      } catch (err) {
+        hide();
+      }
+    })();
+  </script>
+
+</body>
+</html>

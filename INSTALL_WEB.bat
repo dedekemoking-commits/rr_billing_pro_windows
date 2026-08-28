@@ -29,6 +29,7 @@ if /i "%~1"=="RUNNING" (
 set "PKG_ORIGINAL=%~dp0"
 set "TMPBAT=%TEMP%\rr_billing_web_install.cmd"
 copy /Y "%~f0" "%TMPBAT%" >nul 2>&1
+powershell -NoProfile -Command "Unblock-File -LiteralPath '%TMPBAT%' -ErrorAction SilentlyContinue" >nul 2>&1
 start "RR Billing Web Installer" cmd /k ""%TMPBAT%" RUNNING %*"
 exit /b 0
 
@@ -82,21 +83,21 @@ REM ============================================================
 
 REM ---- LANGKAH 1 - pastikan Python ada ----
 echo [1/7] Memeriksa Python 3.x...
+set "PYFOUND=0"
 where python >nul 2>&1
 if %errorlevel% equ 0 (
     set "PY=python"
     for /f "delims=" %%V in ('python -c "import sys;print(sys.version_info[0])" 2^>nul') do set "PYMAJ=%%V"
-    if "!PYMAJ!"=="3" (
-        echo   OK - python3 ditemukan: !PY!
-        goto :PY_OK
-    )
 )
+if "!PYMAJ!"=="3" set "PYFOUND=1"
 where py >nul 2>&1
 if %errorlevel% equ 0 (
-    set "PY=py -3"
-    echo   OK - py launcher ditemukan
-    goto :PY_OK
+    if not defined PYFOUND (
+        set "PY=py -3"
+        set "PYFOUND=1"
+    )
 )
+if "!PYFOUND!"=="1" goto :PY_OK
 
 echo   Python TIDAK ditemukan. Menginstall Python 3.12...
 echo   (perlu koneksi internet; proses beberapa menit)
@@ -140,19 +141,23 @@ echo.
 
 REM ---- LANGKAH 2 - install dependency ----
 echo [2/7] Menginstall dependency Python (Flask + modul pendukung)...
+REM Pastikan pip tersedia (offline, tanpa internet)
+%PY% -m ensurepip >nul 2>&1
+REM Upgrade pip best-effort (butuh internet; di-skip kalau gagal/offline)
 %PY% -m pip install --upgrade pip >nul 2>&1
-REM Install tinytuya + pycryptodome dari wheel LOKAL (sudah dibundel di folder
-REM billing_web\wheels) agar bisa offline; sisanya dari PyPI.
+REM Install SEMUA dependency dari wheel LOKAL (offline, tanpa PyPI)
 if exist "!PKG!billing_web\wheels\*.whl" (
-    echo   Menginstall tinytuya/pycryptodome dari wheel lokal (offline)...
-    %PY% -m pip install --no-index --find-links "!PKG!billing_web\wheels" tinytuya pycryptodome >nul 2>&1
-)
-%PY% -m pip install flask pillow customtkinter openpyxl bcrypt PyJWT cryptography websockets androidtvremote2 requests qrcode ecdsa tinytuya pycryptodome
-if %errorlevel% neq 0 (
-    echo   ERROR: Gagal install dependency. Cek koneksi internet / proxy.
+    echo   Menginstall dependency dari wheel lokal ^(offline^)...
+    %PY% -m pip install --no-index --find-links "!PKG!billing_web\wheels" flask pillow customtkinter openpyxl bcrypt PyJWT cryptography websockets androidtvremote2 requests qrcode ecdsa tinytuya pycryptodome
+    if %errorlevel% neq 0 (
+        echo   ERROR: Gagal install dependency dari wheel lokal. Pastikan folder billing_web\wheels lengkap.
+        exit /b 1
+    )
+) else (
+    echo   ERROR: folder wheel tidak ditemukan di !PKG!billing_web\wheels
     exit /b 1
 )
-echo   OK - dependency terinstall.
+echo   OK - dependency terinstall (offline).
 echo.
 
 REM ---- LANGKAH 3 - salin modul parent ----
@@ -163,7 +168,7 @@ for %%M in (%PARENT_MODS%) do (
         copy /Y "!PKG!%%M" "%WEB_DIR%\%%M" >nul
         echo   + %%M
     ) else (
-        echo   PERINGATAN: %%M tidak ada di paket (!PKG!)
+        echo   PERINGATAN: %%M tidak ada di paket ^(!PKG!^)
     )
 )
 echo.
@@ -181,12 +186,12 @@ echo.
 REM ---- LANGKAH 5 - siapkan config di root (main.py muat dari dir-nya sendiri) ----
 echo [5/7] Menyiapkan config di root %WEB_DIR% ...
 if /i "%~2"=="--keep-config" (
-    echo   --keep-config: config dipertahankan (tidak ditimpa).
+    echo   --keep-config: config dipertahankan ^(tidak ditimpa^).
 ) else (
     if exist "!PKG!billing_web\rr_billing_config.json" (
         if not exist "%WEB_DIR%\rr_billing_config.json" (
             copy /Y "!PKG!billing_web\rr_billing_config.json" "%WEB_DIR%\rr_billing_config.json" >nul
-            echo   + rr_billing_config.json (dari billing_web)
+            echo   + rr_billing_config.json ^(dari billing_web^)
         ) else (
             echo   . rr_billing_config.json sudah ada - dipertahankan.
         )
@@ -194,7 +199,7 @@ if /i "%~2"=="--keep-config" (
     if exist "!PKG!billing_web\rr_billing_license.json" (
         if not exist "%WEB_DIR%\rr_billing_license.json" (
             copy /Y "!PKG!billing_web\rr_billing_license.json" "%WEB_DIR%\rr_billing_license.json" >nul
-            echo   + rr_billing_license.json (dari billing_web)
+            echo   + rr_billing_license.json ^(dari billing_web^)
         ) else (
             echo   . rr_billing_license.json sudah ada - dipertahankan.
         )
@@ -204,18 +209,18 @@ echo.
 
 REM ---- LANGKAH 6 - hilangkan MotW (popup Open File) ----
 echo [6/7] Menghapus tanda blokir internet (MotW) ...
-powershell -NoProfile -Command "Get-ChildItem -Path '%WEB_DIR%\*' -Recurse -File -Include *.py,*.bat,*.cmd | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
+powershell -NoProfile -Command "Get-ChildItem -Path '%WEB_DIR%\*' -Recurse -File -Include *.py,*.bat,*.cmd,*.whl | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
 
 set "MOTW_TMP=%TEMP%\rr_web_motw.txt"
 del "%MOTW_TMP%" >nul 2>&1
-powershell -NoProfile -Command "Get-ChildItem -Path '%WEB_DIR%\*' -Recurse -File -Include *.py,*.bat | Where-Object { $s = Get-Item -LiteralPath $_.FullName -Stream * -ErrorAction SilentlyContinue; $s -and ($s.Stream -contains 'Zone.Identifier') } | Select-Object -ExpandProperty Name | Out-File -LiteralPath '%MOTW_TMP%' -Encoding ascii" >nul 2>&1
+powershell -NoProfile -Command "Get-ChildItem -Path '%WEB_DIR%\*' -Recurse -File -Include *.py,*.bat,*.whl | Where-Object { $s = Get-Item -LiteralPath $_.FullName -Stream * -ErrorAction SilentlyContinue; $s -and ($s.Stream -contains 'Zone.Identifier') } | Select-Object -ExpandProperty Name | Out-File -LiteralPath '%MOTW_TMP%' -Encoding ascii" >nul 2>&1
 set MOTW_LEFT=0
 if exist "%MOTW_TMP%" (
     for /f "usebackq delims=" %%Z in ("%MOTW_TMP%") do set /a MOTW_LEFT+=1
 )
 del "%MOTW_TMP%" >nul 2>&1
 if not "%MOTW_LEFT%"=="0" (
-    echo   PERINGATAN: %MOTW_LEFT% file masih bertanda internet (MotW).
+    echo   PERINGATAN: %MOTW_LEFT% file masih bertanda internet ^(MotW^).
     echo   Popup "Open File" mungkin muncul. Unblock manual lalu ulangi.
 ) else (
     echo   [MOTW] OK - semua file bersih.
@@ -223,14 +228,14 @@ if not "%MOTW_LEFT%"=="0" (
 echo.
 
 REM ---- LANGKAH 7 - shortcut Desktop + jalankan ----
-echo [7/7] Membuat shortcut & menjalankan server ...
+echo [7/7] Membuat shortcut ^& menjalankan server ...
 set "DESK=%PUBLIC%\Desktop"
 if not exist "%DESK%" set "DESK=%USERPROFILE%\Desktop"
 powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut('%DESK%\RR Billing Web Kasir.lnk'); $s.TargetPath='%WEB_DIR%\billing_web\jalankan_web.bat'; $s.WorkingDirectory='%WEB_DIR%\billing_web'; $s.Description='RR Billing Pro - Web Kasir (localhost:8000)'; $s.Save()" >nul 2>&1
 if exist "%DESK%\RR Billing Web Kasir.lnk" (
     echo   OK - Shortcut dibuat: %DESK%\RR Billing Web Kasir.lnk
 ) else (
-    echo   PERINGATAN: gagal membuat shortcut (tidak fatal).
+    echo   PERINGATAN: gagal membuat shortcut ^(tidak fatal^).
 )
 
 echo.

@@ -10,8 +10,8 @@ if errorlevel 1 (
 )
 echo Menjalankan server web kasir...
 python -c "import flask" 2>nul || (
-  echo Menginstall Flask (pertama kali)...
-  python -m pip install flask
+  echo Menginstall Flask ^(pertama kali^)...
+  python -m pip install --no-index --find-links "%~dp0wheels" flask >nul 2>&1 || python -m pip install flask
 )
 python server.py
 pause
