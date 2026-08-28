@@ -55,6 +55,13 @@ a:hover { text-decoration: underline; }
 .nav-links a:hover { color: var(--accent-2); text-decoration: none; }
 .nav-links .btn { color: #fff; padding: 9px 18px; font-size: 13px; }
 .nav-links .badge { vertical-align: middle; }
+.nav-links .badge.hot {
+  background: linear-gradient(90deg,#ff7a18,#ffb347);
+  color: #fff; font-weight: 700; font-size: 10px;
+  padding: 2px 7px; border-radius: 999px; letter-spacing: .5px;
+  margin-left: 5px; vertical-align: top;
+  box-shadow: 0 2px 8px rgba(255,122,24,.4);
+}
 
 /* ---------- BUTTONS ---------- */
 .btn {

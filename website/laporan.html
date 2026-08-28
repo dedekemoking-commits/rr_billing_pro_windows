@@ -1,10 +1,10 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="id">
 <head><script>if(location.protocol==="http:"&&location.hostname!=='localhost'){location.replace("https://"+location.host+location.pathname+location.search);}</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Laporan pendapatan online RR Billing Pro — login dengan akun Google untuk melihat riwayat dan total pendapatan rental Anda.">
-  <title>Laporan Pendapatan — RR Billing Pro</title>
+  <meta name="description" content="Laporan pendapatan online RR Billing Pro � login dengan akun Google untuk melihat riwayat dan total pendapatan rental Anda.">
+  <title>Laporan Pendapatan � RR Billing Pro</title>
   <link rel="icon" href="assets/img/logo.png" type="image/png">
   <link rel="stylesheet" href="assets/css/style.css?v=20260813g">
   <script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-app-compat.js"></script>
@@ -65,9 +65,9 @@
       </a>
       <div class="nav-links" id="navLinks">
         <a href="index.html">Beranda</a>
-        <a href="download.html">Download</a>
-        <a href="harga.html">Harga &amp; Lisensi</a>
-        <a href="laporan.html">Laporan</a>
+        <a href="download.html">Download<span class="badge hot">40% OFF</span></a>
+        <a href="harga.html">Harga &amp; Lisensi<span class="badge hot">40% OFF</span></a>
+        <a href="laporan.html">Laporan<span class="badge hot">40% OFF</span></a>
         <a href="booking.html">Booking</a>
         <a href="kontak.html">Kontak</a>
         <a href="mitra.html">Mitra</a>
@@ -79,7 +79,7 @@
     <div class="container">
       <div class="section-head">
         <h2><svg class="mi" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>Laporan Pendapatan</h2>
-        <p>Lihat riwayat transaksi dan ringkasan pendapatan rental Anda — data langsung dari cloud, bisa diunduh CSV.</p>
+        <p>Lihat riwayat transaksi dan ringkasan pendapatan rental Anda � data langsung dari cloud, bisa diunduh CSV.</p>
       </div>
 
       <!-- LOGIN -->
@@ -115,12 +115,12 @@
         </div>
 
         <div class="cards">
-          <div class="card g" style="--glow:rgba(52,211,153,.16)"><div class="label">Omzet Periode</div><div class="val" id="cPeriod">–</div><div class="sub" id="cPeriodSub"></div></div>
-          <div class="card" style="--glow:rgba(124,58,237,.18)"><div class="label">Transaksi</div><div class="val" id="cPeriodN">–</div><div class="sub" id="cPeriodNSub"></div></div>
-          <div class="card" style="--glow:rgba(251,191,36,.14)"><div class="label">Makanan (Rp)</div><div class="val a" id="cMakan">–</div><div class="sub" id="cMakanSub"></div></div>
-          <div class="card" style="--glow:rgba(56,189,248,.14)"><div class="label">Minuman (Rp)</div><div class="val s" id="cMinum">–</div><div class="sub" id="cMinumSub"></div></div>
-          <div class="card" style="--glow:rgba(244,114,182,.13)"><div class="label">Rata² / Transaksi</div><div class="val p" id="cAvg">–</div><div class="sub" id="cAvgSub"></div></div>
-          <div class="card r" style="--glow:rgba(248,113,113,.13)"><div class="label">TV vs PC</div><div class="val" id="cTvPc" style="font-size:16px">–</div><div class="sub" id="cTvPcSub"></div></div>
+          <div class="card g" style="--glow:rgba(52,211,153,.16)"><div class="label">Omzet Periode</div><div class="val" id="cPeriod">�</div><div class="sub" id="cPeriodSub"></div></div>
+          <div class="card" style="--glow:rgba(124,58,237,.18)"><div class="label">Transaksi</div><div class="val" id="cPeriodN">�</div><div class="sub" id="cPeriodNSub"></div></div>
+          <div class="card" style="--glow:rgba(251,191,36,.14)"><div class="label">Makanan (Rp)</div><div class="val a" id="cMakan">�</div><div class="sub" id="cMakanSub"></div></div>
+          <div class="card" style="--glow:rgba(56,189,248,.14)"><div class="label">Minuman (Rp)</div><div class="val s" id="cMinum">�</div><div class="sub" id="cMinumSub"></div></div>
+          <div class="card" style="--glow:rgba(244,114,182,.13)"><div class="label">Rata� / Transaksi</div><div class="val p" id="cAvg">�</div><div class="sub" id="cAvgSub"></div></div>
+          <div class="card r" style="--glow:rgba(248,113,113,.13)"><div class="label">TV vs PC</div><div class="val" id="cTvPc" style="font-size:16px">�</div><div class="sub" id="cTvPcSub"></div></div>
         </div>
 
         <!-- FILTER -->
@@ -149,7 +149,7 @@
               </select>
             </div>
             <button class="btn btn-outline" onclick="renderAll()">Terapkan</button>
-            <button class="btn btn-primary" onclick="exportCsv()">⬇ Export CSV</button>
+            <button class="btn btn-primary" onclick="exportCsv()">? Export CSV</button>
           </div>
         </div>
 
@@ -172,8 +172,8 @@
         </div>
 
         <div class="panel">
-          <h2>🧾 Riwayat Transaksi <span class="hint" id="txCountHint"></span></h2>
-          <input id="txSearch" class="tb-search" placeholder="Cari: waktu / kota / paket / kasir…">
+          <h2>?? Riwayat Transaksi <span class="hint" id="txCountHint"></span></h2>
+          <input id="txSearch" class="tb-search" placeholder="Cari: waktu / kota / paket / kasir�">
           <div class="tbl-scroll">
             <table class="mon-tbl">
               <thead><tr><th>Waktu</th><th>Kota</th><th>Sumber</th><th>Paket</th><th style="text-align:right">Makanan</th><th style="text-align:right">Minuman</th><th>Kasir</th><th style="text-align:right">Total</th><th>Status</th></tr></thead>
@@ -189,7 +189,7 @@
 
   <footer>
     <div class="container foot-inner">
-      <span>© 2026 RR Billing Pro — rrcctv.online</span>
+      <span>� 2026 RR Billing Pro � rrcctv.online</span>
       <span>Hubungi kami: <a href="https://wa.me/6282180208414" target="_blank">WhatsApp 0821-8020-8414</a></span>
     </div>
   </footer>
@@ -202,7 +202,7 @@ if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
   document.getElementById('dash').style.display = 'none';
   var b = document.getElementById('loginBox');
   b.style.display = 'block';
-  b.innerHTML = '<h3>🔒 Situs tidak aman</h3><p style="color:var(--red);font-size:14px">' +
+  b.innerHTML = '<h3>?? Situs tidak aman</h3><p style="color:var(--red);font-size:14px">' +
     'Koneksi ke <b>' + location.hostname + '</b> bukan HTTPS sehingga login Google diblokir browser. ' +
     'Buka halaman lewat <b>https://rrcctv.online/laporan</b> (atau https://rrbilling-web.web.app/laporan).</p>';
   throw new Error('insecure-context');
@@ -218,7 +218,7 @@ db = firebase.firestore();
 var store = { period: '7d', search: '' };
 var charts = {};
 
-// ── Kategori menu (daftar statis, sinkron dengan config aplikasi kasir) ──
+// -- Kategori menu (daftar statis, sinkron dengan config aplikasi kasir) --
 var MENU_MAKANAN = {
   "Indomie Goreng": 8000, "Indomie Kuah": 8000, "Kentang Goreng": 12000,
   "Burger": 20000, "Roti Bakar": 10000, "Nasi Goreng": 15000, "Sosis Bakar": 7000
@@ -232,7 +232,7 @@ function $(id) { return document.getElementById(id); }
 function pad(n) { return n < 10 ? "0" + n : "" + n; }
 function dayKey(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
 // Waktu aplikasi disimpan sebagai waktu LOKAL dengan huruf 'Z' literal (bukan UTC asli).
-// Strip 'Z' agar browser mem-parsing sebagai waktu lokal → tidak bergeser zona waktu.
+// Strip 'Z' agar browser mem-parsing sebagai waktu lokal ? tidak bergeser zona waktu.
 function parseISO(s) {
   if (typeof s !== "string" || !s) return null;
   var t = s;
@@ -243,7 +243,7 @@ function parseISO(s) {
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
 function rp(n) { return 'Rp ' + Math.round(n || 0).toLocaleString('id-ID'); }
 function tglWaktu(iso) {
-  if (!iso) return '—';
+  if (!iso) return '�';
   var t = parseISO(iso);
   if (!t) return iso;
   return t.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) +
@@ -251,7 +251,7 @@ function tglWaktu(iso) {
 }
 
 // Ringkas Rp pesanan Makanan (true) / Minuman (false) dari satu transaksi.
-// Prioritas pesananHarga (harga dikonfirmasi aplikasi); fallback qty × daftar harga.
+// Prioritas pesananHarga (harga dikonfirmasi aplikasi); fallback qty � daftar harga.
 function sumMenu(tx, isMakan) {
   var ps = tx.pesanan || {}, ph = tx.pesananHarga || {}, total = 0;
   for (var m in ps) {
@@ -303,7 +303,7 @@ firebase.auth().onAuthStateChanged(function (user) {
     document.getElementById('userEmail').innerHTML =
       '<svg class="mi-plain" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg> ' + esc(user.email);
     document.getElementById('userName').textContent =
-      (user.displayName || '') + ' • ID: ' + user.uid.slice(0, 8);
+      (user.displayName || '') + ' � ID: ' + user.uid.slice(0, 8);
     muatLaporan(user.email);
   } else {
     document.getElementById('loginBox').style.display = 'block';
@@ -318,7 +318,7 @@ function loginGoogle() {
     if (e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request' ||
         e.code === 'auth/popup-closed-by-user') {
       document.getElementById('loginErr').textContent =
-        'Popup diblokir browser — dialihkan ke halaman login…';
+        'Popup diblokir browser � dialihkan ke halaman login�';
       document.getElementById('loginErr').style.display = 'block';
       firebase.auth().signInWithRedirect(p).catch(function (e2) {
         tampilLoginErr(e2);
@@ -333,7 +333,7 @@ function tampilLoginErr(e) {
   var msg = 'Login gagal: ' + e.message;
   if (e.code === 'auth/operation-not-allowed' || e.code === 'auth/unauthorized-domain') {
     msg = 'Metode login Google belum aktif di Firebase Console. Langkah: ' +
-      'Firebase Console → Authentication → Sign-in method → aktifkan Google, ' +
+      'Firebase Console ? Authentication ? Sign-in method ? aktifkan Google, ' +
       'lalu tambahkan domain ' + location.hostname + ' ke Authorized domains.';
   }
   document.getElementById('loginErr').textContent = msg;
@@ -388,7 +388,7 @@ function isiKasir() {
   if (cur && names.indexOf(cur) >= 0) el.value = cur;
 }
 
-// ── Charts ─────────────────────────────────────────────────
+// -- Charts -------------------------------------------------
 function makeChart(id, cfg) {
   if (charts[id]) { try { charts[id].destroy(); } catch (e) { } }
   var el = $(id); if (!el) return;
@@ -487,7 +487,7 @@ function buildCharts(txs) {
     '<span><svg class="mi-plain" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 8 1.75 12.28a2 2 0 0 0 2 1.72h4.54a2 2 0 0 0 2-1.72L18 8"/><path d="M5 8h14"/><path d="M7 15a6.47 6.47 0 0 1 5 0 6.47 6.47 0 0 0 5 0"/></svg> Minuman <b>' + rp(totMinum) + '</b></span>';
 }
 
-// ── KPIs & Tabel ───────────────────────────────────────────
+// -- KPIs & Tabel -------------------------------------------
 function renderAll() {
   var txs = txFilter();
   var sum = function (a) { return a.reduce(function (x, y) { return x + (Number(y.t.total) || 0); }, 0); };
@@ -498,7 +498,7 @@ function renderAll() {
   $("cPeriodSub").textContent = txs.length + " transaksi";
   $("cPeriodN").textContent = String(txs.length);
   var tv = txs.filter(function (x) { return x.t.tvJenisPs !== "PC"; }).length;
-  $("cPeriodNSub").textContent = tv + " TV · " + (txs.length - tv) + " PC";
+  $("cPeriodNSub").textContent = tv + " TV � " + (txs.length - tv) + " PC";
   $("cMakan").textContent = rp(sumR(sumTxMakan));
   $("cMakanSub").textContent = txs.filter(function (x) { return sumTxMakan(x.t) > 0; }).length + " transaksi";
   $("cMinum").textContent = rp(sumR(sumTxMinum));
@@ -509,7 +509,7 @@ function renderAll() {
   $("cTvPc").innerHTML =
     '<svg class="mi-plain" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M8 20h8"/></svg> ' + rp(omzetTv) + '&nbsp;&nbsp;' +
     '<svg class="mi-plain" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg> ' + rp(omzet - omzetTv);
-  $("cTvPcSub").textContent = "TV · PC (omzet)";
+  $("cTvPcSub").textContent = "TV � PC (omzet)";
 
   buildCharts(txs);
   renderTable();
@@ -541,19 +541,19 @@ function renderTable() {
     var bsrc = t.tvJenisPs === "PC" ? '<span class="badge b-pc">PC</span>' : '<span class="badge b-tv">TV</span>';
     var rm = sumTxMakan(t), rn = sumTxMinum(t);
     totM += rm; totMn += rn;
-    var pk = t.paket || "–", ph = Number(t.paketHarga);
-    var pkTxt = ph > 0 ? ((!pk || pk === "–") ? rp(ph) : esc(pk) + ' <span class="tot">(' + rp(ph) + ')</span>') : esc(pk);
+    var pk = t.paket || "�", ph = Number(t.paketHarga);
+    var pkTxt = ph > 0 ? ((!pk || pk === "�") ? rp(ph) : esc(pk) + ' <span class="tot">(' + rp(ph) + ')</span>') : esc(pk);
     var st = t.paid === false
       ? '<span class="badge b-tagihan">TAGIHAN</span>'
       : '<span class="badge b-lunas">LUNAS</span>';
     var tr = document.createElement("tr");
-    tr.innerHTML = '<td>' + (d ? d.toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : esc(t.waktu || "–")) + '</td>' +
-      '<td>' + esc(t.kota || "–") + '</td>' +
+    tr.innerHTML = '<td>' + (d ? d.toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : esc(t.waktu || "�")) + '</td>' +
+      '<td>' + esc(t.kota || "�") + '</td>' +
       '<td>' + bsrc + '</td>' +
       '<td>' + pkTxt + '</td>' +
-      '<td style="text-align:right">' + (rm ? rp(rm) : "–") + '</td>' +
-      '<td style="text-align:right">' + (rn ? rp(rn) : "–") + '</td>' +
-      '<td>' + esc(t.kasir || "–") + '</td>' +
+      '<td style="text-align:right">' + (rm ? rp(rm) : "�") + '</td>' +
+      '<td style="text-align:right">' + (rn ? rp(rn) : "�") + '</td>' +
+      '<td>' + esc(t.kasir || "�") + '</td>' +
       '<td style="text-align:right;font-weight:600">' + rp(t.total) + '</td>' +
       '<td>' + st + '</td>';
     body.appendChild(tr);
@@ -588,7 +588,7 @@ function exportCsv() {
   URL.revokeObjectURL(a.href);
 }
 
-// ── Events ─────────────────────────────────────────────────
+// -- Events -------------------------------------------------
 var chips = document.querySelectorAll('.chips .chip');
 chips.forEach(function (ch) {
   ch.addEventListener("click", function () {
@@ -606,4 +606,5 @@ $("txSearch").addEventListener("input", function () {
 
 </body>
 </html>
+
 

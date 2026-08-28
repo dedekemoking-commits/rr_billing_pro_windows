@@ -1,9 +1,9 @@
-Ôªø<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="id">
 <head><script>if(location.protocol==="http:"&&location.hostname!=='localhost'){location.replace("https://"+location.host+location.pathname+location.search);}</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Booking online rental ‚Äî pesan slot PS/TV/warnet dari rumah, kasir konfirmasi langsung.">
+  <meta name="description" content="Booking online rental ó pesan slot PS/TV/warnet dari rumah, kasir konfirmasi langsung.">
   <title>Booking Online</title>
   <link rel="icon" href="/assets/img/logo.png" type="image/png">
   <link rel="stylesheet" href="/assets/css/style.css?v=20260813g">
@@ -20,7 +20,7 @@
   <header class="rental-nav" id="rentalNav">
     <div class="nav-inner">
       <div class="brand-col">
-        <a class="brand" id="rentalBrand">üïπÔ∏è Booking Online</a>
+        <a class="brand" id="rentalBrand">??? Booking Online</a>
         <div class="brand-addr rental-nama" id="rentalNama" style="display:none"></div>
       </div>
     </div>
@@ -29,13 +29,13 @@
   <section style="padding-top:50px">
     <div class="container">
       <div class="section-head">
-        <h2>üìÖ Booking Online</h2>
-        <p>Pesan tempat terlebih dahulu ‚Äî kasir akan konfirmasi langsung.</p>
+        <h2>?? Booking Online</h2>
+        <p>Pesan tempat terlebih dahulu ó kasir akan konfirmasi langsung.</p>
       </div>
 
       <!-- LANGKAH 0: input username rental -->
       <div id="stepOwner" class="card" style="max-width:560px;margin:0 auto;text-align:center">
-        <div style="font-size:44px;margin-bottom:6px">üìÖ</div>
+        <div style="font-size:44px;margin-bottom:6px">??</div>
         <h3 style="margin-bottom:8px">Masuk ke halaman booking rental</h3>
         <p style="font-size:14px">Cara membuka halaman booking:</p>
         <div class="helptext" style="text-align:left;margin-top:14px">
@@ -46,7 +46,7 @@
           </ol>
         </div>
         <input id="ownerInput" type="text" placeholder="username rental (contoh: rentalku001)" style="text-transform:lowercase;margin-top:14px">
-        <button class="btn btn-primary" style="width:100%" onclick="muatOwner()">Lanjut ‚ûú</button>
+        <button class="btn btn-primary" style="width:100%" onclick="muatOwner()">Lanjut ?</button>
         <p id="ownerErr" style="color:var(--red);font-size:13px;display:none;margin-top:10px"></p>
       </div>
 
@@ -57,7 +57,7 @@
         </div>
         <div class="contact-grid">
           <div class="card">
-            <h3>üë§ Data Diri</h3>
+            <h3>?? Data Diri</h3>
             <input id="fNama" type="text" placeholder="Nama Anda *">
             <input id="fHp" type="tel" placeholder="No. WhatsApp / HP *">
             <div style="display:flex;gap:10px">
@@ -70,29 +70,29 @@
                 <input id="fJam" type="time">
               </div>
             </div>
-            <h3 style="margin-top:18px">üïπÔ∏è Pilih Perangkat</h3>
+            <h3 style="margin-top:18px">??? Pilih Perangkat</h3>
             <div style="display:flex;gap:10px">
               <select id="fJenis" style="width:110px">
-                <option value="">‚Äî jenis ‚Äî</option>
+                <option value="">ó jenis ó</option>
               </select>
               <select id="fKartu" style="flex:1">
-                <option value="">‚Äî pilih kartu ‚Äî</option>
+                <option value="">ó pilih kartu ó</option>
               </select>
             </div>
-            <p style="font-size:11px;color:var(--muted);margin-top:6px">Kartu yang sedang dipakai pelanggan lain otomatis nonaktif (‚ñ∂ SEDANG DIPAKAI).</p>
+            <p style="font-size:11px;color:var(--muted);margin-top:6px">Kartu yang sedang dipakai pelanggan lain otomatis nonaktif (? SEDANG DIPAKAI).</p>
           </div>
           <div class="card">
-            <h3>‚è±Ô∏è Paket &amp; Harga</h3>
+            <h3>?? Paket &amp; Harga</h3>
             <p id="lblGrupInfo" style="font-size:12px;color:var(--muted);margin-bottom:6px">Pilih kartu perangkat dulu untuk melihat paketnya.</p>
             <select id="fPaket" style="margin-bottom:8px">
-              <option value="">‚Äî pilih paket ‚Äî</option>
+              <option value="">ó pilih paket ó</option>
             </select>
             <div id="menuWrap" style="display:none">
               <select id="fMakanan" style="margin-bottom:8px">
-                <option value="">‚Äî pilih makanan ‚Äî</option>
+                <option value="">ó pilih makanan ó</option>
               </select>
               <select id="fMinuman" style="margin-bottom:6px">
-                <option value="">‚Äî pilih minuman ‚Äî</option>
+                <option value="">ó pilih minuman ó</option>
               </select>
               <p id="pesananRingkas" style="font-size:12px;color:var(--green);margin:2px 0 8px;display:none"></p>
             </div>
@@ -101,32 +101,32 @@
               <span class="bar"><i id="barTotal" style="width:0%; background:#7C3AED"></i></span>
               <span class="meta"><b id="lblTotal">Rp 0</b><br><span id="payNote" style="color:var(--muted);font-size:11px">bayar di tempat</span></span>
             </div>
-            <h3 style="margin-top:18px">üí≥ Metode Pembayaran</h3>
+            <h3 style="margin-top:18px">?? Metode Pembayaran</h3>
             <select id="fMetode">
-              <option value="biasa">Booking biasa ‚Äî bayar di tempat</option>
-              <option value="lunas">Booking Lunas ‚Äî transfer penuh</option>
-              <option value="dp">Booking DP ‚Äî transfer sebagian</option>
+              <option value="biasa">Booking biasa ó bayar di tempat</option>
+              <option value="lunas">Booking Lunas ó transfer penuh</option>
+              <option value="dp">Booking DP ó transfer sebagian</option>
             </select>
             <div id="payInfo" style="display:none;font-size:13px;color:var(--muted);background:var(--bg-2);border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px">
-              üí≥ Transfer ke DANA rental di bawah ini, lalu unggah bukti transfer.
+              ?? Transfer ke DANA rental di bawah ini, lalu unggah bukti transfer.
               <span id="dpRekList" style="display:block;margin-top:6px"></span>
               <div id="qrPayBox" style="display:none;text-align:center;margin-top:10px">
                 <p style="font-size:12px;margin-bottom:6px">Atau scan QR pembayaran:</p>
                 <img id="qrPayImg" alt="QR pembayaran" style="max-width:200px;border-radius:10px;margin:0 auto">
               </div>
               <div id="nomLunasWrap" style="display:none;margin-top:10px">
-                <label style="font-size:12px;color:var(--muted)">üíµ Nominal transfer (isikan sesuai total)</label>
+                <label style="font-size:12px;color:var(--muted)">?? Nominal transfer (isikan sesuai total)</label>
                 <input id="fNominal" type="number" min="1" placeholder="0">
                 <p style="font-size:11px;color:var(--muted);margin-top:4px">Total pesanan Anda: <b id="lblTotalLunas" style="color:var(--green)">Rp 0</b></p>
               </div>
               <div id="nomDpWrap" style="display:none;margin-top:10px">
-                <label style="font-size:12px;color:var(--muted)">üíµ Nominal DP yang ditransfer</label>
+                <label style="font-size:12px;color:var(--muted)">?? Nominal DP yang ditransfer</label>
                 <input id="fDp" type="number" min="1" placeholder="0">
                 <p id="dpSisaLbl" style="font-size:13px;margin-top:6px"></p>
               </div>
             </div>
             <div id="fBuktiWrap" style="display:none;margin-top:10px">
-              <label style="font-size:12px;color:var(--muted)">üìé Bukti transfer (wajib untuk Lunas / DP)</label>
+              <label style="font-size:12px;color:var(--muted)">?? Bukti transfer (wajib untuk Lunas / DP)</label>
               <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
                 <input id="fBukti" type="file" accept="image/*" style="flex:1">
                 <img id="fBuktiPrev" style="height:44px;border-radius:8px;display:none" alt="">
@@ -134,7 +134,7 @@
               <p style="font-size:11px;color:var(--muted);margin-top:4px">Foto/SS bukti transfer akan ikut dikirim ke kasir.</p>
             </div>
             <textarea id="fCatatan" rows="2" placeholder="Catatan (opsional): topping, request, dll."></textarea>
-            <button class="btn btn-primary btn-lg" style="width:100%" onclick="kirimBooking()">üì® Kirim Booking</button>
+            <button class="btn btn-primary btn-lg" style="width:100%" onclick="kirimBooking()">?? Kirim Booking</button>
             <p id="formErr" style="color:var(--red);font-size:13px;display:none;margin-top:8px"></p>
           </div>
         </div>
@@ -143,16 +143,16 @@
       <!-- LANGKAH 2: status booking -->
       <div id="stepStatus" style="display:none;max-width:560px;margin:0 auto;text-align:center">
         <div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Langkah 2 dari 2 ‚Äî booking berhasil dikirim</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Langkah 2 dari 2 ó booking berhasil dikirim</p>
         </div>
         <div class="card">
-          <div style="font-size:44px" id="stIcon">‚è≥</div>
-          <h2 id="stTitle" style="margin:8px 0">Menunggu konfirmasi kasir‚Ä¶</h2>
+          <div style="font-size:44px" id="stIcon">?</div>
+          <h2 id="stTitle" style="margin:8px 0">Menunggu konfirmasi kasirÖ</h2>
           <p style="color:var(--muted)">Kode booking Anda: <b id="kodeBooking" style="font-size:20px;letter-spacing:2px;color:#fff"></b></p>
           <div id="stDetail" style="text-align:left;background:var(--bg-2);border-radius:10px;padding:14px;margin-top:14px;font-size:14px;color:var(--muted)"></div>
-          <p style="font-size:12px;color:var(--muted);margin-top:12px">Halaman ini memantau status otomatis ‚Äî biarkan terbuka sampai kasir konfirmasi.</p>
-          <button class="btn btn-primary btn-lg" style="width:100%;margin-top:10px" id="btnWaKasir">üì≤ Share ke WhatsApp Kasir</button>
-          <button class="btn btn-outline" style="margin-top:10px" onclick="resetBooking()">‚Ü∫ Booking Lagi</button>
+          <p style="font-size:12px;color:var(--muted);margin-top:12px">Halaman ini memantau status otomatis ó biarkan terbuka sampai kasir konfirmasi.</p>
+          <button class="btn btn-primary btn-lg" style="width:100%;margin-top:10px" id="btnWaKasir">?? Share ke WhatsApp Kasir</button>
+          <button class="btn btn-outline" style="margin-top:10px" onclick="resetBooking()">? Booking Lagi</button>
         </div>
       </div>
     </div>
@@ -251,7 +251,7 @@ function muatOwner() {
     if (d.logo) {
       brand.innerHTML = '<img class="brand-logo" src="' + d.logo + '" alt="Logo">';
     } else {
-      brand.innerHTML = '<span>üïπÔ∏è ' + nm + '</span>';
+      brand.innerHTML = '<span>??? ' + nm + '</span>';
     }
     var elNama = document.getElementById('rentalNama');
     var namaTampil = (d.nama_rental || '').trim();
@@ -261,16 +261,16 @@ function muatOwner() {
     } else {
       elNama.style.display = 'none';
     }
-    document.getElementById('footLine').textContent = '¬© ' + new Date().getFullYear() + (namaRentalAsli(d) ? ' ' + namaRentalAsli(d) : '');
+    document.getElementById('footLine').textContent = '© ' + new Date().getFullYear() + (namaRentalAsli(d) ? ' ' + namaRentalAsli(d) : '');
     document.getElementById('rentalFooter').style.display = 'block';
     updFooterWa();
-    document.title = (namaRentalAsli(d) ? namaRentalAsli(d) + ' ‚Äî ' : '') + 'Booking Online';
+    document.title = (namaRentalAsli(d) ? namaRentalAsli(d) + ' ó ' : '') + 'Booking Online';
     document.getElementById('stepOwner').style.display = 'none';
     document.getElementById('stepForm').style.display = 'block';
     var dana = [];
     if (d.no_dana || d.nama_dana) {
       dana.push('DANA' + (d.nama_dana ? ' a.n. <b>' + d.nama_dana + '</b>' : '') +
-        ': <b>' + (d.no_dana || '‚Äî') + '</b>');
+        ': <b>' + (d.no_dana || 'ó') + '</b>');
     }
     document.getElementById('dpRekList').innerHTML = dana.map(function (x) {
       return '<div style="padding:3px 0">' + x + '</div>';
@@ -314,7 +314,7 @@ function renderDevices() {
   (['TV', 'PS', 'PC']).forEach(function (tp) {
     if (devs[tp] && devs[tp].length) types.push(tp);
   });
-  selJ.innerHTML = '<option value="">‚Äî jenis ‚Äî</option>';
+  selJ.innerHTML = '<option value="">ó jenis ó</option>';
   types.forEach(function (tp) {
     var o = document.createElement('option');
     o.value = tp; o.textContent = tp;
@@ -331,14 +331,14 @@ function renderDevices() {
 
 function fillKartu(jenis) {
   var selK = document.getElementById('fKartu');
-  selK.innerHTML = '<option value="">‚Äî pilih kartu ‚Äî</option>';
+  selK.innerHTML = '<option value="">ó pilih kartu ó</option>';
   if (!jenis || !LAST_META) return;
   var list = (LAST_META.devices || {})[jenis] || [];
   list.forEach(function (c) {
     var o = document.createElement('option');
     o.value = c.nama;
-    o.textContent = c.aktif ? (jenis === 'TV' ? 'üñ• ' : 'üñ≥ ') + c.nama + ' (' + c.grup + ') ‚Äî ‚ñ∂ SEDANG DIPAKAI'
-                             : (jenis === 'TV' ? 'üñ• ' : 'üñ≥ ') + c.nama + ' (' + c.grup + ')';
+    o.textContent = c.aktif ? (jenis === 'TV' ? '?? ' : '?? ') + c.nama + ' (' + c.grup + ') ó ? SEDANG DIPAKAI'
+                             : (jenis === 'TV' ? '?? ' : '?? ') + c.nama + ' (' + c.grup + ')';
     if (c.aktif) o.disabled = true;
     selK.appendChild(o);
   });
@@ -354,7 +354,7 @@ function kartuChange() {
   }
   GRUP_TERPILIH = grp;
   var info = document.getElementById('lblGrupInfo');
-  if (grp) info.textContent = 'Paket: ' + jenis + ' ' + nama + ' ‚Üí grup ' + grp;
+  if (grp) info.textContent = 'Paket: ' + jenis + ' ' + nama + ' ? grup ' + grp;
   else info.textContent = 'Pilih kartu perangkat dulu untuk melihat paketnya.';
   isiPaket();
 }
@@ -371,7 +371,7 @@ function tvSedangDipakai(perangkat) {
 
 function isiPaket() {
   var selP = document.getElementById('fPaket');
-  selP.innerHTML = '<option value="">‚Äî pilih paket ‚Äî</option>';
+  selP.innerHTML = '<option value="">ó pilih paket ó</option>';
   SATUAN = {};
   var gn = GRUP_TERPILIH;
   if (!gn || !LAST_META) { hitungTotal(); return; }
@@ -383,7 +383,7 @@ function isiPaket() {
     SATUAN[pn] = harga;
     var o = document.createElement('option');
     o.value = pn;
-    o.textContent = pn + (menit ? ' ‚Äî ' + menit + ' mnt' : '') + ' ‚Äî Rp ' + harga.toLocaleString('id-ID');
+    o.textContent = pn + (menit ? ' ó ' + menit + ' mnt' : '') + ' ó Rp ' + harga.toLocaleString('id-ID');
     selP.appendChild(o);
   });
   hitungTotal();
@@ -411,11 +411,11 @@ function hitungDp() {
   var lbl = document.getElementById('dpSisaLbl');
   if (dp > 0 && total > 0) {
     var sisa = Math.max(total - dp, 0);
-    lbl.innerHTML = 'Total: <b>' + rupiah(total) + '</b> ‚Äî DP <b>' + rupiah(dp) +
-      '</b> ‚Üí <b style="color:var(--yellow)">Sisa bayar di tempat: ' + rupiah(sisa) + '</b>';
+    lbl.innerHTML = 'Total: <b>' + rupiah(total) + '</b> ó DP <b>' + rupiah(dp) +
+      '</b> ? <b style="color:var(--yellow)">Sisa bayar di tempat: ' + rupiah(sisa) + '</b>';
   } else if (total > 0) {
     lbl.innerHTML = 'Total: <b>' + rupiah(total) +
-      '</b> ‚Äî masukkan nominal DP, sisa pembayaran otomatis dihitung.';
+      '</b> ó masukkan nominal DP, sisa pembayaran otomatis dihitung.';
   }
 }
 
@@ -447,8 +447,8 @@ function renderMenu() {
   var mk = LAST_META.makanan || {}, mn2 = LAST_META.minuman || {};
   if (!Object.keys(mk).length && !Object.keys(mn2).length) { wrap.style.display = 'none'; return; }
   wrap.style.display = 'block';
-  buildMenuSel('fMakanan', '‚Äî pilih makanan ‚Äî', mk, 'makanan');
-  buildMenuSel('fMinuman', '‚Äî pilih minuman ‚Äî', mn2, 'minuman');
+  buildMenuSel('fMakanan', 'ó pilih makanan ó', mk, 'makanan');
+  buildMenuSel('fMinuman', 'ó pilih minuman ó', mn2, 'minuman');
   var labels = [];
   Object.keys(PESANAN).forEach(function (nm) {
     var q = parseInt(PESANAN[nm] || 0, 10);
@@ -475,9 +475,9 @@ function buildMenuSel(elId, placeholder, cat, kat) {
     var harga = parseInt(cat[nm] || 0, 10);
     var m = (LAST_META.stok || {})[kat] || {};
     var avail = (nm in m) ? parseInt(m[nm], 10) : -1;
-    var label = nm + ' ‚Äî Rp ' + harga.toLocaleString('id-ID');
+    var label = nm + ' ó Rp ' + harga.toLocaleString('id-ID');
     if (avail >= 0) label += ' (sisa ' + avail + ')';
-    if (avail === 0) label += ' ‚Äî STOK HABIS';
+    if (avail === 0) label += ' ó STOK HABIS';
     return { nm: nm, label: label, habis: avail === 0 };
   });
   var html = '<option value="">' + placeholder + '</option>';
@@ -616,7 +616,7 @@ function kirimBooking() {
   };
   LAST_BOOKING = data;
   if (tvSedangDipakai(data.perangkat)) {
-    formErr('TV ' + data.perangkat + ' sedang dipakai pelanggan lain ‚Äî pilih TV lain atau PS/PC.');
+    formErr('TV ' + data.perangkat + ' sedang dipakai pelanggan lain ó pilih TV lain atau PS/PC.');
     return;
   }
   document.getElementById('formErr').style.display = 'none';
@@ -663,13 +663,13 @@ document.getElementById('btnWaKasir').onclick = function () {
   var sb = d.statusBayar === 'lunas_transfer'
     ? 'Status bayar: LUNAS via transfer' + (d.nominalTransfer ? ' ' + rupiah(d.nominalTransfer) : '')
     : d.statusBayar === 'dp'
-      ? 'Status bayar: DP ' + rupiah(d.nominalDp || 0) + ' ‚Äî sisa bayar di tempat ' + rupiah(d.sisaBayar || 0)
+      ? 'Status bayar: DP ' + rupiah(d.nominalDp || 0) + ' ó sisa bayar di tempat ' + rupiah(d.sisaBayar || 0)
       : 'Status bayar: bayar di tempat';
   var lines = [
     'Halo, saya *' + d.namaPelanggan + '* ingin mengonfirmasi booking saya.',
     'Kode booking: *' + kode + '*',
     'Perangkat: ' + d.perangkat,
-    'Paket: ' + d.grup + ' ‚Üí ' + d.paket,
+    'Paket: ' + d.grup + ' ? ' + d.paket,
     'Mulai: ' + d.tanggal + ' ' + d.jam,
     'Total: ' + rupiah(d.totalHarga || 0),
     'Metode: ' + mtd,
@@ -690,36 +690,36 @@ function pantauStatus() {
     var icon = document.getElementById('stIcon');
     var title = document.getElementById('stTitle');
     if (st === 'baru') {
-      icon.textContent = '‚è≥';
-      title.textContent = 'Menunggu konfirmasi kasir‚Ä¶';
+      icon.textContent = '?';
+      title.textContent = 'Menunggu konfirmasi kasirÖ';
       title.style.color = 'var(--text)';
     } else if (st === 'dikonfirmasi') {
-      icon.textContent = '‚úÖ';
+      icon.textContent = '?';
       title.textContent = 'Booking Dikonfirmasi!';
       title.style.color = 'var(--green)';
     } else if (st === 'ditolak') {
-      icon.textContent = '‚úñ';
+      icon.textContent = '?';
       title.textContent = 'Booking Ditolak';
       title.style.color = 'var(--red)';
     }
     var mtd = d.metode || 'biasa';
-    var mtdTxt = mtd === 'lunas' ? 'Lunas (transfer penuh) ‚Äî bukti terlampir ‚úì'
-      : mtd === 'dp' ? 'DP (transfer sebagian) ‚Äî bukti terlampir ‚úì'
+    var mtdTxt = mtd === 'lunas' ? 'Lunas (transfer penuh) ó bukti terlampir ?'
+      : mtd === 'dp' ? 'DP (transfer sebagian) ó bukti terlampir ?'
       : 'Bayar di tempat';
     var sbHtml;
     if (d.statusBayar === 'lunas_transfer') {
       sbHtml = '<b style="color:var(--green)">LUNAS VIA TRANSFER' +
         (d.nominalTransfer ? ' ' + rupiah(d.nominalTransfer) : '') + '</b>' +
-        (d.sisaBayar > 0 ? ' ‚Äî sisa ' + rupiah(d.sisaBayar) : '');
+        (d.sisaBayar > 0 ? ' ó sisa ' + rupiah(d.sisaBayar) : '');
     } else if (d.statusBayar === 'dp') {
       sbHtml = '<b style="color:var(--yellow)">DP ' + rupiah(d.nominalDp || 0) + ' dibayar</b>' +
-        ' ‚Äî <b style="color:var(--red)">TAGIHAN SISA: ' + rupiah(d.sisaBayar || 0) + '</b> (bayar di tempat)';
+        ' ó <b style="color:var(--red)">TAGIHAN SISA: ' + rupiah(d.sisaBayar || 0) + '</b> (bayar di tempat)';
     } else {
-      sbHtml = '<b style="color:var(--yellow)">BELUM BAYAR ‚Äî bayar di tempat</b>';
+      sbHtml = '<b style="color:var(--yellow)">BELUM BAYAR ó bayar di tempat</b>';
     }
     var det = [
       'Perangkat: ' + (d.perangkat || '-'),
-      'Paket: ' + (d.grup || '') + ' ‚Üí ' + (d.paket || ''),
+      'Paket: ' + (d.grup || '') + ' ? ' + (d.paket || ''),
       'Mulai: ' + (d.tanggal || '') + ' ' + (d.jam || ''),
       'Total: ' + rupiah(d.totalHarga || 0),
       'Metode: ' + mtdTxt,
@@ -767,3 +767,4 @@ function resetBooking() {
 
 </body>
 </html>
+
