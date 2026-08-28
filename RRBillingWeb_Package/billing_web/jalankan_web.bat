@@ -8,10 +8,9 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-echo Menjalankan server web kasir...
+echo Menjalankan server web kasir... ^(berjalan di background, tanpa jendela cmd^)
 python -c "import flask" 2>nul || (
   echo Menginstall Flask ^(pertama kali^)...
   python -m pip install --no-index --find-links "%~dp0wheels" flask >nul 2>&1 || python -m pip install flask
 )
-python server.py
-pause
+start "" pythonw server.py

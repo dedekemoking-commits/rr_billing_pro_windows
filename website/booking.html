@@ -1,0 +1,769 @@
+﻿<!DOCTYPE html>
+<html lang="id">
+<head><script>if(location.protocol==="http:"&&location.hostname!=='localhost'){location.replace("https://"+location.host+location.pathname+location.search);}</script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Booking online rental — pesan slot PS/TV/warnet dari rumah, kasir konfirmasi langsung.">
+  <title>Booking Online</title>
+  <link rel="icon" href="/assets/img/logo.png" type="image/png">
+  <link rel="stylesheet" href="/assets/css/style.css?v=20260813g">
+  <script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore-compat.js"></script>
+
+  <link rel=preconnect href=https://fonts.googleapis.com>
+  <link rel=preconnect href=https://fonts.gstatic.com crossorigin>
+  <link href=https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap rel=stylesheet>
+</head>
+<body>
+
+  <header class="rental-nav" id="rentalNav">
+    <div class="nav-inner">
+      <div class="brand-col">
+        <a class="brand" id="rentalBrand">🕹️ Booking Online</a>
+        <div class="brand-addr rental-nama" id="rentalNama" style="display:none"></div>
+      </div>
+    </div>
+  </header>
+
+  <section style="padding-top:50px">
+    <div class="container">
+      <div class="section-head">
+        <h2>📅 Booking Online</h2>
+        <p>Pesan tempat terlebih dahulu — kasir akan konfirmasi langsung.</p>
+      </div>
+
+      <!-- LANGKAH 0: input username rental -->
+      <div id="stepOwner" class="card" style="max-width:560px;margin:0 auto;text-align:center">
+        <div style="font-size:44px;margin-bottom:6px">📅</div>
+        <h3 style="margin-bottom:8px">Masuk ke halaman booking rental</h3>
+        <p style="font-size:14px">Cara membuka halaman booking:</p>
+        <div class="helptext" style="text-align:left;margin-top:14px">
+          <ol>
+            <li><b>Scan QR "Booking"</b> yang ditampilkan kasir, atau</li>
+            <li>Buka link <b>rrcctv.online/b/&lt;username&gt;</b>, atau</li>
+            <li>Ketik username rental di bawah ini.</li>
+          </ol>
+        </div>
+        <input id="ownerInput" type="text" placeholder="username rental (contoh: rentalku001)" style="text-transform:lowercase;margin-top:14px">
+        <button class="btn btn-primary" style="width:100%" onclick="muatOwner()">Lanjut ➜</button>
+        <p id="ownerErr" style="color:var(--red);font-size:13px;display:none;margin-top:10px"></p>
+      </div>
+
+      <!-- LANGKAH 1: form booking -->
+      <div id="stepForm" style="display:none">
+        <div class="card" style="text-align:center;margin-bottom:20px">
+          <p style="font-size:12px;color:var(--muted)">Langkah 1 dari 2: isi data di bawah, lalu kirim booking.</p>
+        </div>
+        <div class="contact-grid">
+          <div class="card">
+            <h3>👤 Data Diri</h3>
+            <input id="fNama" type="text" placeholder="Nama Anda *">
+            <input id="fHp" type="tel" placeholder="No. WhatsApp / HP *">
+            <div style="display:flex;gap:10px">
+              <div style="flex:2">
+                <label style="font-size:12px;color:var(--muted)">Tanggal mulai *</label>
+                <input id="fTgl" type="date">
+              </div>
+              <div style="flex:1">
+                <label style="font-size:12px;color:var(--muted)">Jam mulai *</label>
+                <input id="fJam" type="time">
+              </div>
+            </div>
+            <h3 style="margin-top:18px">🕹️ Pilih Perangkat</h3>
+            <div style="display:flex;gap:10px">
+              <select id="fJenis" style="width:110px">
+                <option value="">— jenis —</option>
+              </select>
+              <select id="fKartu" style="flex:1">
+                <option value="">— pilih kartu —</option>
+              </select>
+            </div>
+            <p style="font-size:11px;color:var(--muted);margin-top:6px">Kartu yang sedang dipakai pelanggan lain otomatis nonaktif (▶ SEDANG DIPAKAI).</p>
+          </div>
+          <div class="card">
+            <h3>⏱️ Paket &amp; Harga</h3>
+            <p id="lblGrupInfo" style="font-size:12px;color:var(--muted);margin-bottom:6px">Pilih kartu perangkat dulu untuk melihat paketnya.</p>
+            <select id="fPaket" style="margin-bottom:8px">
+              <option value="">— pilih paket —</option>
+            </select>
+            <div id="menuWrap" style="display:none">
+              <select id="fMakanan" style="margin-bottom:8px">
+                <option value="">— pilih makanan —</option>
+              </select>
+              <select id="fMinuman" style="margin-bottom:6px">
+                <option value="">— pilih minuman —</option>
+              </select>
+              <p id="pesananRingkas" style="font-size:12px;color:var(--green);margin:2px 0 8px;display:none"></p>
+            </div>
+            <div class="slot" style="background:var(--panel-2)">
+              <span class="tv">TOTAL</span>
+              <span class="bar"><i id="barTotal" style="width:0%; background:#7C3AED"></i></span>
+              <span class="meta"><b id="lblTotal">Rp 0</b><br><span id="payNote" style="color:var(--muted);font-size:11px">bayar di tempat</span></span>
+            </div>
+            <h3 style="margin-top:18px">💳 Metode Pembayaran</h3>
+            <select id="fMetode">
+              <option value="biasa">Booking biasa — bayar di tempat</option>
+              <option value="lunas">Booking Lunas — transfer penuh</option>
+              <option value="dp">Booking DP — transfer sebagian</option>
+            </select>
+            <div id="payInfo" style="display:none;font-size:13px;color:var(--muted);background:var(--bg-2);border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px">
+              💳 Transfer ke DANA rental di bawah ini, lalu unggah bukti transfer.
+              <span id="dpRekList" style="display:block;margin-top:6px"></span>
+              <div id="qrPayBox" style="display:none;text-align:center;margin-top:10px">
+                <p style="font-size:12px;margin-bottom:6px">Atau scan QR pembayaran:</p>
+                <img id="qrPayImg" alt="QR pembayaran" style="max-width:200px;border-radius:10px;margin:0 auto">
+              </div>
+              <div id="nomLunasWrap" style="display:none;margin-top:10px">
+                <label style="font-size:12px;color:var(--muted)">💵 Nominal transfer (isikan sesuai total)</label>
+                <input id="fNominal" type="number" min="1" placeholder="0">
+                <p style="font-size:11px;color:var(--muted);margin-top:4px">Total pesanan Anda: <b id="lblTotalLunas" style="color:var(--green)">Rp 0</b></p>
+              </div>
+              <div id="nomDpWrap" style="display:none;margin-top:10px">
+                <label style="font-size:12px;color:var(--muted)">💵 Nominal DP yang ditransfer</label>
+                <input id="fDp" type="number" min="1" placeholder="0">
+                <p id="dpSisaLbl" style="font-size:13px;margin-top:6px"></p>
+              </div>
+            </div>
+            <div id="fBuktiWrap" style="display:none;margin-top:10px">
+              <label style="font-size:12px;color:var(--muted)">📎 Bukti transfer (wajib untuk Lunas / DP)</label>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+                <input id="fBukti" type="file" accept="image/*" style="flex:1">
+                <img id="fBuktiPrev" style="height:44px;border-radius:8px;display:none" alt="">
+              </div>
+              <p style="font-size:11px;color:var(--muted);margin-top:4px">Foto/SS bukti transfer akan ikut dikirim ke kasir.</p>
+            </div>
+            <textarea id="fCatatan" rows="2" placeholder="Catatan (opsional): topping, request, dll."></textarea>
+            <button class="btn btn-primary btn-lg" style="width:100%" onclick="kirimBooking()">📨 Kirim Booking</button>
+            <p id="formErr" style="color:var(--red);font-size:13px;display:none;margin-top:8px"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- LANGKAH 2: status booking -->
+      <div id="stepStatus" style="display:none;max-width:560px;margin:0 auto;text-align:center">
+        <div>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Langkah 2 dari 2 — booking berhasil dikirim</p>
+        </div>
+        <div class="card">
+          <div style="font-size:44px" id="stIcon">⏳</div>
+          <h2 id="stTitle" style="margin:8px 0">Menunggu konfirmasi kasir…</h2>
+          <p style="color:var(--muted)">Kode booking Anda: <b id="kodeBooking" style="font-size:20px;letter-spacing:2px;color:#fff"></b></p>
+          <div id="stDetail" style="text-align:left;background:var(--bg-2);border-radius:10px;padding:14px;margin-top:14px;font-size:14px;color:var(--muted)"></div>
+          <p style="font-size:12px;color:var(--muted);margin-top:12px">Halaman ini memantau status otomatis — biarkan terbuka sampai kasir konfirmasi.</p>
+          <button class="btn btn-primary btn-lg" style="width:100%;margin-top:10px" id="btnWaKasir">📲 Share ke WhatsApp Kasir</button>
+          <button class="btn btn-outline" style="margin-top:10px" onclick="resetBooking()">↺ Booking Lagi</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer id="rentalFooter" style="display:none">
+    <div class="container foot-inner">
+      <span id="footLine"></span>
+      <span>Hubungi kami: <a id="footWa" href="https://wa.me/6282180208414" target="_blank">WhatsApp 0821-8020-8414</a></span>
+    </div>
+  </footer>
+
+<script>
+var OWNER = (function () {
+  var m = location.pathname.match(/\/b\/([^/]+)\/?$/);
+  if (m) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }
+  return (new URLSearchParams(location.search)).get('u') || '';
+})();
+var db = null, bookingId = '', unsub = null, unsubMeta = null;
+var SATUAN = {};
+var LAST_META = null;
+var GRUP_TERPILIH = '';
+var PESANAN = {};
+var TOTAL_PESANAN = 0;
+var LAST_BOOKING = null;
+
+function rupiah(n) { return 'Rp ' + Number(n || 0).toLocaleString('id-ID'); }
+
+function waNumber(hp) {
+  var s = String(hp || '').replace(/[^0-9]/g, '');
+  if (!s) return '';
+  if (s.charAt(0) === '0') s = '62' + s.slice(1);
+  return s;
+}
+
+function updFooterWa() {
+  var hp = waNumber(LAST_META && LAST_META.no_hp);
+  var a = document.getElementById('footWa');
+  if (hp) {
+    a.href = 'https://wa.me/' + hp;
+    a.textContent = 'WhatsApp ' + ((LAST_META.no_hp || '').trim());
+  } else {
+    a.href = 'https://wa.me/6282180208414';
+    a.textContent = 'WhatsApp 0821-8020-8414';
+  }
+}
+
+function namaRentalAsli(d) {
+  var nm = (d && d.nama_rental) || '';
+  return /^RR\s*Billing\s*Pro$/i.test(nm.trim()) ? '' : nm.trim();
+}
+
+firebase.initializeApp({
+  apiKey: 'AIzaSyAqOxWEBD9_AqaMiMtFwbyTvh-d_mdVofQ',
+  authDomain: 'rrbillingpro.firebaseapp.com',
+  projectId: 'rrbillingpro'
+});
+db = firebase.firestore();
+
+function readyAuth() {
+  return firebase.auth().signInAnonymously().catch(function (e) {
+    alert('Gagal terhubung: ' + e.message);
+  });
+}
+
+if (OWNER) {
+  document.getElementById('ownerInput').value = OWNER;
+  muatOwner();
+}
+
+function tampilErr(msg) {
+  document.getElementById('ownerErr').textContent = msg;
+  document.getElementById('ownerErr').style.display = 'block';
+}
+
+function ownerAktif() {
+  return OWNER || document.getElementById('ownerInput').value.trim().toLowerCase();
+}
+
+/* ---------- LANGKAH 0: muat meta rental ---------- */
+function muatOwner() {
+  var v = ownerAktif();
+  if (!v) { tampilErr('Masukkan username rental.'); return; }
+  document.getElementById('ownerErr').style.display = 'none';
+  readyAuth().then(function () {
+    return db.collection('call_meta').doc(v).get();
+  }).then(function (doc) {
+    if (!doc.exists) {
+      tampilErr('Username "' + v + '" tidak ditemukan. Cek kembali atau minta QR ke kasir.');
+      return;
+    }
+    var d = doc.data();
+    LAST_META = d;
+    var nm = namaRentalAsli(d) || 'Booking Online';
+    var brand = document.getElementById('rentalBrand');
+    if (d.logo) {
+      brand.innerHTML = '<img class="brand-logo" src="' + d.logo + '" alt="Logo">';
+    } else {
+      brand.innerHTML = '<span>🕹️ ' + nm + '</span>';
+    }
+    var elNama = document.getElementById('rentalNama');
+    var namaTampil = (d.nama_rental || '').trim();
+    if (namaTampil) {
+      elNama.textContent = namaTampil;
+      elNama.style.display = 'block';
+    } else {
+      elNama.style.display = 'none';
+    }
+    document.getElementById('footLine').textContent = '© ' + new Date().getFullYear() + (namaRentalAsli(d) ? ' ' + namaRentalAsli(d) : '');
+    document.getElementById('rentalFooter').style.display = 'block';
+    updFooterWa();
+    document.title = (namaRentalAsli(d) ? namaRentalAsli(d) + ' — ' : '') + 'Booking Online';
+    document.getElementById('stepOwner').style.display = 'none';
+    document.getElementById('stepForm').style.display = 'block';
+    var dana = [];
+    if (d.no_dana || d.nama_dana) {
+      dana.push('DANA' + (d.nama_dana ? ' a.n. <b>' + d.nama_dana + '</b>' : '') +
+        ': <b>' + (d.no_dana || '—') + '</b>');
+    }
+    document.getElementById('dpRekList').innerHTML = dana.map(function (x) {
+      return '<div style="padding:3px 0">' + x + '</div>';
+    }).join('');
+    var qrPayBox = document.getElementById('qrPayBox');
+    if (d.qr_pembayaran) {
+      document.getElementById('qrPayImg').src = d.qr_pembayaran;
+      qrPayBox.style.display = 'block';
+    } else {
+      qrPayBox.style.display = 'none';
+    }
+    var t = new Date();
+    document.getElementById('fTgl').min = t.toISOString().slice(0, 10);
+    renderDevices();
+    renderMenu();
+    watchMetaRealtime();
+  }).catch(function (e) {
+    tampilErr('Gagal memuat data: ' + e.message);
+  });
+}
+
+/* ---------- REALTIME STATUS TV (setiap push dari app ~8 dtk) ---------- */
+function watchMetaRealtime() {
+  if (unsubMeta) unsubMeta();
+  unsubMeta = db.collection('call_meta').doc(ownerAktif()).onSnapshot(function (doc) {
+    if (!doc.exists) return;
+    var d = doc.data();
+    LAST_META = d;
+    renderDevices(false);
+    renderMenu();
+    updFooterWa();
+  }, function () {});
+}
+
+function renderDevices() {
+  var selJ = document.getElementById('fJenis');
+  var selK = document.getElementById('fKartu');
+  var curJ = selJ.value, curK = selK.value;
+  var devs = (LAST_META && LAST_META.devices) || {};
+  var types = [];
+  (['TV', 'PS', 'PC']).forEach(function (tp) {
+    if (devs[tp] && devs[tp].length) types.push(tp);
+  });
+  selJ.innerHTML = '<option value="">— jenis —</option>';
+  types.forEach(function (tp) {
+    var o = document.createElement('option');
+    o.value = tp; o.textContent = tp;
+    selJ.appendChild(o);
+  });
+  if (curJ && selJ.querySelector('option[value="' + curJ + '"]')) selJ.value = curJ;
+  else curJ = selJ.value = types[0] || '';
+  fillKartu(curJ);
+  if (curK && selK.querySelector('option[value="' + curK + '"]')) {
+    selK.value = curK;
+  }
+  if (selK.value !== curK || curJ !== selJ.value) kartuChange();
+}
+
+function fillKartu(jenis) {
+  var selK = document.getElementById('fKartu');
+  selK.innerHTML = '<option value="">— pilih kartu —</option>';
+  if (!jenis || !LAST_META) return;
+  var list = (LAST_META.devices || {})[jenis] || [];
+  list.forEach(function (c) {
+    var o = document.createElement('option');
+    o.value = c.nama;
+    o.textContent = c.aktif ? (jenis === 'TV' ? '🖥 ' : '🖳 ') + c.nama + ' (' + c.grup + ') — ▶ SEDANG DIPAKAI'
+                             : (jenis === 'TV' ? '🖥 ' : '🖳 ') + c.nama + ' (' + c.grup + ')';
+    if (c.aktif) o.disabled = true;
+    selK.appendChild(o);
+  });
+}
+
+function kartuChange() {
+  var nama = document.getElementById('fKartu').value;
+  var jenis = document.getElementById('fJenis').value;
+  var grp = '';
+  var list = (LAST_META && LAST_META.devices && LAST_META.devices[jenis]) || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].nama === nama) { grp = list[i].grup || 'Reguler'; break; }
+  }
+  GRUP_TERPILIH = grp;
+  var info = document.getElementById('lblGrupInfo');
+  if (grp) info.textContent = 'Paket: ' + jenis + ' ' + nama + ' → grup ' + grp;
+  else info.textContent = 'Pilih kartu perangkat dulu untuk melihat paketnya.';
+  isiPaket();
+}
+
+function tvSedangDipakai(perangkat) {
+  if (!LAST_META || !LAST_META.devices) return false;
+  var lists = [].concat(LAST_META.devices.TV || [], LAST_META.devices.PC || [],
+                        LAST_META.devices.PS || []);
+  for (var i = 0; i < lists.length; i++) {
+    if (lists[i].nama === perangkat) return !!lists[i].aktif;
+  }
+  return false;
+}
+
+function isiPaket() {
+  var selP = document.getElementById('fPaket');
+  selP.innerHTML = '<option value="">— pilih paket —</option>';
+  SATUAN = {};
+  var gn = GRUP_TERPILIH;
+  if (!gn || !LAST_META) { hitungTotal(); return; }
+  var g = (LAST_META.paket_grup || {})[gn] || {};
+  Object.keys(g).forEach(function (pn) {
+    var p = g[pn] || {};
+    var harga = parseInt(p.harga || 0, 10);
+    var menit = parseInt(p.menit || 0, 10);
+    SATUAN[pn] = harga;
+    var o = document.createElement('option');
+    o.value = pn;
+    o.textContent = pn + (menit ? ' — ' + menit + ' mnt' : '') + ' — Rp ' + harga.toLocaleString('id-ID');
+    selP.appendChild(o);
+  });
+  hitungTotal();
+}
+
+function hitungTotal() {
+  var p = document.getElementById('fPaket').value;
+  var total = (SATUAN[p] || 0) + jumlahPesanan();
+  document.getElementById('lblTotal').textContent = 'Rp ' + total.toLocaleString('id-ID');
+  document.getElementById('barTotal').style.width = total > 0 ? '100%' : '0%';
+  var m = document.getElementById('fMetode').value;
+  document.getElementById('lblTotalLunas').textContent = rupiah(total);
+  if (m === 'lunas') {
+    document.getElementById('fNominal').value = total || '';
+  } else if (m === 'dp') {
+    hitungDp();
+  }
+  updPayNote();
+}
+
+function hitungDp() {
+  var p = document.getElementById('fPaket').value;
+  var total = (SATUAN[p] || 0) + jumlahPesanan();
+  var dp = parseInt(document.getElementById('fDp').value || '0', 10) || 0;
+  var lbl = document.getElementById('dpSisaLbl');
+  if (dp > 0 && total > 0) {
+    var sisa = Math.max(total - dp, 0);
+    lbl.innerHTML = 'Total: <b>' + rupiah(total) + '</b> — DP <b>' + rupiah(dp) +
+      '</b> → <b style="color:var(--yellow)">Sisa bayar di tempat: ' + rupiah(sisa) + '</b>';
+  } else if (total > 0) {
+    lbl.innerHTML = 'Total: <b>' + rupiah(total) +
+      '</b> — masukkan nominal DP, sisa pembayaran otomatis dihitung.';
+  }
+}
+
+function updPayNote() {
+  var m = document.getElementById('fMetode').value;
+  var el = document.getElementById('payNote');
+  if (m === 'lunas') el.textContent = 'lunas via transfer';
+  else if (m === 'dp') el.textContent = 'DP via transfer + sisa di tempat';
+  else el.textContent = 'bayar di tempat';
+}
+
+function jumlahPesanan() {
+  if (!LAST_META) return 0;
+  var t = 0;
+  Object.keys(PESANAN).forEach(function (nm) {
+    var q = parseInt(PESANAN[nm] || 0, 10);
+    if (q <= 0) return;
+    var harga = parseInt((LAST_META.makanan || {})[nm] || (LAST_META.minuman || {})[nm] || 0, 10);
+    t += harga * q;
+  });
+  TOTAL_PESANAN = t;
+  return t;
+}
+
+/* ---------- PESANAN MAKANAN & MINUMAN (stok 0 = tidak bisa dipilih) ---------- */
+function renderMenu() {
+  var wrap = document.getElementById('menuWrap');
+  if (!LAST_META) return;
+  var mk = LAST_META.makanan || {}, mn2 = LAST_META.minuman || {};
+  if (!Object.keys(mk).length && !Object.keys(mn2).length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  buildMenuSel('fMakanan', '— pilih makanan —', mk, 'makanan');
+  buildMenuSel('fMinuman', '— pilih minuman —', mn2, 'minuman');
+  var labels = [];
+  Object.keys(PESANAN).forEach(function (nm) {
+    var q = parseInt(PESANAN[nm] || 0, 10);
+    if (q <= 0) return;
+    labels.push(nm + ' x' + q);
+  });
+  var ringkas = document.getElementById('pesananRingkas');
+  if (labels.length) {
+    ringkas.textContent = 'Pesanan Anda: ' + labels.join(', ') + ' (dibayar saat konfirmasi)';
+    ringkas.style.display = 'block';
+  } else {
+    ringkas.style.display = 'none';
+  }
+  hitungTotal();
+}
+
+function buildMenuSel(elId, placeholder, cat, kat) {
+  var el = document.getElementById(elId);
+  var names = Object.keys(cat);
+  if (!names.length) { el.style.display = 'none'; el.innerHTML = '<option value=""></option>'; return; }
+  el.style.display = '';
+  var cur = el.value;
+  var opts = names.map(function (nm) {
+    var harga = parseInt(cat[nm] || 0, 10);
+    var m = (LAST_META.stok || {})[kat] || {};
+    var avail = (nm in m) ? parseInt(m[nm], 10) : -1;
+    var label = nm + ' — Rp ' + harga.toLocaleString('id-ID');
+    if (avail >= 0) label += ' (sisa ' + avail + ')';
+    if (avail === 0) label += ' — STOK HABIS';
+    return { nm: nm, label: label, habis: avail === 0 };
+  });
+  var html = '<option value="">' + placeholder + '</option>';
+  opts.forEach(function (o) {
+    html += '<option value="' + o.nm + '"' + (o.habis ? ' disabled' : '') + '>' + o.label + '</option>';
+  });
+  el.innerHTML = html;
+  if (cur && el.querySelector('option[value="' + cur + '"]') && !el.querySelector('option[value="' + cur + '"]').disabled) {
+    el.value = cur;
+  }
+}
+
+function menuSelectChange() {
+  var kat = this.id === 'fMakanan' ? 'makanan' : 'minuman';
+  var nama = this.value;
+  if (nama) {
+    var m = (LAST_META.stok || {})[kat] || {};
+    var avail = (nama in m) ? parseInt(m[nama], 10) : -1;
+    if (avail === 0) return;
+  }
+  var mk = LAST_META.makanan || {};
+  Object.keys(PESANAN).forEach(function (k) {
+    var isSama = (mk[k] !== undefined) === (kat === 'makanan');
+    if (isSama) delete PESANAN[k];
+  });
+  if (nama) PESANAN[nama] = 1;
+  renderMenu();
+}
+
+document.getElementById('fJenis').onchange = function () { fillKartu(this.value); kartuChange(); };
+document.getElementById('fKartu').onchange = kartuChange;
+document.getElementById('fPaket').onchange = hitungTotal;
+document.getElementById('fMakanan').onchange = menuSelectChange;
+document.getElementById('fMinuman').onchange = menuSelectChange;
+document.getElementById('fMetode').onchange = function () {
+  var m = this.value;
+  var transfer = (m === 'lunas' || m === 'dp');
+  document.getElementById('payInfo').style.display = transfer ? 'block' : 'none';
+  document.getElementById('nomLunasWrap').style.display = m === 'lunas' ? 'block' : 'none';
+  document.getElementById('nomDpWrap').style.display = m === 'dp' ? 'block' : 'none';
+  document.getElementById('fBuktiWrap').style.display = transfer ? 'block' : 'none';
+  hitungTotal();
+};
+
+document.getElementById('fBukti').onchange = function () {
+  var f = this.files && this.files[0];
+  var prev = document.getElementById('fBuktiPrev');
+  if (!f) { prev.style.display = 'none'; return; }
+  var rd = new FileReader();
+  rd.onload = function (e) {
+    prev.src = e.target.result;
+    prev.style.display = '';
+  };
+  rd.readAsDataURL(f);
+};
+
+document.getElementById('fDp').oninput = hitungDp;
+
+/* ---------- LANGKAH 1: kirim booking ---------- */
+function perangkatFinal() {
+  return document.getElementById('fKartu').value;
+}
+
+function kompresGambar(file, cb) {
+  var img = new Image();
+  var url = URL.createObjectURL(file);
+  img.onload = function () {
+    var MAX = 1280, w = img.width, h = img.height;
+    if (w > MAX || h > MAX) {
+      if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
+      else { w = Math.round(w * MAX / h); h = MAX; }
+    }
+    var cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(img, 0, 0, w, h);
+    URL.revokeObjectURL(url);
+    cb(cv.toDataURL('image/jpeg', 0.75));
+  };
+  img.onerror = function () { URL.revokeObjectURL(url); cb(''); };
+  img.src = url;
+}
+
+function kirimBooking() {
+  var nama = document.getElementById('fNama').value.trim();
+  var hp = document.getElementById('fHp').value.trim();
+  var tgl = document.getElementById('fTgl').value;
+  var jam = document.getElementById('fJam').value;
+  var grup = GRUP_TERPILIH;
+  var paket = document.getElementById('fPaket').value;
+  var metode = document.getElementById('fMetode').value;
+  if (!nama || !hp) { formErr('Nama dan no. HP wajib diisi.'); return; }
+  if (!tgl || !jam) { formErr('Tanggal dan jam mulai wajib diisi.'); return; }
+  if (!perangkatFinal()) { formErr('Pilih kartu perangkat terlebih dahulu.'); return; }
+  if (!grup || !paket) { formErr('Pilih paket terlebih dahulu.'); return; }
+  var total = (SATUAN[paket] || 0) + jumlahPesanan();
+  var nominalTransfer = 0, nominalDp = 0, sisaBayar = 0, statusBayar = 'belum_bayar';
+  if (metode === 'lunas') {
+    nominalTransfer = parseInt(document.getElementById('fNominal').value || '0', 10) || 0;
+    if (nominalTransfer <= 0) { formErr('Masukkan nominal transfer.'); return; }
+    if (nominalTransfer > total &&
+        !confirm('Nominal transfer (' + rupiah(nominalTransfer) + ') melebihi total (' + rupiah(total) + '). Lanjutkan?')) return;
+    sisaBayar = Math.max(total - nominalTransfer, 0);
+    statusBayar = 'lunas_transfer';
+  } else if (metode === 'dp') {
+    nominalDp = parseInt(document.getElementById('fDp').value || '0', 10) || 0;
+    if (nominalDp <= 0) { formErr('Masukkan nominal DP yang ditransfer.'); return; }
+    if (nominalDp >= total) { formErr('Nominal DP harus kurang dari total (' + rupiah(total) + ').'); return; }
+    sisaBayar = total - nominalDp;
+    statusBayar = 'dp';
+  }
+  if (metode !== 'biasa' && !(document.getElementById('fBukti').files && document.getElementById('fBukti').files[0])) {
+    formErr('Booking Lunas / DP wajib melampirkan bukti transfer.'); return;
+  }
+
+  var data = {
+    owner: ownerAktif(),
+    namaPelanggan: nama,
+    noHp: hp,
+    perangkat: perangkatFinal(),
+    grup: grup,
+    paket: paket,
+    totalHarga: total,
+    tanggal: tgl,
+    jam: jam,
+    metode: metode,
+    statusBayar: statusBayar,
+    nominalTransfer: nominalTransfer,
+    nominalDp: nominalDp,
+    sisaBayar: sisaBayar,
+    pesanan: PESANAN,
+    catatan: document.getElementById('fCatatan').value.trim(),
+    status: 'baru',
+    kasir: '',
+    alasan: '',
+    createdAt: new Date().toISOString()
+  };
+  LAST_BOOKING = data;
+  if (tvSedangDipakai(data.perangkat)) {
+    formErr('TV ' + data.perangkat + ' sedang dipakai pelanggan lain — pilih TV lain atau PS/PC.');
+    return;
+  }
+  document.getElementById('formErr').style.display = 'none';
+  var kirim = function () {
+    readyAuth().then(function () {
+      return db.collection('bookings').add(data);
+    }).then(function (ref) {
+      bookingId = ref.id;
+      document.getElementById('stepForm').style.display = 'none';
+      document.getElementById('stepStatus').style.display = 'block';
+      document.getElementById('kodeBooking').textContent = bookingId.slice(0, 8).toUpperCase();
+      pantauStatus();
+    }).catch(function (e) {
+      formErr('Gagal mengirim: ' + e.message);
+    });
+  };
+  if (metode !== 'biasa') {
+    kompresGambar(document.getElementById('fBukti').files[0], function (b64) {
+      if (!b64) { formErr('Gagal memproses bukti transfer.'); return; }
+      if (b64.length > 900000) { formErr('Ukuran bukti terlalu besar, pilih foto lain.'); return; }
+      data.bukti = b64;
+      kirim();
+    });
+  } else {
+    kirim();
+  }
+}
+
+function formErr(m) {
+  var el = document.getElementById('formErr');
+  el.textContent = m;
+  el.style.display = 'block';
+}
+
+/* ---------- LANGKAH 2: pantau status ---------- */
+document.getElementById('btnWaKasir').onclick = function () {
+  var hp = waNumber(LAST_META && LAST_META.no_hp);
+  if (!hp) { alert('Nomor WhatsApp kasir belum terdaftar di profil rental.'); return; }
+  var d = LAST_BOOKING || {};
+  if (!d.perangkat) { alert('Detail booking belum tersedia.'); return; }
+  var kode = (bookingId || '').slice(0, 8).toUpperCase();
+  var mtd = d.metode === 'lunas' ? 'Lunas via transfer'
+    : d.metode === 'dp' ? 'DP via transfer' : 'Bayar di tempat';
+  var sb = d.statusBayar === 'lunas_transfer'
+    ? 'Status bayar: LUNAS via transfer' + (d.nominalTransfer ? ' ' + rupiah(d.nominalTransfer) : '')
+    : d.statusBayar === 'dp'
+      ? 'Status bayar: DP ' + rupiah(d.nominalDp || 0) + ' — sisa bayar di tempat ' + rupiah(d.sisaBayar || 0)
+      : 'Status bayar: bayar di tempat';
+  var lines = [
+    'Halo, saya *' + d.namaPelanggan + '* ingin mengonfirmasi booking saya.',
+    'Kode booking: *' + kode + '*',
+    'Perangkat: ' + d.perangkat,
+    'Paket: ' + d.grup + ' → ' + d.paket,
+    'Mulai: ' + d.tanggal + ' ' + d.jam,
+    'Total: ' + rupiah(d.totalHarga || 0),
+    'Metode: ' + mtd,
+    sb
+  ];
+  var pes = d.pesanan || {};
+  var has = Object.keys(pes).filter(function (k) { return parseInt(pes[k] || 0, 10) > 0; });
+  if (has.length) lines.push('Pesanan: ' + has.map(function (k) { return k + ' x' + pes[k]; }).join(', '));
+  if (d.catatan) lines.push('Catatan: ' + d.catatan);
+  window.open('https://wa.me/' + hp + '?text=' + encodeURIComponent(lines.join('\n')), '_blank');
+};
+
+function pantauStatus() {
+  unsub = db.collection('bookings').doc(bookingId).onSnapshot(function (doc) {
+    if (!doc.exists) return;
+    var d = doc.data();
+    var st = d.status || 'baru';
+    var icon = document.getElementById('stIcon');
+    var title = document.getElementById('stTitle');
+    if (st === 'baru') {
+      icon.textContent = '⏳';
+      title.textContent = 'Menunggu konfirmasi kasir…';
+      title.style.color = 'var(--text)';
+    } else if (st === 'dikonfirmasi') {
+      icon.textContent = '✅';
+      title.textContent = 'Booking Dikonfirmasi!';
+      title.style.color = 'var(--green)';
+    } else if (st === 'ditolak') {
+      icon.textContent = '✖';
+      title.textContent = 'Booking Ditolak';
+      title.style.color = 'var(--red)';
+    }
+    var mtd = d.metode || 'biasa';
+    var mtdTxt = mtd === 'lunas' ? 'Lunas (transfer penuh) — bukti terlampir ✓'
+      : mtd === 'dp' ? 'DP (transfer sebagian) — bukti terlampir ✓'
+      : 'Bayar di tempat';
+    var sbHtml;
+    if (d.statusBayar === 'lunas_transfer') {
+      sbHtml = '<b style="color:var(--green)">LUNAS VIA TRANSFER' +
+        (d.nominalTransfer ? ' ' + rupiah(d.nominalTransfer) : '') + '</b>' +
+        (d.sisaBayar > 0 ? ' — sisa ' + rupiah(d.sisaBayar) : '');
+    } else if (d.statusBayar === 'dp') {
+      sbHtml = '<b style="color:var(--yellow)">DP ' + rupiah(d.nominalDp || 0) + ' dibayar</b>' +
+        ' — <b style="color:var(--red)">TAGIHAN SISA: ' + rupiah(d.sisaBayar || 0) + '</b> (bayar di tempat)';
+    } else {
+      sbHtml = '<b style="color:var(--yellow)">BELUM BAYAR — bayar di tempat</b>';
+    }
+    var det = [
+      'Perangkat: ' + (d.perangkat || '-'),
+      'Paket: ' + (d.grup || '') + ' → ' + (d.paket || ''),
+      'Mulai: ' + (d.tanggal || '') + ' ' + (d.jam || ''),
+      'Total: ' + rupiah(d.totalHarga || 0),
+      'Metode: ' + mtdTxt,
+      'Status bayar: ' + sbHtml
+    ];
+    var pes = d.pesanan || {};
+    var hasPes = Object.keys(pes).some(function (k) { return parseInt(pes[k] || 0, 10) > 0; });
+    if (hasPes) {
+      var lt = Object.keys(pes).filter(function (k) { return parseInt(pes[k] || 0, 10) > 0; })
+        .map(function (k) { return k + ' x' + pes[k]; }).join(', ');
+      det.push('Pesanan: ' + lt + ' (dibayar saat konfirmasi)');
+    }
+    if (d.catatan) det.push('Catatan: ' + d.catatan);
+    if (st === 'ditolak' && d.alasan) det.push('Alasan kasir: ' + d.alasan);
+    document.getElementById('stDetail').innerHTML = det.map(function (x) {
+      return '<div style="padding:4px 0">' + x + '</div>';
+    }).join('');
+  }, function () {});
+}
+
+function resetBooking() {
+  if (unsub) unsub();
+  LAST_BOOKING = null;
+  document.getElementById('stepStatus').style.display = 'none';
+  document.getElementById('stepForm').style.display = 'block';
+  document.getElementById('formErr').style.display = 'none';
+  document.getElementById('fNama').value = '';
+  document.getElementById('fHp').value = '';
+  document.getElementById('fCatatan').value = '';
+  document.getElementById('fBukti').value = '';
+  document.getElementById('fBuktiPrev').style.display = 'none';
+  document.getElementById('fMetode').value = 'biasa';
+  document.getElementById('payInfo').style.display = 'none';
+  document.getElementById('nomLunasWrap').style.display = 'none';
+  document.getElementById('nomDpWrap').style.display = 'none';
+  document.getElementById('fBuktiWrap').style.display = 'none';
+  document.getElementById('fNominal').value = '';
+  document.getElementById('fDp').value = '';
+  document.getElementById('dpSisaLbl').textContent = '';
+  PESANAN = {};
+  renderMenu();
+  updPayNote();
+}
+</script>
+
+</body>
+</html>

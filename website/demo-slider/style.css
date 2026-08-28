@@ -1,0 +1,255 @@
+/* ============================================================
+   TIMED CARD OPENING HERO SLIDER — RR Billing Pro
+   ============================================================ */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --accent: #7C3AED;
+  --accent-2: #A855F7;
+  --bg: #0B0F1A;
+  --text: #F5F7FA;
+  --muted: rgba(255, 255, 255, .72);
+  --card-w: 190px;
+  --card-h: 110px;
+  --card-gap: 14px;
+}
+
+html, body { height: 100%; }
+
+body {
+  font-family: "Poppins", "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* ---------- HERO FULL-SCREEN ---------- */
+.hero-slider {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* ---------- LAYER SLIDE ---------- */
+.slides { position: absolute; inset: 0; }
+
+.slide {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  visibility: hidden;
+  will-change: transform, opacity, border-radius;
+}
+.slide.active { opacity: 1; visibility: visible; }
+
+/* Video promo slide */
+.slide video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Overlay gelap agar teks terbaca */
+.slide::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(7, 10, 18, .86) 0%, rgba(7, 10, 18, .55) 45%, rgba(7, 10, 18, .18) 100%),
+    linear-gradient(0deg, rgba(7, 10, 18, .88) 0%, transparent 30%);
+}
+
+/* ---------- KONTEN ---------- */
+.content {
+  position: absolute;
+  left: clamp(24px, 7vw, 110px);
+  bottom: clamp(190px, 26vh, 260px);
+  max-width: 640px;
+  z-index: 5;
+}
+
+.tagline {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: var(--accent-2);
+  background: rgba(124, 58, 237, .16);
+  border: 1px solid rgba(168, 85, 247, .4);
+  padding: 7px 16px;
+  border-radius: 999px;
+  margin-bottom: 22px;
+}
+
+.content h1 {
+  font-size: clamp(34px, 5.4vw, 66px);
+  line-height: 1.08;
+  font-weight: 800;
+  margin-bottom: 18px;
+  text-shadow: 0 4px 30px rgba(0, 0, 0, .5);
+}
+
+.content p {
+  font-size: clamp(15px, 1.5vw, 18px);
+  color: var(--muted);
+  line-height: 1.65;
+  margin-bottom: 30px;
+  max-width: 540px;
+}
+
+.cta-row { display: flex; align-items: center; gap: 22px; }
+
+.btn-explore {
+  display: inline-block;
+  padding: 15px 36px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: .5px;
+  border-radius: 12px;
+  text-decoration: none;
+  box-shadow: 0 10px 30px rgba(124, 58, 237, .4);
+  transition: transform .2s ease, box-shadow .2s ease;
+}
+.btn-explore:hover { transform: translateY(-3px); box-shadow: 0 16px 42px rgba(124, 58, 237, .55); }
+
+.counter {
+  font-family: "Consolas", monospace;
+  font-size: 14px;
+  letter-spacing: 2px;
+  color: var(--muted);
+}
+
+/* ---------- BARIS KARTU ---------- */
+.cards-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 26px;
+  z-index: 6;
+  padding: 0 clamp(14px, 4vw, 60px);
+  overflow: hidden;
+}
+
+.cards-track {
+  display: flex;
+  gap: var(--card-gap);
+  width: max-content;
+  will-change: transform;
+}
+
+.card {
+  position: relative;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: 14px;
+  overflow: hidden;
+  flex: none;
+  cursor: pointer;
+  border: 2px solid rgba(255, 255, 255, .18);
+  background: var(--bg);
+  transition: border-color .3s, box-shadow .3s;
+  will-change: transform;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--thumb) center / cover no-repeat;
+  transition: transform .6s cubic-bezier(.2, .8, .2, 1);
+}
+.card:hover::before { transform: scale(1.12); }
+
+/* Kartu video promo: gradient + ikon play */
+.card.video::before {
+  background:
+    linear-gradient(160deg, rgba(124, 58, 237, .9), rgba(168, 85, 247, .35) 55%, rgba(11, 15, 26, .92)),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, .06) 0 10px, transparent 10px 20px);
+}
+.card .play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .16);
+  border: 2px solid rgba(255, 255, 255, .5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  color: #fff;
+  z-index: 2;
+}
+
+/* Label kartu */
+.card .label {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, .8);
+  z-index: 2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Progress autoplay di kartu aktif */
+.card .progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transform-origin: left;
+  transform: scaleX(0);
+  z-index: 3;
+}
+
+.card.active {
+  border-color: var(--accent-2);
+  box-shadow: 0 12px 34px rgba(124, 58, 237, .45);
+}
+
+.card.active::before { transform: scale(1.06); }
+
+/* ---------- HINT ---------- */
+.hint {
+  position: absolute;
+  right: clamp(14px, 3vw, 40px);
+  bottom: 34px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, .55);
+  z-index: 5;
+  letter-spacing: .5px;
+}
+
+/* ---------- RESPONSIVE ---------- */
+@media (max-width: 720px) {
+  :root { --card-w: 130px; --card-h: 74px; }
+  .content { left: 22px; right: 22px; bottom: 150px; }
+  .content h1 { font-size: 32px; }
+  .hint { display: none; }
+  .cards-wrap { bottom: 18px; }
+}
+
+@media (max-width: 440px) {
+  :root { --card-w: 108px; --card-h: 62px; }
+  .content p { font-size: 14px; }
+  .btn-explore { padding: 12px 26px; font-size: 14px; }
+}

@@ -12,5 +12,5 @@ python -c "import webview" 2>nul || (
   echo Menginstall pywebview ^(pertama kali^)...
   python -m pip install --no-index --find-links "%~dp0wheels" pywebview >nul 2>&1 || python -m pip install pywebview
 )
-echo Membuka jendela aplikasi kasir...
-python kasir_window.py
+echo Membuka jendela aplikasi kasir... ^(tanpa jendela cmd^)
+start "" pythonw kasir_window.py

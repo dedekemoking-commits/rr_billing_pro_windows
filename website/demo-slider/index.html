@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RR Billing Pro — Hero Slider</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <script src="script.js" defer></script>
+</head>
+<body>
+
+  <section class="hero-slider" id="heroSlider">
+
+    <!-- Layer slide (background) — diisi via JS -->
+    <div class="slides" id="slides"></div>
+
+    <!-- Konten utama -->
+    <div class="content" id="content">
+      <div class="tagline" id="slideTag">— RR BILLING PRO</div>
+      <h1 id="slideTitle"></h1>
+      <p id="slideDesc"></p>
+      <div class="cta-row">
+        <a class="btn-explore" id="ctaBtn" href="#">Explore</a>
+        <span class="counter" id="counter">01 / 08</span>
+      </div>
+    </div>
+
+    <!-- Baris kartu thumbnail -->
+    <div class="cards-wrap">
+      <div class="cards-track" id="cardsTrack"></div>
+    </div>
+
+    <!-- Indikator -->
+    <div class="hint">Klik kartu untuk membuka • berganti otomatis setiap 6 detik</div>
+
+  </section>
+
+</body>
+</html>

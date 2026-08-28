@@ -239,8 +239,8 @@ if exist "%DESK%\RR Billing Web Kasir.lnk" (
 )
 
 echo.
-echo   Menjalankan server web kasir di background...
-start "RR Billing Web" cmd /k "cd /d %WEB_DIR%\billing_web && %PY% server.py"
+echo   Menjalankan server web kasir di background ^(tanpa jendela cmd^)...
+start "RR Billing Web" /d "%WEB_DIR%\billing_web" pythonw "%WEB_DIR%\billing_web\server.py"
 timeout /t 4 /nobreak >nul
 echo   Membuka browser http://localhost:8000 ...
 start "" "http://localhost:8000"
