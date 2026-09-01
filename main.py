@@ -330,6 +330,67 @@ class WarnetSocketServer:
             cmds = self.pending_commands.pop(pc_id, [])
         return cmds
 
+    # ── MAC Address (Wake-on-LAN) ─────────────────────────────
+    def _save_client_mac(self, client_id, pc_id, mac):
+        """Simpan MAC ke konfigurasi warnet_clients untuk tombol HIDUPKAN."""
+        try:
+            mac = str(mac or "").strip()
+            if not mac:
+                return
+            cfg = self.config_manager.load()
+            for c in cfg.get("warnet_clients", []):
+                if c.get("client_id") != client_id:
+                    continue
+                for p in c.get("pcs", []):
+                    if p.get("pc_id") == pc_id and p.get("mac") != mac:
+                        p["mac"] = mac
+                break
+            ConfigManager.save(cfg)
+        except Exception as e:
+            print(f"[WARN] Gagal simpan MAC ke config: {e}", flush=True)
+
+    def kirim_wol(self, mac, target_ip=None):
+        """Wake-on-LAN: kirim magic packet via UDP broadcast (port 9 & 7).
+        MAC dapat format 'AA:BB:CC:DD:EE:FF' / '-' / tanpa separator."""
+        try:
+            mac_clean = str(mac or "").replace(":", "").replace("-", "").replace(" ", "").lower()
+            if len(mac_clean) != 12:
+                return False, f"Format MAC tidak valid: {mac}"
+            try:
+                payload = bytes.fromhex("FF" * 6 + mac_clean * 16)
+            except ValueError:
+                return False, f"MAC bukan hex: {mac}"
+            targets = {"255.255.255.255"}
+            if target_ip:
+                parts = str(target_ip).split(".")
+                if len(parts) == 4 and all(x.isdigit() for x in parts):
+                    targets.add(".".join(parts[:3]) + ".255")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                for t in targets:
+                    for port in (9, 7):
+                        sock.sendto(payload, (t, port))
+            finally:
+                sock.close()
+            print(f"[WOL] Magic packet terkirim ke {', '.join(sorted(targets))} (MAC {mac})", flush=True)
+            return True, f"WOL terkirim ke {target_ip or 'broadcast'} — MAC {mac}"
+        except Exception as e:
+            return False, f"WOL gagal: {e}"
+
+    def broadcast_command(self, cmd, **params):
+        """Queue a command (LOCK/UNLOCK/SET_LOGO dst) untuk SEMUA pc_id
+        yang terdaftar di warnet_clients. Return jumlah PC yang di-antri."""
+        cfg = self.config_manager.load()
+        count = 0
+        for client in cfg.get("warnet_clients", []) or []:
+            for pc in client.get("pcs", []) or []:
+                pc_id = pc.get("pc_id")
+                if pc_id:
+                    self.queue_pending_command(pc_id, cmd, **params)
+                    count += 1
+        return count
+
     def stop(self):
         """Stop socket server."""
         self.running = False
@@ -391,6 +452,7 @@ class WarnetSocketServer:
                             "last_heartbeat": time.time(),
                             "address": address,
                             "transport": "websocket",
+                            "mac": data.get("mac"),
                         }
                 
                 if session_token and data.get("type") in ("COMMAND", "PING", "GET_STATUS"):
@@ -476,7 +538,8 @@ class WarnetSocketServer:
                             self.sessions[session_token] = {
                                 "client_id": message.get("client_id"),
                                 "last_heartbeat": time.time(),
-                                "address": address
+                                "address": address,
+                                "mac": message.get("mac"),
                             }
                     
                     # Update heartbeat
@@ -711,6 +774,17 @@ class WarnetSocketServer:
         
         # Warnet cards — always run for warnet clients
         if is_warnet_client and self.app and hasattr(self.app, '_semua_kartu_warnet'):
+            # Sinkronkan MAC dari session AUTH ke kartu (untuk tombol HIDUPKAN/WOL)
+            with self.sessions_lock:
+                sess_mac = self.sessions.get(session_token, {}).get("mac")
+            if sess_mac:
+                for kursi in self.app._semua_kartu_warnet:
+                    if getattr(kursi, '_pc_id', None) == pc_id:
+                        if getattr(kursi, '_pc_mac', None) != sess_mac:
+                            kursi._pc_mac = sess_mac
+                            if hasattr(self, '_save_client_mac'):
+                                self._save_client_mac(client_id, pc_id, sess_mac)
+                        break
             for kursi in self.app._semua_kartu_warnet:
                 if getattr(kursi, '_pc_id', None) == pc_id:
                     if kursi.paket_aktif:
@@ -731,7 +805,7 @@ class WarnetSocketServer:
                         billing_status["total_biaya"] = int(
                             kursi._total_setelah_diskon(biaya_waktu + kursi.biaya_pesanan))
                     elif kursi.paket_harga_tetap > 0 or kursi.biaya_pesanan > 0:
-                        billing_status["total_biaya"] = kursi.paket_harga_tetap + kursi.biaya_pesanan
+                        billing_status["total_biaya"] = int(kursi._total_setelah_diskon())
                     if kursi.paket_aktif is not None:
                         billing_status["is_playing"] = True
                     if kursi.is_bebas:
@@ -1208,7 +1282,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.13"
+APP_VERSION = "2.4.14"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -2219,6 +2293,28 @@ class ADBHelper:
         return cls.adb_shell(ip, "pm install -r " + remote_path, timeout=timeout)
 
     @classmethod
+    def ensure_overlay_permission(cls, ip, package="com.rrbillingpro.tvclient"):
+        """Aktifkan izin overlay (SYSTEM_ALERT_WINDOW) via AppOps lalu buka
+        ulang aplikasi TV — agar popup PIN/timer langsung tampil, khususnya di
+        ROM ketat seperti TCL yang Settings.canDrawOverlays()-nya tidak sinkron.
+
+        Dipanggil otomatis setelah install/upgrade APK sukses. Tidak fatal bila
+        gagal (beberapa ROM menolak appops via ADB) — TV tetap berjalan.
+        """
+        hasil = []
+        for cmd in (
+            f"appops set {package} SYSTEM_ALERT_WINDOW allow",
+            f"am force-stop {package}",
+            f"am start -n {package}/.MainActivity",
+        ):
+            try:
+                ok, out = cls.adb_shell(ip, cmd, timeout=25)
+                hasil.append("OK" if ok else str(out or "gagal"))
+            except Exception as e:
+                hasil.append(str(e))
+        return "OK" in hasil
+
+    @classmethod
     def _ambil_diagnosa_avc(cls, ip, batas=25):
         """Ambil baris SELinux avc: denied dari TV (dmesg + logcat) untuk
         ditampilkan ke user — diagnosa cepat mengapa install ditolak ROM."""
@@ -2261,14 +2357,16 @@ class ADBHelper:
         if ok:
             ok2, pesan2 = cls._pm_install(ip, remote_tmp)
             if ok2 and "Success" in (pesan2 or ""):
-                return True, pesan2.strip()
+                cls.ensure_overlay_permission(ip)
+                return True, pesan2.strip() + " | Izin overlay: diaktifkan otomatis"
             pesan = pesan + " | pm: " + (pesan2 or "-")
         # 2) /sdcard/Download
         ok, pesan = cls.adb_push(ip, apk_path, remote_sd)
         if ok:
             ok2, pesan2 = cls._pm_install(ip, remote_sd)
             if ok2 and "Success" in (pesan2 or ""):
-                return True, pesan2.strip()
+                cls.ensure_overlay_permission(ip)
+                return True, pesan2.strip() + " | Izin overlay: diaktifkan otomatis"
             pesan = pesan + " | pm: " + (pesan2 or "-")
         # 3) streaming adb install
         try:
@@ -2276,7 +2374,8 @@ class ADBHelper:
                                capture_output=True, text=True, timeout=180,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0 and "Success" in (r.stdout or ""):
-                return True, r.stdout.strip()
+                cls.ensure_overlay_permission(ip)
+                return True, r.stdout.strip() + " | Izin overlay: diaktifkan otomatis"
             pesan = pesan + " | adb install: " + (r.stderr.strip() or r.stdout.strip())
         except subprocess.TimeoutExpired:
             pesan = pesan + " | adb install: Timeout"
@@ -2348,8 +2447,9 @@ class ADBHelper:
             _set(85, "Memasang APK… mohon tunggu (bisa 1–3 menit).")
             ok, out = cls._pm_install(ip, remote)
             if ok and "Success" in (out or ""):
+                cls.ensure_overlay_permission(ip)
                 _set(100, "✅ Selesai")
-                return True, out.strip()
+                return True, out.strip() + " | Izin overlay: diaktifkan otomatis"
             jalur_gagal.append(f"{remote}: {out or 'pm install ditolak'}")
 
         # Fallback streaming adb install
@@ -2360,8 +2460,9 @@ class ADBHelper:
                                capture_output=True, text=True, timeout=180,
                                **subprocess_no_window_kwargs())
             if r.returncode == 0 and "Success" in (r.stdout or ""):
+                cls.ensure_overlay_permission(ip)
                 _set(100, "✅ Selesai")
-                return True, r.stdout.strip()
+                return True, r.stdout.strip() + " | Izin overlay: diaktifkan otomatis"
             jalur_gagal.append("streaming: " + (r.stderr.strip() or r.stdout.strip()))
         except FileNotFoundError:
             return False, "adb.exe tidak ditemukan"
@@ -4868,6 +4969,11 @@ class LoginPage(ctk.CTkFrame):
                     _FC().set_user_doc(uname, {"email": email}, merge=True)
                 except Exception:
                     pass
+                # User baru terdaftar — update jumlah member di web
+                try:
+                    threading.Thread(target=self._publish_member_summary_bg, daemon=True).start()
+                except Exception:
+                    pass
                 AuditLogger.log(action="register_google", username=uname, status="success",
                                 details={"email": email, "sumber": "google"})
                 LicenseManager._set_trial_status_in_config(uname, date.today())
@@ -5294,9 +5400,34 @@ class DialogTambahTV(ctk.CTkToplevel):
         ctk.CTkLabel(ip_f, text="🌐  IP Address TV",
                      font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(8, 2))
         self.entry_ip = ctk.CTkEntry(ip_f, placeholder_text="192.168.1.xxx",
-                                      fg_color=C_BTN, text_color=C_ACCENT,
-                                      border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
+                                       fg_color=C_BTN, text_color=C_ACCENT,
+                                       border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
         self.entry_ip.pack(fill="x", padx=14, pady=(0, 10))
+        # Smart Plug (lampu LED per TV) — opsional
+        plug_f = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
+        plug_f.pack(fill="x", padx=28, pady=(8, 0))
+        ctk.CTkLabel(plug_f, text="🔌  Smart Plug lampu LED (opsional)",
+                     font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(8, 2))
+        row1 = ctk.CTkFrame(plug_f, fg_color="transparent")
+        row1.pack(fill="x", padx=14, pady=(0, 4))
+        self.entry_plug_id = ctk.CTkEntry(row1, placeholder_text="Device ID",
+                                           fg_color=C_BTN, text_color=C_TEXT,
+                                           border_color=C_BORDER, font=FONT_BODY, height=30)
+        self.entry_plug_id.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.entry_plug_ip = ctk.CTkEntry(row1, placeholder_text="IP Plug",
+                                           fg_color=C_BTN, text_color=C_TEXT,
+                                           border_color=C_BORDER, font=FONT_BODY, height=30, width=120)
+        self.entry_plug_ip.pack(side="left", padx=(0, 4))
+        self.entry_plug_key = ctk.CTkEntry(row1, placeholder_text="Local Key",
+                                            fg_color=C_BTN, text_color=C_TEXT,
+                                            border_color=C_BORDER, font=FONT_BODY, height=30)
+        self.entry_plug_key.pack(side="left", fill="x", expand=True)
+        row2 = ctk.CTkFrame(plug_f, fg_color="transparent")
+        row2.pack(fill="x", padx=14, pady=(0, 10))
+        self.entry_plug_ver = ctk.CTkEntry(row2, placeholder_text="Version (3.3)",
+                                            fg_color=C_BTN, text_color=C_TEXT,
+                                            border_color=C_BORDER, font=FONT_BODY, height=30, width=140)
+        self.entry_plug_ver.pack(side="left")
     def _build_status_bar(self):
         self.lbl_status = ctk.CTkLabel(self, text="", font=FONT_SMALL, text_color=C_MUTED)
         self.lbl_status.pack(pady=(8, 2))
@@ -5385,7 +5516,19 @@ class DialogTambahTV(ctk.CTkToplevel):
                 self._confirmed = True
                 nama = self.entry_nama.get().strip() or f"TV {self.nomor_tv}"
                 grup = self.grup_var.get() or NAMA_GRUP_DEFAULT
-                self.on_confirm(ip, nama, 0, grup)
+                plug = None
+                pid = self.entry_plug_id.get().strip()
+                pip = self.entry_plug_ip.get().strip()
+                pkey = self.entry_plug_key.get().strip()
+                pver = self.entry_plug_ver.get().strip()
+                if pid and pip and pkey:
+                    try:
+                        ver = float(pver) if pver else 3.3
+                    except Exception:
+                        ver = 3.3
+                    plug = {"device_id": pid, "ip": pip,
+                            "local_key": pkey, "version": ver}
+                self.on_confirm(ip, nama, 0, grup, plug)
                 self.destroy()
             else:
                 self._pair_error(conn.get("message", "Gagal connect"))
@@ -6878,7 +7021,7 @@ class KartuTV(tk.Canvas):
                  get_paket_data, get_makanan_data, get_minuman_data,
                  get_semua_kartu, nama_grup="Reguler", is_first=False,
                  get_daftar_grup=None, on_ganti_grup=None, on_hapus=None,
-                 role="admin", **kwargs):
+                 role="admin", plug=None, **kwargs):
         super().__init__(master, highlightthickness=0, bd=0,
                          bg="white", **kwargs)
         self.role         = role or "admin"
@@ -6886,6 +7029,7 @@ class KartuTV(tk.Canvas):
         self.ip           = ip
         self.port         = port
         self.label_tv     = label_tv
+        self.plug         = plug  # smart plug (Tuya) per TV: {device_id, ip, local_key, version}
         self.on_transaksi = on_transaksi
         self.nama_grup        = nama_grup
         self.get_paket_data   = get_paket_data
@@ -9093,6 +9237,7 @@ class KartuWarnet(tk.Canvas):
         self._client_id       = None
         self._pc_id           = None
         self._pc_ip           = None
+        self._pc_mac          = None
         self._ids = {}
         self._btn_states = {}
         self._card_w = 260
@@ -9184,11 +9329,11 @@ class KartuWarnet(tk.Canvas):
         bx = 4
         r1y = y
         btn_defs1 = [
-            ("buka", "\U0001F513 BUKA", C_GREEN, self._buka_unlock),
-            ("status", "ON", C_BTN, self._toggle_power),
+            ("buka", "\U0001F513 BUKA", C_BTN, C_GREEN, self._buka_unlock),
+            ("status", "ON", C_BTN, C_GREEN, self._toggle_power),
         ]
-        for i, (key, txt, col, cmd) in enumerate(btn_defs1):
-            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, col, col, ("Russo One", 10, "bold"), cmd)
+        for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs1):
+            self._draw_canvas_btn(key, bx + i*(bw+gap_b), r1y, bw, btn_h, txt, bg, fg, ("Russo One", 10, "bold"), cmd)
         y = r1y + btn_h + 4
 
         # Button Row 2
@@ -9199,7 +9344,7 @@ class KartuWarnet(tk.Canvas):
             ("shop", "SHOP", C_BTN, C_ACCENT, self._buka_tambah_pesanan, True),
             ("paket", "PAKET", C_BTN, C_ACCENT2, self._pilih_paket, False),
             ("ip", "IP", C_BTN, C_ACCENT2, self._buka_ganti_ip, False),
-            ("pindah", "Pindah PC", C_BTN, C_ACCENT2, self._klik_pindah, False),
+            ("pindah", "Pindah", C_BTN, C_ACCENT2, self._klik_pindah, False),
         ]
         for i, (key, txt, bg, fg, cmd, disabled) in enumerate(btn_defs2):
             self._draw_canvas_btn(key, bx + i*(bw2+gap_b), r2y, bw2, btn_h, txt, bg, fg, ("Russo One", 10, "bold"), cmd)
@@ -9207,21 +9352,20 @@ class KartuWarnet(tk.Canvas):
                 self._disable_btn(key)
         y = r2y + btn_h + 4
 
-        # Button Row 3 (Status pembayaran)
+        # Button Row 3 — daya PC (via perintah TCP ke service client)
         r3y = y
-        n_btn3, btn_cols3 = 2, 2
-        avail3 = W - 8 - (n_btn3 - 1) * gap_b
-        bw3 = avail3 // btn_cols3
+        bw3 = (W - 8 - 2 * gap_b) // 3
         btn_defs3 = [
-            ("bayar_lunas", "✅ SUDAH BAYAR", "black", "white", lambda: self._set_paid(True)),
-            ("bayar_belum", "⏳ BELUM BAYAR", "black", "white", lambda: self._set_paid(False)),
+            ("wol", "HIDUPKAN", C_BTN, C_GREEN, self._klik_wol),
+            ("shutdown", "MATIKAN", C_BTN, C_RED, lambda: self._klik_shutdown(False)),
+            ("restart", "RESTART", C_BTN, C_ORANGE, lambda: self._klik_shutdown(True)),
         ]
         for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
-            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 9, "bold"), cmd)
-            self._disable_btn(key)
-            self.tag_bind(f"btn_{key}", "<Enter>", lambda e, k=key: self._update_bayar_buttons())
-            self.tag_bind(f"btn_{key}", "<Leave>", lambda e, k=key: self._update_bayar_buttons())
-        y = r3y + btn_h + 6
+            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 10, "bold"), cmd)
+        y = r3y + btn_h + 4
+
+        # Status pembayaran toggle manual dihapus — konfirmasi bayar/tagihan
+        # tetap berjalan lewat dialog akhir sesi (DialogKonfirmasiBayar).
         self._update_paid_badge()
 
         total_h = y
@@ -9258,18 +9402,44 @@ class KartuWarnet(tk.Canvas):
     def _btn_hover(self, key, bg):
         if self._btn_states.get(key) == "disabled":
             return
-        if bg == C_RED:
+        if key == "buka":
+            self.itemconfig(self._ids['btn_buka'], fill=C_GREEN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_buka_txt'], fill="white")
+        elif key == "wol":
+            self.itemconfig(self._ids['btn_wol'], fill=C_GREEN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_wol_txt'], fill="white")
+        elif key == "shutdown":
+            self.itemconfig(self._ids['btn_shutdown'], fill="#FF6666", outline=C_RED)
+            self.itemconfig(self._ids['btn_shutdown_txt'], fill="white")
+        elif key == "restart":
+            self.itemconfig(self._ids['btn_restart'], fill="#FFB74D", outline=C_ORANGE)
+            self.itemconfig(self._ids['btn_restart_txt'], fill="black")
+        elif bg == C_RED:
             self.itemconfig(self._ids[f'btn_{key}'], fill="#FF6666")
         elif bg == C_GREEN or bg == C_YELLOW:
             self.itemconfig(self._ids[f'btn_{key}'], fill="#66BB6A")
         elif bg == C_ACCENT:
             self.itemconfig(self._ids[f'btn_{key}'], fill="#66FFE0")
         elif bg == C_BTN:
-            self.itemconfig(self._ids[f'btn_{key}'], fill=C_ACCENT2)
+            # Terang tipis — teks (fg) tetap terbaca, tidak sama dengan warna isi
+            self.itemconfig(self._ids[f'btn_{key}'], fill="#2A2A52")
 
     def _btn_leave(self, key, bg):
         if self._btn_states.get(key) == "disabled":
             self._disable_btn(key)
+            return
+        if key == "buka":
+            self.itemconfig(self._ids['btn_buka'], fill=C_BTN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_buka_txt'], fill=C_GREEN)
+        elif key == "wol":
+            self.itemconfig(self._ids['btn_wol'], fill=C_BTN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_wol_txt'], fill=C_GREEN)
+        elif key == "shutdown":
+            self.itemconfig(self._ids['btn_shutdown'], fill=C_BTN, outline=C_RED)
+            self.itemconfig(self._ids['btn_shutdown_txt'], fill=C_RED)
+        elif key == "restart":
+            self.itemconfig(self._ids['btn_restart'], fill=C_BTN, outline=C_ORANGE)
+            self.itemconfig(self._ids['btn_restart_txt'], fill=C_ORANGE)
         else:
             self.itemconfig(self._ids[f'btn_{key}'], fill=bg)
 
@@ -9354,22 +9524,6 @@ class KartuWarnet(tk.Canvas):
         lunas = round(total * lunas_sub / subtotal)
         return lunas, max(0, total - lunas)
 
-    def _update_bayar_buttons(self):
-        """Warna tombol SUDAH/BELUM BAYAR sesuai state aktif (lunas = hijau)."""
-        if 'btn_bayar_lunas' not in self._ids:
-            return
-        lunas, tagihan = self._split_payment()
-        if tagihan <= 0:
-            self.itemconfig(self._ids['btn_bayar_lunas'], fill=C_GREEN, outline=C_GREEN)
-            self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill="white")
-            self.itemconfig(self._ids['btn_bayar_belum'], fill="black", outline=C_BORDER)
-            self.itemconfig(self._ids['btn_bayar_belum_txt'], fill=C_MUTED)
-        else:
-            self.itemconfig(self._ids['btn_bayar_belum'], fill="#FFCC00", outline="#FFCC00")
-            self.itemconfig(self._ids['btn_bayar_belum_txt'], fill="black")
-            self.itemconfig(self._ids['btn_bayar_lunas'], fill="black", outline=C_BORDER)
-            self.itemconfig(self._ids['btn_bayar_lunas_txt'], fill=C_MUTED)
-
     def _bind_last_transaction(self):
         """Simpan referensi index/cloud_id baris riwayat milik sesi ini."""
         try:
@@ -9403,7 +9557,6 @@ class KartuWarnet(tk.Canvas):
         if self.pesanan_aktif:
             self.lunas_pesanan = {nm: paid for nm in self.pesanan_aktif}
         self._update_paid_badge()
-        self._update_bayar_buttons()
         if idx >= 0 and hasattr(app, '_set_transaksi_paid_idx'):
             app._set_transaksi_paid_idx(idx, paid)
         elif hasattr(app, '_set_transaksi_paid'):
@@ -9474,7 +9627,66 @@ class KartuWarnet(tk.Canvas):
                       command=terapkan).pack(pady=(0, 10))
 
     def _buka_ganti_ip(self):
-        messagebox.showinfo("IP Client", f"IP: {self._pc_ip or '\u2014'}\nPC ID: {self._pc_id or '\u2014'}\nClient: {self._client_id or '\u2014'}", parent=self)
+        app = self.winfo_toplevel()
+
+        def simpan(entry_mac, dlg):
+            mac_baru = entry_mac.get().strip()
+            if mac_baru and len(mac_baru.replace(":", "").replace("-", "")) != 12:
+                messagebox.showwarning(
+                    "Format MAC", "Format MAC harus 12 digit hex\ncontoh: AA:BB:CC:DD:EE:FF",
+                    parent=self.winfo_toplevel())
+                return
+            self._pc_mac = mac_baru or None
+            if self._pc_mac and hasattr(app, 'warnet_server'):
+                try:
+                    app.warnet_server._save_client_mac(
+                        getattr(self, '_client_id', ''),
+                        getattr(self, '_pc_id', ''),
+                        self._pc_mac)
+                except Exception:
+                    pass
+            dlg.destroy()
+            messagebox.showinfo(
+                "IP Client",
+                f"IP: {self._pc_ip or '\u2014'}\n"
+                f"PC ID: {self._pc_id or '\u2014'}\n"
+                f"Client: {self._client_id or '\u2014'}\n"
+                f"MAC: {self._pc_mac or '\u2014'}",
+                parent=self.winfo_toplevel())
+
+        dlg = ctk.CTkToplevel(app)
+        dlg.title("Info / Set MAC PC")
+        dlg.geometry("420x240")
+        dlg.configure(fg_color=C_BG)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text=f"Kursi: {self.label_kursi}",
+                     font=FONT_SUB, text_color=C_ACCENT).pack(pady=(14, 2))
+        ctk.CTkLabel(dlg, text=f"IP: {self._pc_ip or '\u2014'}  |  PC ID: {self._pc_id or '\u2014'}",
+                     font=FONT_BODY, text_color=C_MUTED).pack(pady=(0, 4))
+        ctk.CTkLabel(dlg, text=f"MAC: {self._pc_mac or '(belum terekam — otomatis saat client terhubung)'}",
+                     font=FONT_BODY, text_color=C_GREEN if self._pc_mac else C_YELLOW).pack(pady=(0, 10))
+
+        ctk.CTkLabel(dlg, text="MAC address (untuk tombol HIDUPKAN):",
+                     font=FONT_SMALL, text_color=C_MUTED).pack()
+        entry_mac = ctk.CTkEntry(dlg, placeholder_text="AA:BB:CC:DD:EE:FF",
+                                 fg_color=C_BTN, text_color=C_TEXT,
+                                 border_color=C_BORDER, font=("Consolas", 13),
+                                 width=280, justify="center")
+        entry_mac.pack(pady=(4, 12))
+        if self._pc_mac:
+            entry_mac.insert(0, self._pc_mac)
+
+        ctk.CTkButton(dlg, text="Simpan", width=140, height=36,
+                      fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                      font=FONT_SMALL, text_color="white",
+                      command=lambda: simpan(entry_mac, dlg)).pack(pady=(0, 4))
+        ctk.CTkButton(dlg, text="Tutup", width=140, height=32,
+                      fg_color="transparent", hover_color=C_BTN,
+                      border_width=1, border_color=C_BORDER,
+                      font=FONT_SMALL, text_color=C_MUTED,
+                      command=dlg.destroy).pack(pady=(4, 10))
 
     def _confirm_hapus(self):
         if messagebox.askyesno("Hapus Kursi", f"Hapus {self.label_kursi} dari dashboard warnet?"):
@@ -9503,8 +9715,60 @@ class KartuWarnet(tk.Canvas):
         self.pc_locked = False
         self._pc_lock_reason = ""
         self._pc_lock_message = ""
+        # Pastikan kartu dianggap ON setelah dibuka (agar GET_STATUS tidak
+        # mengirim is_playing=False / time_left=0 walau sesi masih aktif),
+        # sekaligus sinkronkan tampilan tombol ON/OFF.
+        if not self.is_on:
+            self.is_on = True
+            try:
+                self.itemconfig(self._ids['btn_status'], fill=C_GREEN, outline=C_GREEN)
+                self.itemconfig(self._ids['btn_status_txt'], text="ON", fill=C_GREEN)
+            except Exception:
+                pass
         self._send_lock_command(app, "UNLOCK", "manual_on",
                                 f"PC {self.label_kursi} dibuka kunci oleh admin.")
+
+    def _klik_wol(self):
+        app = self.winfo_toplevel()
+        mac = getattr(self, '_pc_mac', None)
+        if not mac:
+            messagebox.showinfo(
+                "MAC Belum Diketahui",
+                f"MAC PC {self.label_kursi} belum terekam.\n\n"
+                "MAC otomatis terekam saat client (versi terbaru) terhubung ke server.\n"
+                "Setelah PC nyala & terhubung sekali, tombol HIDUPKAN siap dipakai.",
+                parent=self.winfo_toplevel())
+            return
+        if not messagebox.askyesno(
+                "Wake-on-LAN",
+                f"Nyalakan PC {self.label_kursi} lewat LAN?\n\n"
+                f"MAC : {mac}\n"
+                f"IP  : {self._pc_ip or '—'}\n\n"
+                "Syarat: BIOS 'Wake on LAN' aktif, ErP OFF,\n"
+                "kabel LAN tersambung & PC dialiri listrik.",
+                parent=self.winfo_toplevel()):
+            return
+        server = app.warnet_server
+        ok, pesan = server.kirim_wol(mac, self._pc_ip)
+        messagebox.showinfo(
+            "HIDUPKAN PC",
+            pesan if ok else f"Gagal: {pesan}",
+            parent=self.winfo_toplevel())
+
+    def _klik_shutdown(self, restart=False):
+        app = self.winfo_toplevel()
+        aksi = "RESTART" if restart else "SHUTDOWN"
+        nama = "Restart" if restart else "Matikan"
+        if not messagebox.askyesno(
+                "Konfirmasi Daya",
+                f"{nama} PC {self.label_kursi} sekarang?\n\n"
+                "PC akan mati/nyala ulang dalam ±10 detik.",
+                parent=self.winfo_toplevel()):
+            return
+        self._send_lock_command(
+            app, aksi,
+            "manual_restart" if restart else "manual_off",
+            f"PC {self.label_kursi} di-restart admin." if restart else f"PC {self.label_kursi} dimatikan admin.")
 
     def _send_lock_command(self, app, cmd, reason, message):
         if not (hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None)):
@@ -9577,7 +9841,6 @@ class KartuWarnet(tk.Canvas):
             total_semua = self._total_setelah_diskon(self.paket_harga_tetap + total_baru)
             self.itemconfig(self._ids['lbl_paket'], text=f"{self.paket_aktif} | {fmt_rp(total_semua)}")
         self._update_paid_badge()
-        self._update_bayar_buttons()
 
         if not self.is_bebas and (getattr(self, '_last_transaction_item', None) or getattr(self, '_last_riwayat_idx', None) is not None):
             app = self.winfo_toplevel()
@@ -9767,14 +10030,9 @@ class KartuWarnet(tk.Canvas):
             self.paid = True
             self.lunas_paket = [True] * (len(self.daftar_paket_sesi or []) or 1)
             self.lunas_pesanan = {nm: True for nm in self.pesanan_aktif}
-            self._disable_btn("bayar_lunas")
-            self._disable_btn("bayar_belum")
         else:
             if not previous_session:
                 self.paid = paid   # status bayar sesuai pilihan kasir di popup
-            self._enable_btn("bayar_lunas", "black", "white")
-            self._enable_btn("bayar_belum", "black", "white")
-            self._update_bayar_buttons()
         self._update_paid_badge()
 
         app = self.winfo_toplevel()
@@ -10134,8 +10392,6 @@ class KartuWarnet(tk.Canvas):
         self.itemconfig(self._ids['lbl_estimasi'], text="")
         self._disable_btn("selesai")
         self._disable_btn("shop")
-        self._disable_btn("bayar_lunas")
-        self._disable_btn("bayar_belum")
         self.itemconfig(self._ids['btn_shop_txt'], text="SHOP")
         self._update_paid_badge()
         app = self.winfo_toplevel()
@@ -10220,13 +10476,6 @@ class KartuWarnet(tk.Canvas):
         target._enable_btn("selesai", C_BTN, C_RED)
         target._enable_btn("shop", C_BTN, C_ACCENT2)
         target.itemconfig(target._ids['btn_shop_txt'], text="SHOP")
-        if target.is_bebas:
-            target._disable_btn("bayar_lunas")
-            target._disable_btn("bayar_belum")
-        else:
-            target._enable_btn("bayar_lunas", "black", "white")
-            target._enable_btn("bayar_belum", "black", "white")
-            target._update_bayar_buttons()
         target._update_paid_badge()
 
         if target._timer_job:
@@ -12493,6 +12742,8 @@ class AutoRentApp(ctk.CTk):
 
             # Sync ke Firestore
             threading.Thread(target=self._sync_aktivasi_ke_cloud, args=(kode,), daemon=True).start()
+            # Update jumlah member di web
+            threading.Thread(target=self._publish_member_summary_bg, daemon=True).start()
         else:
             self.lbl_akt_status.configure(text=f"✖  {pesan}", text_color=C_RED)
 
@@ -12552,6 +12803,11 @@ class AutoRentApp(ctk.CTk):
                 })
             except Exception as e:
                 _LOGGER.warning("Cloud revoke error: %s", e)
+            # Update jumlah member di web (revoked — status lisensi tetap dihitung)
+            try:
+                self._publish_member_summary_bg()
+            except Exception:
+                pass
             # 3. Clear local license file (set revoked=True)
             lic_data = LicenseManager.load()
             lic_data["aktif"] = False
@@ -13202,6 +13458,12 @@ class AutoRentApp(ctk.CTk):
         # Start periodic background checker with sidebar notification
         try:
             threading.Thread(target=self._check_for_updates_background, daemon=True).start()
+        except Exception:
+            pass
+
+        # Publikasikan jumlah member ke web (angka "Rental Telah Bergabung" di beranda)
+        try:
+            threading.Thread(target=self._publish_member_summary_bg, daemon=True).start()
         except Exception:
             pass
 
@@ -14985,9 +15247,9 @@ class AutoRentApp(ctk.CTk):
         period_var.trace_add("write", refresh_charts)
         refresh_charts()
 
-    def _on_tv_confirmed(self, ip, nama, port, nama_grup):
+    def _on_tv_confirmed(self, ip, nama, port, nama_grup, plug=None):
         self._unlock_tambah()
-        self._tambah_tv(ip, nama, port, nama_grup)
+        self._tambah_tv(ip, nama, port, nama_grup, plug=plug)
 
     def _simpan_daftar_tv(self):
         """Simpan daftar kartu TV (ip/nama/port/grup) ke config (key daftar_tv)
@@ -15000,6 +15262,7 @@ class AutoRentApp(ctk.CTk):
                     "nama": getattr(kartu, "label_tv", ""),
                     "port": getattr(kartu, "port", 0),
                     "nama_grup": getattr(kartu, "nama_grup", NAMA_GRUP_DEFAULT),
+                    "plug": getattr(kartu, "plug", None),
                 })
             try:
                 ConfigManager.update(lambda cfg: cfg.__setitem__("daftar_tv", daftar) or cfg)
@@ -15074,7 +15337,8 @@ class AutoRentApp(ctk.CTk):
                     if any(k.ip == ip and k.label_tv == nama
                            for k in getattr(self, "_semua_kartu_tv", [])):
                         continue
-                    self._tambah_tv(ip, nama, port, nama_grup, restore=True)
+                    self._tambah_tv(ip, nama, port, nama_grup,
+                                   plug=item.get("plug"), restore=True)
                 except Exception as e:
                     print(f"[TV] Gagal memuat kartu {item}: {e}", flush=True)
         except Exception as e:
@@ -15243,7 +15507,7 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             print(f"[WARN] Gagal muat daftar_warnet: {e}", flush=True)
 
-    def _tambah_tv(self, ip, nama, port, nama_grup=None, restore=False):
+    def _tambah_tv(self, ip, nama, port, nama_grup=None, plug=None, restore=False):
         if (self.current_role or "kasir") != "admin" and not restore:
             messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah TV.")
             return
@@ -15272,7 +15536,8 @@ class AutoRentApp(ctk.CTk):
                         on_hapus=self._hapus_tv,
                         nama_grup=nama_grup,
                         is_first=(self.jumlah_tv == 1),
-                        role=self.current_role)
+                        role=self.current_role,
+                        plug=plug)
         wid = canvas.create_window(0, 0, window=kartu, anchor="nw", tags=("_dash_card",))
         self._dash_card_windows.append((wid, kartu))
         self._semua_kartu_tv.append(kartu)
@@ -15715,6 +15980,7 @@ class AutoRentApp(ctk.CTk):
             kartu._client_id = pc_info.get("client_id")
             kartu._pc_id = pc_info.get("pc_id")
             kartu._pc_ip = pc_info.get("ip")
+            kartu._pc_mac = pc_info.get("mac")
             kartu._update_pc_status()
         self._semua_kartu_warnet.append(kartu)
         try:
@@ -15840,7 +16106,8 @@ class AutoRentApp(ctk.CTk):
 
     def _buka_upload_logo(self):
         """Upload logo lockscreen client → disimpan ke folder paket client.
-        Logo ikut terkirim ke PC client saat tombol 🚀 Deploy Client dijalankan."""
+        Logo ikut terkirim ke PC client saat tombol 🚀 Deploy Client / INSTALL_CLIENT.bat;
+        untuk PC yang SUDAH terhubung, logo di-push langsung via koneksi TCP (SET_LOGO)."""
         path = filedialog.askopenfilename(
             parent=self, title="Pilih Logo Lockscreen",
             filetypes=[("Gambar", "*.png *.jpg *.jpeg *.bmp"), ("Semua file", "*.*")])
@@ -15874,9 +16141,40 @@ class AutoRentApp(ctk.CTk):
             messagebox.showerror("Gagal Simpan",
                                  f"Tidak bisa menyimpan logo:\n{e}", parent=self)
             return
-        messagebox.showinfo("✅ Logo Tersimpan",
-                            f"Logo disimpan ke:\n{dest}\n\nLogo akan ikut terkirim "
-                            "ke PC client saat tombol 🚀 Deploy Client dijalankan.", parent=self)
+        # ── Push langsung ke PC client yang sudah terhubung (via TCP, tanpa SSH) ──
+        push_ok = False
+        try:
+            media = getattr(self, 'tv_media_server', None)
+            if media is None or not getattr(media, 'running', False):
+                raise RuntimeError("Server media (port 8082) tidak berjalan.")
+            media_rel = os.path.join(media.media_dir, "lockscreen_logo.png")
+            with Image.open(path) as im:
+                im.load()
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGBA")
+                max_w, max_h = 1920, 1080
+                if im.width > max_w or im.height > max_h:
+                    im.thumbnail((max_w, max_h), Image.LANCZOS)
+                im.save(media_rel, "PNG")
+            versi = int(os.path.getmtime(media_rel))
+            base = f"http://{self._get_lan_ip()}:{media.port}/media/"
+            url = f"{base}lockscreen_logo.png?v={versi}"
+            server = getattr(self, 'warnet_server', None)
+            if server is None:
+                raise RuntimeError("WarnetSocketServer tidak aktif.")
+            n = server.broadcast_command("SET_LOGO", url=url, filename="lockscreen_logo.png")
+            print(f"[WARNET LOGO] broadcast SET_LOGO ke {n} PC")
+            push_ok = n > 0
+        except Exception as e:
+            print(f"[WARNET LOGO] push otomatis gagal: {e}")
+        msg = (f"Logo disimpan ke:\n{dest}\n\n"
+               "Logo akan ikut terkirim ke PC client saat tombol 🚀 Deploy Client "
+               "dijalankan, atau saat INSTALL_CLIENT.bat dijalankan di PC client."
+               if not push_ok else
+               f"Logo disimpan ke:\n{dest}\n\n"
+               "Logo sudah di-push langsung ke semua PC client yang terhubung "
+               "(terapkan ≤3 detik).")
+        messagebox.showinfo("✅ Logo Tersimpan", msg, parent=self)
  
     def _setup_harga(self):
         f = self.frames["harga"]
@@ -18159,7 +18457,7 @@ class AutoRentApp(ctk.CTk):
         hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="🔗  PANDUAN KONEKSI TV (ATPv2)",
+        ctk.CTkLabel(hdr, text="🔗  PANDUAN KONEKSI TV",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
 
         scroll = ctk.CTkScrollableFrame(f, fg_color=C_BG)
@@ -18843,6 +19141,14 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             _LOGGER.error("Print to file error: %s", e)
 
+    def _publish_member_summary_bg(self):
+        """Publikasikan jumlah member ke web_members/summary (thread-safe)."""
+        try:
+            from firestore_sync import FirestoreClient as _FS
+            _FS().publish_member_summary()
+        except Exception as e:
+            _LOGGER.debug("publish_member_summary error: %s", e)
+
     def _start_update_checker(self, interval_hours: int = 6):
         """Background loop: cek update via manifest URL atau Git setiap interval_hours."""
         manifest = ConfigManager.get('update_manifest_url') or ""
@@ -18895,6 +19201,11 @@ class AutoRentApp(ctk.CTk):
                         pass
                 # Update sidebar notification dot
                 self.after(0, lambda hu=has_update: self._set_update_notification(hu))
+                # Refresh jumlah member di web (usaha ringan, jalur sama 6 jam)
+                try:
+                    self._publish_member_summary_bg()
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
