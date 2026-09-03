@@ -320,12 +320,15 @@ class Sesi:
         if self._hub_ok():
             total = self.total_setelah_diskon()
             lunas_now, tagihan_now = self.split_lunas_tagihan()
+            nama_member = self.member_nama if getattr(self, "mode_member", False) else None
             if self.is_bebas:
                 self.store.hub.send_start_timer(self.label, -1, total,
-                                                lunas_total=lunas_now, tagihan_total=tagihan_now)
+                                                lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                                nama_member=nama_member)
             else:
                 self.store.hub.send_start_timer(self.label, self.sisa_waktu, total,
-                                                lunas_total=lunas_now, tagihan_total=tagihan_now)
+                                                lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                                nama_member=nama_member)
         self._warnet_queue("UNLOCK", "sesi_baru", f"Sesi baru dimulai untuk {self.label}")
 
         self.store._stok_terapkan(delta)
@@ -556,13 +559,27 @@ class Sesi:
         if self._hub_ok():
             try:
                 self.store.hub.send_stop_timer(self.label)
-                self.store.hub.send_unlock_screen(self.label)
+                # TV dikunci saat kasir konfirmasi pembayaran selesai
+                # Bug Fix 2: Gunakan _lock_detail_tv untuk singkron status bayar/tagihan dengan aplikasi
+                self.store.hub.send_lock_screen(self.label, "SELESAI BAYAR", _lock_detail_tv(snap))
             except Exception:
                 pass
+        # ─ Bug Fix 1: TV sleep setelah klik selesai (delay 1 detik agar lock screen terlihat dulu) ─
+        if self.ip:
+            try:
+                port = int(getattr(self, "port", 0) or 0)
+                alasan = f"Sesi {self.label} selesai - dibayar admin"
+                threading.Thread(
+                    target=_tv_sleep_runner,
+                    args=(self.ip, port, self.label, self.timer_key()),
+                    kwargs={"alasan": alasan, "delay": 1},
+                    daemon=True, name=f"SleepOnSelesai-{self.label}").start()
+            except Exception as e:
+                applog(f"[ERROR] TV sleep fail {self.label}: {e}")
         self._warnet_queue("LOCK", "selesai_manual",
                            f"Sesi {self.label} dihentikan admin.")
+        # TIDAK auto cetak struk - cetak hanya ketika kasir klik print manual
         self._member_potong_akhir()
-        self._auto_print_struk()
         self.reset()
         self.store.notify("selesai", snap)
         applog(f"[SESI SELESAI] {self.label} | total={snap.get('total')} | "
@@ -639,6 +656,7 @@ class Sesi:
             "paid": self.paid,
             "lunas_total": int(round(lunas_res)),
             "tagihan_total": int(round(tagihan_res)),
+            "all_paid": bool(lunas_res > 0 and tagihan_res == 0),  # Flag untuk disable tombol TAGIHAN jika semua LUNAS
             "paused": self._timer_paused,
             "total": int(round(total)),
             "mode_member": bool(getattr(self, "mode_member", False)),
@@ -1225,12 +1243,14 @@ class Store:
                         try:
                             total = s.snapshot().get("total", 0)
                             lunas_now, tagihan_now = s.split_lunas_tagihan()
+                            nama_member = s.member_nama if getattr(s, "mode_member", False) else None
                             if s.is_bebas:
                                 hub.send_update_total(s.label, total,
                                                       lunas_total=lunas_now, tagihan_total=tagihan_now)
                             else:
                                 hub.send_sync_timer(s.label, s.sisa_waktu, total,
-                                                    lunas_total=lunas_now, tagihan_total=tagihan_now)
+                                                    lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                                    nama_member=nama_member)
                         except Exception:
                             pass
             if self._tick_n % 30 == 0:
@@ -1898,7 +1918,8 @@ class Store:
             lunas_now, tagihan_now = sesi.split_lunas_tagihan()
             try:
                 sesi.store.hub.send_start_timer(sesi.label, sesi.sisa_waktu, 0,
-                                                lunas_total=lunas_now, tagihan_total=tagihan_now)
+                                                lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                                nama_member=sesi.member_nama)
             except Exception:
                 pass
         sesi._warnet_queue("UNLOCK", "sesi_member",
@@ -2865,6 +2886,28 @@ class _HubAppAdapter:
     def _semua_kartu_tv(self):
         return [_HubTVAdapter(s) for s in STORE.sesi_tv.values()]
 
+    # ─ Bug Fix: jembatan overlay_setting (config web) ke TvWsHub._overlay_cfg() ─
+    # TvWsHub baca self.app.tv_overlay_mode / tv_overlay_last_minutes; tanpa ini
+    # overlay_setting yang disimpan lewat /api/settings/overlay TIDAK PERNAH
+    # dibaca (selalu fallback default). Value web ("hide"/"remaining") di-mapping
+    # ke istilah TvWsHub/desktop ("hidden"/"last_minutes").
+    @property
+    def tv_overlay_mode(self):
+        try:
+            cfg = M.ConfigManager.get("overlay_setting", {}) or {}
+            mode = str(cfg.get("mode", "always"))
+        except Exception:
+            mode = "always"
+        return {"hide": "hidden", "remaining": "last_minutes"}.get(mode, mode)
+
+    @property
+    def tv_overlay_last_minutes(self):
+        try:
+            cfg = M.ConfigManager.get("overlay_setting", {}) or {}
+            return int(cfg.get("remaining_minutes", 5))
+        except Exception:
+            return 5
+
 
 def _get_nama_rental():
     try:
@@ -3230,6 +3273,9 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2):
     """Port desktop _tv_sleep_now (main.py:7425): matikan TV berlapis lalu verifikasi.
     1) atpv2 POWER retry 3x (selang 2 dtk)  2) atpv2 SLEEP
     3) fallback ADB keyevent yang tersedia    4) verifikasi layar ±9 dtk.
+    Bug Fix: jika verifikasi pertama masih nyala, retry 1x lagi dengan
+    keyevent SLEEP eksplisit sebelum menyerah (TV kadang butuh 2 percobaan
+    karena wakelock media/notifikasi async androidtvremote2 telat update).
     Push event tv_sleep + log aplikasi lengkap."""
     if alasan is None:
         alasan = "TV dimatikan"
@@ -3238,42 +3284,47 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2):
             time.sleep(delay)
     except Exception:
         pass
-    hasil, pesan = False, ""
     tgt = (port if port else None)
-    # 1) atpv2 POWER retry 3x (sama seperti desktop _tv_sleep_now)
-    for _ in range(3):
-        try:
-            ok, out, _ = M.ADBHelper.power_toggle(ip, port=tgt or 0)
-            if ok:
-                hasil, pesan = True, "atpv2 POWER terkirim"
-                break
-            pesan = str(out)[:120]
-        except Exception as e:
-            pesan = str(e)
-        time.sleep(2)
-    # 2) atpv2 SLEEP
-    if not hasil:
-        try:
-            rem = M.ADBHelper._get_remote(ip)
-            res = rem.sleep_blocking()
-            if res.get("status") == "ok":
-                hasil, pesan = True, "atpv2 SLEEP terkirim"
-        except Exception as e:
-            pesan = str(e)[:120]
-    # 3) fallback ADB keyevent
-    if not hasil:
-        for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+
+    def _kirim_sleep():
+        """Satu putaran usaha matikan TV. Return (hasil, pesan)."""
+        hasil, pesan = False, ""
+        # 1) atpv2 POWER retry 3x (sama seperti desktop _tv_sleep_now)
+        for _ in range(3):
             try:
-                ok_adb, out_adb = M.ADBHelper.adb_shell(
-                    ip, f"input keyevent {kunci}", timeout=8,
-                    port=(tgt or 5555))
-                if ok_adb:
-                    hasil, pesan = True, f"fallback ADB keyevent {kunci}: {out_adb[:80]}"
+                ok, out, _ = M.ADBHelper.power_toggle(ip, port=tgt or 0)
+                if ok:
+                    hasil, pesan = True, "atpv2 POWER terkirim"
                     break
+                pesan = str(out)[:120]
+            except Exception as e:
+                pesan = str(e)
+            time.sleep(2)
+        # 2) atpv2 SLEEP
+        if not hasil:
+            try:
+                rem = M.ADBHelper._get_remote(ip)
+                res = rem.sleep_blocking()
+                if res.get("status") == "ok":
+                    hasil, pesan = True, "atpv2 SLEEP terkirim"
             except Exception as e:
                 pesan = str(e)[:120]
-    # 4) verifikasi status layar (sama seperti desktop)
-    if hasil:
+        # 3) fallback ADB keyevent
+        if not hasil:
+            for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+                try:
+                    ok_adb, out_adb = M.ADBHelper.adb_shell(
+                        ip, f"input keyevent {kunci}", timeout=8,
+                        port=(tgt or 5555))
+                    if ok_adb:
+                        hasil, pesan = True, f"fallback ADB keyevent {kunci}: {out_adb[:80]}"
+                        break
+                except Exception as e:
+                    pesan = str(e)[:120]
+        return hasil, pesan
+
+    def _cek_layar():
+        """Verifikasi status layar (sama seperti desktop), ±9 dtk."""
         state = None
         for _ in range(3):
             time.sleep(3)
@@ -3285,11 +3336,33 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2):
                 break
             if state is None:
                 break
+        return state
+
+    hasil, pesan = _kirim_sleep()
+    state = None
+    if hasil:
+        state = _cek_layar()
         if state is False:
             pesan = pesan + " — terverifikasi MATI"
         elif state is True:
-            hasil, pesan = False, \
-                "perintah terkirim tapi layar masih nyala (verifikasi gagal)"
+            # ─ Bug Fix: retry sekali lagi (paksa keyevent SLEEP eksplisit)
+            # sebelum menyerah — TV kadang butuh 2 percobaan (wakelock media
+            # / notifikasi androidtvremote2 telat update saat percobaan 1).
+            try:
+                M.ADBHelper.adb_shell(ip, "input keyevent 223", timeout=8,
+                                       port=(tgt or 5555))
+            except Exception:
+                pass
+            time.sleep(2)
+            hasil2, pesan2 = _kirim_sleep()
+            state2 = _cek_layar() if hasil2 else None
+            if state2 is False:
+                hasil, pesan = True, pesan2 + " (percobaan ke-2) — terverifikasi MATI"
+            elif state2 is None:
+                hasil, pesan = True, pesan2 + " (percobaan ke-2) — tanpa verifikasi (tak terdeteksi)"
+            else:
+                hasil, pesan = False, ("perintah terkirim 2x tapi layar masih nyala "
+                                       "(kemungkinan Stay Awake/wakelock media aktif di TV)")
         else:
             pesan = pesan + " — tanpa verifikasi (tak terdeteksi)"
     try:
@@ -3458,7 +3531,8 @@ def api_sesi(kind, key):
                     lunas_now, tagihan_now = s.split_lunas_tagihan()
                     STORE.hub.send_start_timer(s.label, s.sisa_waktu,
                                                s.total_setelah_diskon(),
-                                               lunas_total=lunas_now, tagihan_total=tagihan_now)
+                                               lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                               nama_member=s.member_nama)
                 except Exception:
                     pass
             s.store.notify("paket", s.snapshot())
@@ -3468,11 +3542,15 @@ def api_sesi(kind, key):
             return jsonify({"ok": True, "sesi": s.snapshot()})
         if act == "shop":
             try:
-                s.tambah_pesanan(data.get("pesanan", {}) or {})
+                # Bug Fix 5: pass paid langsung ke tambah_pesanan (per-item),
+                # JANGAN panggil set_paid() terpisah — itu override SEMUA item
+                # (termasuk paket yang sudah LUNAS ikut ter-flip jadi TAGIHAN).
+                s.tambah_pesanan(data.get("pesanan", {}) or {}, paid=data.get("paid"))
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
             if data.get("paid") is not None:
-                s.set_paid(bool(data.get("paid")))
+                s.paid = s._recalc_paid()
+                s._sync_paid_state()
             applog(f"[PESANAN TAMBAH] {s.label} | "
                    f"items={list((data.get('pesanan') or {}).items())} | "
                    f"total={s.snapshot().get('total')} | paid={s.paid} | kasir={STORE.user}")
@@ -3555,7 +3633,8 @@ def api_sesi(kind, key):
                         lunas_now, tagihan_now = target.split_lunas_tagihan()
                         STORE.hub.send_start_timer(target.label, target.sisa_waktu,
                                                    target.total_setelah_diskon(),
-                                                   lunas_total=lunas_now, tagihan_total=tagihan_now)
+                                                   lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                                   nama_member=target.member_nama)
                     except Exception:
                         pass
             s.reset()
@@ -3865,6 +3944,9 @@ def api_settings_get():
             cc.pop("password_hash", None)
             cc.pop("password_enc", None)
             clients.append(cc)
+    overlay_setting = _safe(cfg.get("overlay_setting"), {})
+    if not overlay_setting or not isinstance(overlay_setting, dict):
+        overlay_setting = {"mode": "always", "remaining_minutes": 5}
     return jsonify({
         "menu_makan": _safe(cfg.get("menu_makanan"), {}),
         "menu_minum": _safe(cfg.get("menu_minuman"), {}),
@@ -3876,6 +3958,7 @@ def api_settings_get():
         "daftar_warnet": _safe(cfg.get("daftar_warnet"), []),
         "warnet_clients": clients,
         "printer_settings": _safe(cfg.get("printer_settings"), {}),
+        "overlay_setting": overlay_setting,
     })
 
 
@@ -4317,6 +4400,32 @@ def api_settings_printer():
     cfg["printer_settings"] = {"type": ptype, "address": str(data.get("address", "")).strip()}
     M.ConfigManager.save(cfg)
     return jsonify({"ok": True})
+
+
+@app.route("/api/settings/overlay", methods=["POST"])
+@require_admin
+@require_auth
+def api_settings_overlay():
+    """Simpan pengaturan overlay popup waktu (mode + threshold menit).
+    Global untuk semua TV. Push ke Firestore call_meta agar TV sync real-time."""
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "always")).strip()
+    if mode not in ("always", "hide", "remaining"):
+        return jsonify({"error": "mode harus always/hide/remaining"}), 400
+    try:
+        remaining_minutes = max(1, min(120, int(data.get("remaining_minutes", 5))))
+    except (ValueError, TypeError):
+        remaining_minutes = 5
+    cfg = M.ConfigManager.load()
+    setting = {
+        "mode": mode,
+        "remaining_minutes": remaining_minutes,
+        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    cfg["overlay_setting"] = setting
+    M.ConfigManager.save(cfg)
+    _push_call_meta()
+    return jsonify({"ok": True, "setting": setting})
 
 
 @app.route("/api/printer/scan", methods=["POST"])
@@ -5174,18 +5283,34 @@ def _lock_detail_tv(s):
     sewa_lunas = all(
         (s.lunas_paket[i] if i < len(s.lunas_paket) else True)
         for i in range(len(s.daftar_paket_sesi or []) or 1))
+    # ─ Bug Fix 3: Tampilkan Rp berjalan untuk Main Bebas di popup TV ─
+    sewa_harga = s.paket_harga_tetap
+    sewa_label = " + ".join(s.daftar_paket_sesi) or (s.paket_aktif or "-")
+    if getattr(s, "is_bebas", False) and getattr(s, "waktu_mulai", None):
+        try:
+            tarif = M.hitung_tarif_per_menit(s.paket_data())
+            menit_total = s.menit_dipakai_awal + int((datetime.datetime.now() - s.waktu_mulai).total_seconds() / 60)
+            biaya_waktu = tarif * menit_total
+            sewa_harga = s.total_setelah_diskon(biaya_waktu + s.biaya_pesanan)
+            sewa_label = f"Main Bebas ({menit_total} menit)"
+        except Exception:
+            pass  # Gunakan nilai default jika error
+    # ─ Bug Fix 4: Status LUNAS/TAGIHAN jelas dengan tombol conditional ─
+    all_paid = (lunas_r > 0 and tagihan_r == 0)
     return {
         "meja": s.label,
-        "sewa": " + ".join(s.daftar_paket_sesi) or (s.paket_aktif or "-"),
-        "sewa_harga": M.fmt_rp(s.paket_harga_tetap),
+        "sewa": sewa_label,
+        "sewa_harga": M.fmt_rp(sewa_harga),
         "sewa_lunas": bool(sewa_lunas),
         "lunas_total": M.fmt_rp(lunas_r),
         "tagihan_total": M.fmt_rp(tagihan_r),
+        "all_paid": all_paid,  # Flag untuk disable tombol TAGIHAN jika semua LUNAS
         "makanan": mak,
         "minuman": minu,
         "fnb": M.fmt_rp(s.biaya_pesanan),
         "total": M.fmt_rp(s.total_setelah_diskon()),
         "logo_url": _tv_logo_url(),
+        "member_nama": getattr(s, "member_nama", None),  # Nama member tampil di overlay saat member session aktif
     }
 
 
@@ -5760,6 +5885,13 @@ def _push_call_meta():
                 "libur_mulai": str(_ops.get("libur_mulai", "")),
                 "buka_kembali": str(_ops.get("buka_kembali", "")),
             }
+            # Push overlay setting (timer popup configuration untuk semua TV)
+            overlay_setting = cfg.get("overlay_setting")
+            if overlay_setting and isinstance(overlay_setting, dict):
+                data["overlay_setting"] = {
+                    "mode": str(overlay_setting.get("mode", "always")),
+                    "remaining_minutes": int(overlay_setting.get("remaining_minutes", 5)),
+                }
             FirestoreClient().set_document(f"call_meta/{owner}", data, merge=True)
         except Exception as e:
             _LOGGER.warning("Push call_meta gagal: %s", e)

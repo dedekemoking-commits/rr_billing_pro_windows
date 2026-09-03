@@ -31,6 +31,16 @@ class PinOverlay(private val context: Context) {
 
     fun show(pin: String, mejaId: String = "") {
         if (root != null) hide()
+        tryShow(pin, mejaId, attempt = 0)
+    }
+
+    /**
+     * Tampilkan overlay PIN dengan retry 3× (jeda 1,5 detik) bila wm.addView
+     * gagal — ROM ketat seperti TCL kadang menolak addView di percobaan
+     * pertama (izin overlay / sinkronisasi window manager belum siap).
+     */
+    private fun tryShow(pin: String, mejaId: String, attempt: Int) {
+        if (root != null) return
         val column = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(6), dp(8), dp(6))
@@ -83,10 +93,17 @@ class PinOverlay(private val context: Context) {
         try {
             wm.addView(column, params)
             root = column
-            Log.i("PinOverlay", "PIN shown for $mejaId")
+            Log.i("PinOverlay", "PIN shown for $mejaId (percobaan ${attempt + 1})")
         } catch (e: Exception) {
             root = null
-            Log.w("PinOverlay", "Gagal menampilkan PIN: ${e.message} — cek izin overlay")
+            if (attempt >= 2) {
+                Log.w("PinOverlay", "Gagal menampilkan PIN setelah 3x: ${e.message} — cek izin overlay")
+            } else {
+                Log.w("PinOverlay", "Gagal menampilkan PIN (${e.message}) — retry ${attempt + 2}/3")
+                mainHandler.postDelayed({
+                    tryShow(pin, mejaId, attempt + 1)
+                }, 1500L)
+            }
         }
     }
 

@@ -12,3 +12,5 @@ websockets
 paramiko
 qrcode
 bleak
+tinytuya
+pycryptodome

@@ -71,3 +71,10 @@ INFO REAL-TIME DI TRAY (KANAN BAWAH)
 - Ikon tray menampilkan countdown sisa waktu: "Paket mm:ss".
 - Balloon otomatis saat: sesi baru dimulai, sisa waktu tinggal
   5 / 3 / 1 menit (pengingat tambah waktu).
+
+
+=== FITUR DAYA PC (v2.4 update Agustus 2026) ===
+1. Tombol MATIKAN / RESTART di kartu warnet (server): service client menjalankan shutdown.exe /s atau /r /t 10 /f.
+2. Tombol HIDUPKAN (Wake-on-LAN): client melaporkan MAC otomatis saat AUTH.
+   Syarat sekali-set per PC: BIOS 'Wake on LAN' aktif + ErP OFF + kabel LAN terpasang.
+   UPDATE_CLIENT.bat mengaktifkan NIC power management + Unblock-File (fix popup Open File).

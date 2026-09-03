@@ -329,6 +329,7 @@ class DeployManager:
 
     PKG_FILES = ["BillingClientService.exe", "BillingLockScreenUI.exe",
                  "BillingClientApp.exe", "INSTALL_CLIENT.bat"]
+    LOGO_FILES = ["lockscreen_logo.png", "lockscreen_logo.jpg", "lockscreen_logo.jpeg"]
     SERVICE_NAME = "RRBillingClientService"
 
     def deploy_package(self, host, pkg_dir, remote_dir="C:\\RRBillingClient",
@@ -347,12 +348,14 @@ class DeployManager:
         """
         steps = []
 
-        # 0. Validasi paket
+        # 0. Validasi paket (logo bersifat opsional — tidak wajib ada)
         missing = [f for f in self.PKG_FILES
                    if not os.path.isfile(os.path.join(pkg_dir, f))]
         if missing:
             return {"host": host, "success": False,
                     "message": f"Paket tidak lengkap: {', '.join(missing)}", "steps": []}
+        logo_available = [f for f in self.LOGO_FILES
+                          if os.path.isfile(os.path.join(pkg_dir, f))]
 
         # 1. Test koneksi
         ok, msg = self.test_connection(host)
@@ -393,6 +396,13 @@ class DeployManager:
                 steps.append(("send_file", False, f"config: {msg}"))
             else:
                 steps.append(("send_file", True, "rr_billing_config.json terkirim"))
+
+        # 5b. Kirim logo lockscreen (opsional — salah satu format saja yang ada)
+        for fname in logo_available:
+            ok, msg = self.send_file(host,
+                                     os.path.join(pkg_dir, fname),
+                                     f"{remote_dir}\\{fname}")
+            steps.append(("send_file_logo", ok, f"{fname} terkirim" if ok else f"{fname}: {msg}"))
 
         # 6. Instal service (idempotent: hapus dulu jika ada, pasang lagi)
         svc_exe = f'"{remote_dir}\\BillingClientService.exe"'

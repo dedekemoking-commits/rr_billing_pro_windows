@@ -5,6 +5,8 @@ using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
@@ -23,7 +25,7 @@ namespace BillingClientService
         private int _serverPort = 5000;
         private string _clientId = "WARNET_01";
         private string _password = "admin123";
-        private int _heartbeatIntervalMs = 3000;
+        private int _heartbeatIntervalMs = 1000;
         private int _heartbeatTimeoutMs = 15000;
         private int _watchdogIntervalMs = 10000;
         private int _trayHangTimeoutMs = 30000;
@@ -44,6 +46,8 @@ namespace BillingClientService
         private string _kursiName = null;  // Nama kursi dari server
         private string _lockMessage = "";
         private int _getStatusFailCount = 0;
+        private readonly TimeSpan _logoDownloadTimeout = TimeSpan.FromSeconds(8);
+        private string _macOverride = "";
 
         // ── Billing status cache (for IPC) ─────────────────────────────
         private string _billingPaket = "-";
@@ -54,7 +58,11 @@ namespace BillingClientService
 
         // ── Named Pipe IPC ─────────────────────────────────────────────
         private const string PIPE_NAME = "RRBillingClientService_Pipe";
+        private const string EVENT_PIPE_NAME = "RRBillingClientService_Pipe_Events";
         private Thread _pipeThread;
+        private Thread _eventThread;
+        private readonly object _eventPipeLock = new object();
+        private PipeStream _eventPipe;
 
         // ── Log file ───────────────────────────────────────────────────
         private const string LOG_FILE = "rr_billing_client_service.log";
@@ -67,12 +75,49 @@ namespace BillingClientService
             AutoLog = true;
         }
 
+        // Hapus tanda "dari internet" (Mark-of-the-Web / Zone.Identifier ADS)
+        // dari semua executable di folder instalasi. Jalan saat service start
+        // (= sebelum user login), sehingga Run key / ShellExecute tidak pernah
+        // lagi memunculkan dialog "Open File - Security Warning".
+        private void StripMarkOfTheWeb()
+        {
+            int cleaned = 0;
+            try
+            {
+                string dir = AppDomain.CurrentDomain.BaseDirectory;
+                string self = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                foreach (string pattern in new[] { "*.exe", "*.dll", "*.bat", "*.cmd", "*.vbs", "*.ps1" })
+                {
+                    foreach (string file in Directory.GetFiles(dir, pattern, SearchOption.TopDirectoryOnly))
+                    {
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(self) &&
+                                string.Equals(file, self, StringComparison.OrdinalIgnoreCase))
+                                continue; // jangan sentuh file yang sedang berjalan
+                            File.Delete(file + ":Zone.Identifier");
+                            cleaned++;
+                        }
+                        catch (FileNotFoundException) { }
+                        catch (DirectoryNotFoundException) { }
+                        catch { }
+                    }
+                }
+                Log($"MotW cleanup: {cleaned} file(s) dibersihkan dari tanda internet.");
+            }
+            catch (Exception ex)
+            {
+                Log($"MotW cleanup error: {ex.Message} (dibersihkan {cleaned}).");
+            }
+        }
+
         protected override void OnStart(string[] args)
         {
             try
             {
                 LoadConfig();
                 LoadLockState();
+                StripMarkOfTheWeb();
                 _cts = new CancellationTokenSource();
 
                 // Start named pipe server for IPC with tray app
@@ -82,6 +127,15 @@ namespace BillingClientService
                     Name = "BillingPipeServer",
                 };
                 _pipeThread.Start();
+
+                // Event pipe: push LOCK/UNLOCK instan ke tray app (tanpa
+                // menunggu poll tray berikutnya) — lockscreen tampil cepat.
+                _eventThread = new Thread(EventPushLoop)
+                {
+                    IsBackground = true,
+                    Name = "BillingEventPush",
+                };
+                _eventThread.Start();
 
                 _mainThread = new Thread(ServiceLoop)
                 {
@@ -132,6 +186,7 @@ namespace BillingClientService
         {
             LoadConfig();
             LoadLockState();
+            StripMarkOfTheWeb();
             _cts = new CancellationTokenSource();
 
             _pipeThread = new Thread(PipeServerLoop)
@@ -140,6 +195,13 @@ namespace BillingClientService
                 Name = "BillingPipeServer",
             };
             _pipeThread.Start();
+
+            _eventThread = new Thread(EventPushLoop)
+            {
+                IsBackground = true,
+                Name = "BillingEventPush",
+            };
+            _eventThread.Start();
 
             _mainThread = new Thread(ServiceLoop)
             {
@@ -225,6 +287,85 @@ namespace BillingClientService
                     Debug.WriteLine($"[PipeServer] Error: {ex.Message}");
                     SleepWithCancellation(1000, _cts.Token);
                 }
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  EVENT PIPE — push LOCK/UNLOCK instan ke tray app
+        // ════════════════════════════════════════════════════════════════
+        private void EventPushLoop(object obj)
+        {
+            var token = _cts.Token;
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    var pipeSecurity = new PipeSecurity();
+                    var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+                    pipeSecurity.AddAccessRule(
+                        new PipeAccessRule(everyone, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+                    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                    pipeSecurity.AddAccessRule(
+                        new PipeAccessRule(system, PipeAccessRights.FullControl, AccessControlType.Allow));
+
+                    using (NamedPipeServerStream pipeServer = new NamedPipeServerStream(
+                        EVENT_PIPE_NAME, PipeDirection.InOut, 1,
+                        PipeTransmissionMode.Byte, PipeOptions.None,
+                        65536, 65536, pipeSecurity))
+                    {
+                        var waitTask = Task.Run(() => pipeServer.WaitForConnection(), token);
+                        waitTask.Wait(token);
+                        if (!pipeServer.IsConnected) continue;
+
+                        Log("Event pipe: tray app terhubung.");
+                        lock (_eventPipeLock) _eventPipe = pipeServer;
+
+                        // Tunggu sampai tray menutup koneksi (service restart / tray quit)
+                        try
+                        {
+                            var buf = new byte[1];
+                            while (!token.IsCancellationRequested)
+                            {
+                                if (pipeServer.Read(buf, 0, 1) <= 0) break;
+                            }
+                        }
+                        catch { }
+                        lock (_eventPipeLock) _eventPipe = null;
+                        Log("Event pipe: tray app terputus.");
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[EventPipe] Error: {ex.Message}");
+                    SleepWithCancellation(1000, _cts.Token);
+                }
+            }
+        }
+
+        private void PushEvent(string evt, string message = null)
+        {
+            try
+            {
+                PipeStream pipe;
+                lock (_eventPipeLock) pipe = _eventPipe;
+                if (pipe == null) return;
+
+                string frame = "{\"event\":\"" + evt + "\"";
+                if (!string.IsNullOrEmpty(message))
+                    frame += ",\"message\":\"" + message.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+                frame += "}\n";
+
+                byte[] bytes = Encoding.UTF8.GetBytes(frame);
+                lock (pipe)
+                {
+                    pipe.Write(bytes, 0, bytes.Length);
+                    pipe.Flush();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[EventPipe] Push error: {ex.Message}");
             }
         }
 
@@ -468,6 +609,7 @@ namespace BillingClientService
                     ["client_id"] = _clientId,
                     ["password"] = _password,
                     ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                    ["mac"] = GetLocalMac(),
                 };
 
                 SendJson(authMsg);
@@ -625,10 +767,166 @@ namespace BillingClientService
                     UnlockWorkstation();
                     break;
 
+                case "SET_LOGO":
+                    // Unduh logo lockscreen dari server (http://<kasir>:8082/media/...)
+                    // lalu simpan sebagai lockscreen_logo.png di folder instalasi.
+                    // Jangan refresh lock screen yang sedang aktif — logo baru akan
+                    // terpakai di sesi lock berikutnya. Gagal = pertahankan logo lama.
+                    {
+                        string url = cmd.GetValueOrDefault("url", "")?.ToString();
+                        if (string.IsNullOrEmpty(url))
+                        {
+                            Log("SET_LOGO: url kosong, logo lama dipertahankan.");
+                            break;
+                        }
+                        Task.Run(() => DownloadLogoWorker(url));
+                    }
+                    break;
+
+                case "SHUTDOWN":
+                    // Matikan PC dari server (service LocalSystem punya privilege).
+                    // Delay 10 dtk agar respons GET_STATUS sempat terkirim dulu.
+                    Log($"[SHUTDOWN] Perintah dari server (reason: {reason})");
+                    RunShutdown(false);
+                    break;
+
+                case "RESTART":
+                    Log($"[RESTART] Perintah dari server (reason: {reason})");
+                    RunShutdown(true);
+                    break;
+
                 default:
                     Log($"Unknown pending command: {cmdType}");
                     break;
             }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  MAC ADDRESS — dilaporkan server saat AUTH untuk Wake-on-LAN
+        // ════════════════════════════════════════════════════════════════
+        private string GetLocalMac()
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(_macOverride))
+                    return _macOverride;
+
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                        ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    byte[] mac = ni.GetPhysicalAddress()?.GetAddressBytes();
+                    if (mac == null || mac.Length != 6) continue;
+                    bool allZero = true;
+                    foreach (byte b in mac) { if (b != 0) { allZero = false; break; } }
+                    if (allZero) continue;
+                    return string.Join(":", Array.ConvertAll(mac, b => b.ToString("X2")));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"GetLocalMac error: {ex.Message}");
+            }
+            return "";
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  SHUTDOWN / RESTART — matikan atau nyalakan ulang PC client
+        //  Service berjalan sebagai LocalSystem → berhak mematikan mesin.
+        // ════════════════════════════════════════════════════════════════
+        private void RunShutdown(bool restart)
+        {
+            try
+            {
+                string verb = restart ? "/r" : "/s";
+                string args = $"{verb} /t 10 /f";
+                Log($"SHUTDOWN: menjalankan shutdown.exe {args}");
+                var psi = new ProcessStartInfo("shutdown.exe", args)
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                };
+                using (var p = Process.Start(psi))
+                {
+                    // jangan tunggu — /t 10 memberi waktu koneksi ditutup rapi
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"SHUTDOWN: gagal menjalankan shutdown.exe: {ex.Message}");
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  SET_LOGO — unduh logo lockscreen dari server media (port 8082)
+        // ════════════════════════════════════════════════════════════════
+        private void DownloadLogoWorker(string url)
+        {
+            try
+            {
+                // Muat ulang URL unik per versi (?v=<mtime>) — download ke tmp
+                // agar file logo aktif tidak pernah rusak.
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string tmpPath = Path.Combine(baseDir, "lockscreen_logo.downloading");
+                string nameNew = "lockscreen_logo_" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + ".png";
+                string pathNew = Path.Combine(baseDir, nameNew);
+
+                var request = (HttpWebRequest)WebRequest.Create(url);
+                request.Timeout = (int)_logoDownloadTimeout.TotalMilliseconds;
+                request.ReadWriteTimeout = (int)_logoDownloadTimeout.TotalMilliseconds;
+                request.UserAgent = "RRBillingClient";
+
+                using (var response = (HttpWebResponse)request.GetResponse())
+                using (var stream = response.GetResponseStream())
+                {
+                    if (stream == null) throw new IOException("Respons kosong.");
+                    using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        stream.CopyTo(fs);
+                        fs.Flush(true);
+                    }
+                }
+
+                File.Move(tmpPath, pathNew);   // move — file baru, tidak terkunci
+
+                // Bersihkan file logo versi lama (best effort — kalau terkunci lock
+                // screen yang sedang tampil, dilewati; akan dibersihkan nanti).
+                CleanupOldLogos(baseDir, nameNew);
+
+                // Perbarui nama kanonik (dipakai INSTALL/legacy reader). Gagal aman
+                // bila lock screen aktif mengunci file lama — versi baru tetap terpakai.
+                try { File.Copy(pathNew, Path.Combine(baseDir, "lockscreen_logo.png"), true); }
+                catch { }
+
+                Log($"SET_LOGO: logo diterapkan -> {nameNew} ({url})");
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    string p = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lockscreen_logo.downloading");
+                    if (File.Exists(p)) File.Delete(p);
+                }
+                catch { }
+                Log($"SET_LOGO: gagal mengunduh logo: {ex.Message} — logo lama dipertahankan.");
+            }
+        }
+
+        // Hapus lock logo versi lama kecuali yang terbaru (agar folder tidak penuh).
+        private void CleanupOldLogos(string baseDir, string keepName)
+        {
+            try
+            {
+                string[] candidates = Directory.GetFiles(baseDir, "lockscreen_logo_*.png");
+                foreach (string f in candidates)
+                {
+                    string name = Path.GetFileName(f);
+                    if (name.Equals(keepName, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { File.Delete(f); } catch { }
+                }
+            }
+            catch { }
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -647,6 +945,7 @@ namespace BillingClientService
             _lockMessage = message ?? "";
             SaveLockState();
             SendClientStatus("locked");
+            PushEvent("NOTIFY_LOCK", message ?? "");
         }
 
         private void UnlockWorkstation()
@@ -662,6 +961,7 @@ namespace BillingClientService
             _lockMessage = "";
             ClearLockState();
             SendClientStatus("unlocked");
+            PushEvent("NOTIFY_UNLOCK");
         }
 
         private void CheckHeartbeatTimeout()
@@ -1239,6 +1539,8 @@ namespace BillingClientService
                         _password = pwd?.ToString() ?? _password;
                     if (config.TryGetValue("pc_id", out var pcid))
                         _pcId = pcid?.ToString() ?? _pcId;
+                    if (config.TryGetValue("mac", out var mac))
+                        _macOverride = mac?.ToString() ?? "";
                 }
 
                 // Override from environment variables

@@ -201,6 +201,59 @@ class FirestoreClient:
             _LOGGER.warning("query(%s) error: %s", collection, e)
             return []
 
+    # ── Web Member Summary ───────────────────────────────────────────────
+    # Username internal (bukan rental sungguhan) yang tidak ikut dihitung
+    # sebagai "member", sehingga angka di beranda web tetap akurat.
+    INTERNAL_USERNAMES = {"admin", "admin1", "kasir", "kasir1", "operator"}
+
+    def list_all_user_docs(self) -> list[dict]:
+        """List seluruh doc di billingps_users (dengan pagination)."""
+        if self._throttled():
+            return []
+        docs = []
+        page_token = None
+        while True:
+            url = f"{FIRESTORE_BASE}/billingps_users"
+            params = {"pageSize": 300}
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                resp = self._session.get(url, params=params, headers=self._headers(), timeout=20)
+            except requests.RequestException as e:
+                _LOGGER.warning("list billingps_users error: %s", e)
+                break
+            if resp.status_code != 200:
+                self._note_response(resp.status_code, "list billingps_users")
+                _LOGGER.warning("list billingps_users HTTP %d: %s", resp.status_code, resp.text[:200])
+                break
+            data = resp.json()
+            for d in data.get("documents", []):
+                docs.append(_doc_to_dict(d))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+        return docs
+
+    def publish_member_summary(self) -> Optional[int]:
+        """Hitung user rental (non-internal) & publish ke web_members/summary.
+
+        Mengembalikan jumlah member, atau None jika gagal.
+        """
+        users = self.list_all_user_docs()
+        internal = self.INTERNAL_USERNAMES
+        real = [
+            u for u in users
+            if u.get("_id") and not u["_id"].startswith("_")
+            and u["_id"].lower() not in internal
+        ]
+        count = len(real)
+        ok = self.set_document("web_members/summary", {
+            "count": count,
+            "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        _LOGGER.info("publish_member_summary: %d member (written=%s)", count, ok)
+        return count if ok else None
+
     # ── User Doc Helpers ─────────────────────────────────────────────────
 
     def get_user_doc(self, username: str) -> Optional[dict]:
@@ -605,6 +658,19 @@ class FirestoreClient:
             "updatedBy": doc.get("updatedBy", ""),
             "updatedAt": doc.get("updatedAt", 0),
         }
+
+    def get_config(self, username: str) -> Optional[dict]:
+        """Fetch config from Firestore for a given username.
+        Returns None if no config found."""
+        doc = self.get_document(f"config/{username}")
+        if doc is None:
+            return None
+        return _from_fv(doc.get("fields", {}))
+
+    def save_config(self, username: str, data: dict) -> bool:
+        """Save config to Firestore for a given username."""
+        doc = _dict_to_doc(data)
+        return self.set_document(f"config/{username}", doc, merge=False)
 
 
 # ── License Poller ────────────────────────────────────────────────────────

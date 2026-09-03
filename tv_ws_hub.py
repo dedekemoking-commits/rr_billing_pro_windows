@@ -462,7 +462,8 @@ class TvWsHub:
 
     # ── Public API (thread-safe, dipanggil dari thread UI) ───────────────────
     def _msg_start(self, meja_id: str, sisa_detik: int, nama_rental: str,
-                   total_tagihan: Any, lunas_total: Any = 0, tagihan_total: Any = 0) -> dict:
+                   total_tagihan: Any, lunas_total: Any = 0, tagihan_total: Any = 0,
+                   nama_member: Optional[str] = None) -> dict:
         mode, minutes = self._overlay_cfg()
         return {
             "action": "START_TIMER",
@@ -474,14 +475,16 @@ class TvWsHub:
             "tagihan_total": fmt_rp_ws(tagihan_total),
             "overlay_mode": mode,
             "overlay_last_minutes": minutes,
+            "nama_member": str(nama_member or ""),
         }
 
     def send_start_timer(self, meja_id: str, sisa_detik: int,
                          total_tagihan: Any = 0, nama_rental: Optional[str] = None,
-                         lunas_total: Any = 0, tagihan_total: Any = 0) -> bool:
+                         lunas_total: Any = 0, tagihan_total: Any = 0,
+                         nama_member: Optional[str] = None) -> bool:
         msg = self._msg_start(meja_id, sisa_detik,
                               nama_rental or self._get_nama_rental(), total_tagihan,
-                              lunas_total, tagihan_total)
+                              lunas_total, tagihan_total, nama_member)
         with self._locked_lock:
             self._locked.pop(meja_id, None)
         ok = self._send_to(meja_id, msg)
@@ -499,7 +502,8 @@ class TvWsHub:
 
     def send_sync_timer(self, meja_id: str, sisa_detik: int,
                         total_tagihan: Any = 0,
-                        lunas_total: Any = 0, tagihan_total: Any = 0) -> bool:
+                        lunas_total: Any = 0, tagihan_total: Any = 0,
+                        nama_member: Optional[str] = None) -> bool:
         """Sinkronisasi sisa waktu + total tagihan kasir → TV (dikirim tiap detik)."""
         mode, minutes = self._overlay_cfg()
         return self._send_to(meja_id, {"action": "SYNC_TIMER", "meja_id": meja_id,
@@ -508,7 +512,8 @@ class TvWsHub:
                                        "lunas_total": fmt_rp_ws(lunas_total),
                                        "tagihan_total": fmt_rp_ws(tagihan_total),
                                        "overlay_mode": mode,
-                                       "overlay_last_minutes": minutes})
+                                       "overlay_last_minutes": minutes,
+                                       "nama_member": str(nama_member or "")})
 
     def send_pause_timer(self, meja_id: str) -> bool:
         return self._send_to(meja_id, {"action": "PAUSE_TIMER", "meja_id": meja_id})

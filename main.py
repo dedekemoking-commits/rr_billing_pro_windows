@@ -1282,7 +1282,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.14"
+APP_VERSION = "2.4.15"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -1408,8 +1408,11 @@ class ConfigManager:
         return obj
 
     @staticmethod
-    def load():
+    def load(username=None):
+        """Load config dari file lokal. Jika kosong/missing dan username tersedia,
+        coba restore dari Firestore cloud (fallback)."""
         with _CONFIG_LOCK:
+            data = None
             if os.path.exists(CONFIG_FILE):
                 # Retry selama ~5 detik: jika file sedang ditulis proses lain,
                 # baca ulang daripada mengembalikan {} (yang bisa menimpa config
@@ -1451,11 +1454,62 @@ class ConfigManager:
                               f"{os.path.basename(_bak)}; data dipakai: kosong", flush=True)
                 except Exception:
                     pass
+
+            # ── Cloud fallback: coba restore dari Firestore ──────────
+            if username:
+                try:
+                    from firestore_sync import get_firestore_client
+                    cloud_cfg = get_firestore_client().get_config(username)
+                    if cloud_cfg and isinstance(cloud_cfg, dict):
+                        print(f"[CONFIG] Config restored dari cloud untuk '{username}'", flush=True)
+                        # Simpan ke lokal agar load berikutnya cepat
+                        ConfigManager._save_raw(cloud_cfg)
+                        return cloud_cfg
+                except Exception as e:
+                    print(f"[CONFIG] Cloud fallback gagal: {e}", flush=True)
+
             return {}
 
     @staticmethod
-    def save(data):
-        """Simpan config dengan file locking + tulis atomik (tmp → replace)."""
+    def _save_raw(data):
+        """Simpan config TANPA encrypt — dipakai untuk restore dari cloud
+        (data dari Firestore sudah dalam bentuk final)."""
+        with _CONFIG_LOCK:
+            lock_file = CONFIG_FILE + ".lock"
+            tmp_file = CONFIG_FILE + ".tmp"
+            for attempt in range(10):
+                try:
+                    with open(lock_file, 'a') as lock:
+                        if os.name == 'nt':
+                            import msvcrt
+                            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                            try:
+                                with open(tmp_file, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=2, ensure_ascii=False)
+                                os.replace(tmp_file, CONFIG_FILE)
+                            finally:
+                                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            if fcntl is not None:
+                                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                try:
+                                    with open(tmp_file, "w", encoding="utf-8") as f:
+                                        json.dump(data, f, indent=2, ensure_ascii=False)
+                                    os.replace(tmp_file, CONFIG_FILE)
+                                finally:
+                                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                            else:
+                                with open(tmp_file, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=2, ensure_ascii=False)
+                                os.replace(tmp_file, CONFIG_FILE)
+                    return
+                except (IOError, OSError):
+                    time.sleep(0.05)
+
+    @staticmethod
+    def save(data, sync_cloud=False, username=None):
+        """Simpan config dengan file locking + tulis atomik (tmp → replace).
+        Jika sync_cloud=True dan username tersedia, sync ke Firestore."""
         with _CONFIG_LOCK:
             # Encrypt _enc fields before saving
             data = ConfigManager._encrypt_all(data)
@@ -1501,13 +1555,23 @@ class ConfigManager:
                         print(f"Config save error after {max_retry} retries: {e}")
                         raise
 
+        # ── Cloud sync setelah save lokal berhasil ──────────────────
+        if sync_cloud and username:
+            try:
+                from firestore_sync import get_firestore_client
+                # Kirim data yang sudah di-encrypt (sama seperti yang ditulis ke file)
+                get_firestore_client().save_config(username, data)
+            except Exception as e:
+                print(f"[CONFIG] Cloud sync gagal: {e}", flush=True)
+
     @staticmethod
-    def update(mutator):
+    def update(mutator, sync_cloud=False, username=None):
         """Load → mutate → save secara atomik dalam satu lock.
         Gunakan ini untuk penulis config yang bisa dipanggil dari thread lain
         (mis. TimerService._sync_timer_state) agar tidak ada dua penulis yang
         saling menimpa key (bug kehilangan menu/tarif saat R3).
-        Jika config tidak dapat dibaca, TIDAK menyimpan apa pun (mencegah wipe)."""
+        Jika config tidak dapat dibaca, TIDAK menyimpan apa pun (mencegah wipe).
+        Jika sync_cloud=True, config juga dikirim ke Firestore."""
         with _CONFIG_LOCK:
             cfg = ConfigManager.load()
             if not cfg and os.path.exists(CONFIG_FILE):
@@ -1515,7 +1579,7 @@ class ConfigManager:
             result = mutator(cfg)
             if result is not None:
                 cfg = result
-            ConfigManager.save(cfg)
+            ConfigManager.save(cfg, sync_cloud=sync_cloud, username=username)
             return cfg
 
     @staticmethod
@@ -4643,6 +4707,17 @@ class LoginPage(ctk.CTkFrame):
         users = ConfigManager.get("users", self.DEFAULT_USERS)
         if not isinstance(users, dict):
             users = {}
+
+        # ── Cloud restore: jika config kosong/korup, coba restore dari Firestore ──
+        if not users:
+            try:
+                cfg_cloud = ConfigManager.load(username=username)
+                if cfg_cloud and isinstance(cfg_cloud.get("users"), dict):
+                    users = cfg_cloud["users"]
+                    print(f"[CONFIG] Config restored dari cloud untuk '{username}' di _login()", flush=True)
+            except Exception as e:
+                print(f"[CONFIG] Cloud restore di _login() gagal: {e}", flush=True)
+
         user_data = users.get(username) if isinstance(users, dict) else None
         # Read from password_enc (auto-decrypted by ConfigManager.load)
         password_hash = user_data.get("password_enc") if isinstance(user_data, dict) else ""
@@ -5368,7 +5443,6 @@ class DialogTambahTV(ctk.CTkToplevel):
         self.grup_var = ctk.StringVar(value=self.daftar_grup[0])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build()
-        self._build_status_bar()
         center_window(self, master, width=380, height=420)
         self.after(50, self.grab_set)
 
@@ -5400,35 +5474,10 @@ class DialogTambahTV(ctk.CTkToplevel):
         ctk.CTkLabel(ip_f, text="🌐  IP Address TV",
                      font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(8, 2))
         self.entry_ip = ctk.CTkEntry(ip_f, placeholder_text="192.168.1.xxx",
-                                       fg_color=C_BTN, text_color=C_ACCENT,
-                                       border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
+                                      fg_color=C_BTN, text_color=C_ACCENT,
+                                      border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
         self.entry_ip.pack(fill="x", padx=14, pady=(0, 10))
-        # Smart Plug (lampu LED per TV) — opsional
-        plug_f = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
-        plug_f.pack(fill="x", padx=28, pady=(8, 0))
-        ctk.CTkLabel(plug_f, text="🔌  Smart Plug lampu LED (opsional)",
-                     font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(8, 2))
-        row1 = ctk.CTkFrame(plug_f, fg_color="transparent")
-        row1.pack(fill="x", padx=14, pady=(0, 4))
-        self.entry_plug_id = ctk.CTkEntry(row1, placeholder_text="Device ID",
-                                           fg_color=C_BTN, text_color=C_TEXT,
-                                           border_color=C_BORDER, font=FONT_BODY, height=30)
-        self.entry_plug_id.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.entry_plug_ip = ctk.CTkEntry(row1, placeholder_text="IP Plug",
-                                           fg_color=C_BTN, text_color=C_TEXT,
-                                           border_color=C_BORDER, font=FONT_BODY, height=30, width=120)
-        self.entry_plug_ip.pack(side="left", padx=(0, 4))
-        self.entry_plug_key = ctk.CTkEntry(row1, placeholder_text="Local Key",
-                                            fg_color=C_BTN, text_color=C_TEXT,
-                                            border_color=C_BORDER, font=FONT_BODY, height=30)
-        self.entry_plug_key.pack(side="left", fill="x", expand=True)
-        row2 = ctk.CTkFrame(plug_f, fg_color="transparent")
-        row2.pack(fill="x", padx=14, pady=(0, 10))
-        self.entry_plug_ver = ctk.CTkEntry(row2, placeholder_text="Version (3.3)",
-                                            fg_color=C_BTN, text_color=C_TEXT,
-                                            border_color=C_BORDER, font=FONT_BODY, height=30, width=140)
-        self.entry_plug_ver.pack(side="left")
-    def _build_status_bar(self):
+        # Status + Buttons (langsung di bawah IP)
         self.lbl_status = ctk.CTkLabel(self, text="", font=FONT_SMALL, text_color=C_MUTED)
         self.lbl_status.pack(pady=(8, 2))
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
@@ -5516,19 +5565,7 @@ class DialogTambahTV(ctk.CTkToplevel):
                 self._confirmed = True
                 nama = self.entry_nama.get().strip() or f"TV {self.nomor_tv}"
                 grup = self.grup_var.get() or NAMA_GRUP_DEFAULT
-                plug = None
-                pid = self.entry_plug_id.get().strip()
-                pip = self.entry_plug_ip.get().strip()
-                pkey = self.entry_plug_key.get().strip()
-                pver = self.entry_plug_ver.get().strip()
-                if pid and pip and pkey:
-                    try:
-                        ver = float(pver) if pver else 3.3
-                    except Exception:
-                        ver = 3.3
-                    plug = {"device_id": pid, "ip": pip,
-                            "local_key": pkey, "version": ver}
-                self.on_confirm(ip, nama, 0, grup, plug)
+                self.on_confirm(ip, nama, 0, grup)
                 self.destroy()
             else:
                 self._pair_error(conn.get("message", "Gagal connect"))
@@ -5539,153 +5576,6 @@ class DialogTambahTV(ctk.CTkToplevel):
         if not self._confirmed:
             self.on_close_cb()
         self.destroy()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  DIALOG TAMBAH PESANAN (MAKANAN/MINUMAN SAAT SESI BERJALAN)
-# ═══════════════════════════════════════════════════════════════════════════════
-class DialogTambahPesanan(ctk.CTkToplevel):
-    """Dialog untuk tambah pesanan makanan/minuman saat sesi TV sedang berjalan."""
-    def __init__(self, master, tv_label, on_confirm, makanan_data, minuman_data, pesanan_aktif=None,
-                 paket_harga=0, paket_label=""):
-        super().__init__(master)
-        self.title(f"Tambah Pesanan — {tv_label}")
-        self.geometry("380x460")
-        self.configure(fg_color=C_BG)
-        self.transient(master)
-         
-        self.tv_label = tv_label
-        self.on_confirm = on_confirm
-        self.makanan_data = makanan_data or {}
-        self.minuman_data = minuman_data or {}
-        self.pesanan_aktif = pesanan_aktif or {}
-        self.paket_harga = paket_harga or 0
-        self.paket_label = paket_label or ""
-        self.order_qty = {}
-         
-        self._build()
-        center_window(self, master, width=380, height=460)
-        self.after(50, self.grab_set)
-     
-    def _build(self):
-        # Header
-        hdr = ctk.CTkFrame(self, fg_color="transparent")
-        hdr.pack(fill="x", padx=12, pady=(12, 8))
-        ctk.CTkLabel(hdr, text=f"🛒 Pesanan Tambahan — {self.tv_label}",
-                     font=("Russo One", 13, "bold"), text_color=C_ACCENT).pack(anchor="w")
-        ctk.CTkLabel(hdr, text="Pilih item untuk ditambahkan atau perbarui jumlah",
-                     font=FONT_BODY, text_color=C_MUTED).pack(anchor="w")
-        
-        # Total display
-        self.lbl_total = ctk.CTkLabel(self, text="Total Pesanan: Rp 0",
-                                       font=("Russo One", 12, "bold"), text_color=C_YELLOW)
-        self.lbl_total.pack(pady=(0, 2))
-        self.lbl_paket_info = ctk.CTkLabel(self, text="",
-                                            font=FONT_SMALL, text_color=C_MUTED)
-        self.lbl_paket_info.pack(pady=(0, 8))
-        
-        # Scrollable content
-        scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG)
-        scroll.pack(fill="both", expand=True, padx=12, pady=0)
-        
-        # Makanan section
-        if self.makanan_data:
-            self._build_menu_section(scroll, "🍔  MAKANAN", self.makanan_data)
-        
-        # Minuman section
-        if self.minuman_data:
-            self._build_menu_section(scroll, "🥤  MINUMAN", self.minuman_data)
-        
-        if not self.makanan_data and not self.minuman_data:
-            ctk.CTkLabel(scroll, text="Tidak ada item tersedia",
-                        font=FONT_BODY, text_color=C_MUTED).pack(pady=20)
-        
-        # Buttons
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=12, pady=(8, 12))
-        
-        ctk.CTkButton(btn_frame, text="✅  TAMBAHKAN PESANAN",
-                     fg_color=C_ACCENT2, hover_color=C_ACCENT,
-                     font=("Russo One", 11, "bold"), height=44,
-                     command=self._confirm).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(btn_frame, text="✖  BATAL",
-                     fg_color=C_RED, hover_color="#CC0033",
-                     font=("Russo One", 10, "bold"), height=38,
-                     command=self.destroy).pack(fill="x")
-
-        self._update_total()
-    
-    def _build_menu_section(self, parent, title, menu_dict):
-        """Build collapsible menu section."""
-        section = ctk.CTkFrame(parent, fg_color="transparent")
-        section.pack(fill="x", pady=6)
-        
-        # Header
-        header = ctk.CTkFrame(section, fg_color=C_PANEL, corner_radius=8)
-        header.pack(fill="x")
-        ctk.CTkLabel(header, text=title,
-                    font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(anchor="w", padx=10, pady=8)
-        
-        # Content
-        content = ctk.CTkFrame(section, fg_color=C_CARD, corner_radius=6)
-        content.pack(fill="x", padx=4, pady=(0, 4))
-        
-        for nama, harga in menu_dict.items():
-            row = ctk.CTkFrame(content, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=4)
-            
-            # Item name & price
-            ctk.CTkLabel(row, text=f"{nama}  •  {fmt_rp(harga)}",
-                        font=FONT_LABEL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
-            
-            # Qty control
-            var = ctk.IntVar(value=self.pesanan_aktif.get(nama, 0))
-            self.order_qty[nama] = var
-            
-            ctk.CTkButton(row, text="−", width=24, height=24, fg_color=C_BTN, hover_color=C_RED,
-                         font=("Consolas", 11, "bold"),
-                         command=lambda v=var: (v.set(max(0, v.get()-1)), self._update_total())
-                         ).pack(side="left", padx=2)
-            ctk.CTkLabel(row, textvariable=var, width=24,
-                        font=FONT_LABEL, text_color=C_ACCENT).pack(side="left")
-            ctk.CTkButton(row, text="+", width=24, height=24, fg_color=C_BTN, hover_color=C_GREEN,
-                         font=("Consolas", 11, "bold"),
-                         command=lambda v=var: (v.set(v.get()+1), self._update_total())
-                         ).pack(side="left", padx=2)
-    
-    def _update_total(self):
-        """Update total pesanan (termasuk qty yang sudah ada)."""
-        all_menu = {**self.makanan_data, **self.minuman_data}
-        total = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.order_qty.items())
-        if self.paket_harga > 0 or self.paket_label:
-            total_sesi = self.paket_harga + total
-            self.lbl_total.configure(text=f"Total Sesi: {fmt_rp(total_sesi)}")
-            self.lbl_paket_info.configure(
-                text=f"Paket: {self.paket_label} ({fmt_rp(self.paket_harga)}) + Pesanan {fmt_rp(total)}")
-        else:
-            self.lbl_total.configure(text=f"Total Pesanan: {fmt_rp(total)}")
-            self.lbl_paket_info.configure(text="")
-    
-    def _confirm(self):
-        """Confirm and return new order data + status pembayaran popup."""
-        pesanan_baru = {nm: v.get() for nm, v in self.order_qty.items() if v.get() > 0}
-        if not pesanan_baru:
-            messagebox.showwarning("Pesanan Kosong", "Pilih minimal satu item pesanan.", parent=self)
-            return
-        total = sum((self.makanan_data | self.minuman_data).get(nm, 0) * q
-                    for nm, q in pesanan_baru.items())
-        DialogKonfirmasiBayar(
-            self,
-            lambda paid, p=pesanan_baru: self._finish(p, paid),
-            judul="Tambah Pesanan — Status",
-            rincian=f"{', '.join(f'{q}x {n}' for n, q in pesanan_baru.items())}\n{fmt_rp(total)}",
-        ).lift()
-
-    def _finish(self, pesanan_baru, paid):
-        try:
-            self.on_confirm(pesanan_baru, paid)
-        finally:
-            self.destroy()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -13392,6 +13282,28 @@ class AutoRentApp(ctk.CTk):
                 self.current_user_email = str(rec.get("email", "") or "")
         except Exception:
             pass
+
+        # ── Cloud wins merge: ambil cloud config, gunakan sebagai source of truth ──
+        try:
+            from firestore_sync import get_firestore_client
+            cloud_cfg = get_firestore_client().get_config(username)
+            if cloud_cfg and isinstance(cloud_cfg, dict):
+                local_cfg = ConfigManager.load()
+                # Cloud wins untuk data utama
+                for key in ("daftar_tv", "grup_tarif", "grup_tarif_warnet",
+                            "warnet_only_groups", "menu_makanan", "menu_minuman",
+                            "stok", "stok_min"):
+                    if key in cloud_cfg:
+                        local_cfg[key] = cloud_cfg[key]
+                # Simpan merged config ke lokal (TANPA cloud sync ulang)
+                ConfigManager._save_raw(local_cfg)
+                print(f"[CONFIG] Cloud wins: config merged dari cloud untuk '{username}' "
+                      f"({len(cloud_cfg.get('daftar_tv', []))} TV, "
+                      f"{len(cloud_cfg.get('menu_makanan', {}))} makanan, "
+                      f"{len(cloud_cfg.get('menu_minuman', {}))} minuman)", flush=True)
+        except Exception as e:
+            print(f"[CONFIG] Cloud merge gagal, pakai config lokal: {e}", flush=True)
+
         self.geometry("1280x800")
         self.resizable(True, True)
         self.state("zoomed")
@@ -15253,7 +15165,8 @@ class AutoRentApp(ctk.CTk):
 
     def _simpan_daftar_tv(self):
         """Simpan daftar kartu TV (ip/nama/port/grup) ke config (key daftar_tv)
-        agar otomatis dimuat ulang saat login berikutnya."""
+        agar otomatis dimuat ulang saat login berikutnya.
+        Sinkronkan juga ke Firestore (cloud wins)."""
         try:
             daftar = []
             for kartu in list(getattr(self, "_semua_kartu_tv", [])):
@@ -15264,8 +15177,11 @@ class AutoRentApp(ctk.CTk):
                     "nama_grup": getattr(kartu, "nama_grup", NAMA_GRUP_DEFAULT),
                     "plug": getattr(kartu, "plug", None),
                 })
+            uname = getattr(self, "current_user", None) or ""
             try:
-                ConfigManager.update(lambda cfg: cfg.__setitem__("daftar_tv", daftar) or cfg)
+                ConfigManager.update(
+                    lambda cfg: cfg.__setitem__("daftar_tv", daftar) or cfg,
+                    sync_cloud=True, username=uname)
             except Exception as e:
                 print(f"[TV] Gagal simpan daftar_tv: {e}", flush=True)
         except Exception as e:
@@ -16302,7 +16218,7 @@ class AutoRentApp(ctk.CTk):
             ConfigManager.save(cfg)
         self._simpan_paket_aktif_ke_memori()
         self._grup_aktif = nama_baru
-        self._simpan_grup_tarif_ke_config()
+        self._simpan_grup_tarif_ke_config(sync_cloud=True)
         self._refresh_opt_grup_semua()
         self._refresh_grup_info()
         self._refresh_info_bebas()
@@ -16334,7 +16250,7 @@ class AutoRentApp(ctk.CTk):
         ConfigManager.save(cfg)
         self._simpan_paket_aktif_ke_memori()
         self._grup_aktif = nama_baru
-        self._simpan_grup_tarif_ke_config()
+        self._simpan_grup_tarif_ke_config(sync_cloud=True)
         self._refresh_opt_grup_semua()
         self._refresh_grup_info()
         self._refresh_info_bebas()
@@ -16384,7 +16300,7 @@ class AutoRentApp(ctk.CTk):
                     kartu.lbl_grup.configure(text=f"\u21bb {nama_baru}")
                 kartu.get_paket_data = lambda g=nama_baru: self.get_paket_data(g, for_warnet=True)
         self._grup_aktif = nama_baru
-        self._simpan_grup_tarif_ke_config()
+        self._simpan_grup_tarif_ke_config(sync_cloud=True)
         self._refresh_opt_grup_semua()
         self._refresh_grup_info()
         self._refresh_info_bebas()
@@ -16447,7 +16363,7 @@ class AutoRentApp(ctk.CTk):
                         kartu.lbl_grup.configure(text=f"\u21bb {fallback}")
                     kartu.get_paket_data = lambda g=fallback: self.get_paket_data(g, for_warnet=True)
         self._grup_aktif = fallback
-        self._simpan_grup_tarif_ke_config()
+        self._simpan_grup_tarif_ke_config(sync_cloud=True)
         self._refresh_opt_grup_semua()
         self._refresh_grup_info()
         self._refresh_info_bebas()
@@ -16459,7 +16375,7 @@ class AutoRentApp(ctk.CTk):
         self.opt_grup_aktif.configure(values=daftar)
         self.var_grup_aktif.set(self._grup_aktif)
 
-    def _simpan_grup_tarif_ke_config(self, cfg=None):
+    def _simpan_grup_tarif_ke_config(self, cfg=None, sync_cloud=False):
         """Simpan grup tarif ke config dengan PEMISAHAN shared vs warnet.
 
         Grup warnet (warnet_only_groups ∪ grup_tarif_warnet) disimpan ke
@@ -16478,7 +16394,8 @@ class AutoRentApp(ctk.CTk):
         cfg["grup_tarif"] = shared
         cfg["grup_tarif_warnet"] = warnet_map
         cfg["warnet_only_groups"] = sorted(set(warnet_only) | set(warnet_map.keys()))
-        ConfigManager.save(cfg)
+        uname = getattr(self, "current_user", None) or ""
+        ConfigManager.save(cfg, sync_cloud=sync_cloud, username=uname)
 
     def _simpan_paket_aktif_ke_memori(self):
         """Tulis perubahan yang sedang diketik user (belum ditekan Simpan Semua)
@@ -16781,7 +16698,7 @@ class AutoRentApp(ctk.CTk):
         cfg["stok"] = self.stok
         cfg["stok_min"] = self.stok_min
         # Grup tarif disimpan dengan pemisahan shared vs warnet (anti-bocor ke kartu TV)
-        self._simpan_grup_tarif_ke_config(cfg)
+        self._simpan_grup_tarif_ke_config(cfg, sync_cloud=True)
 
         # Sinkronkan tampilan Dashboard TV: semua KartuTV yang sedang memakai
         # grup yang baru saja diedit otomatis pakai data harga terbaru

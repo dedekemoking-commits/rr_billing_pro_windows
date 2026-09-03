@@ -80,6 +80,12 @@ def _download_url(url: str, out_path: str, progress_cb: Optional[Callable[[int, 
                     if progress_cb:
                         progress_cb(downloaded, total)
     except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise ValueError(
+                f"Download GAGAL: file tidak ditemukan di server (HTTP 404).\n\n"
+                f"URL: {url}\n\n"
+                "File ini belum di-upload ke release terbaru. Laporkan ke admin "
+                "agar asset (mis. RRBillingPro-TV.apk) di-upload ke GitHub release.")
         raise ValueError(f"HTTP Error {e.code} saat mengakses {url}")
     except urllib.error.URLError as e:
         raise ValueError(f"Tidak dapat mengakses URL: {e.reason}")

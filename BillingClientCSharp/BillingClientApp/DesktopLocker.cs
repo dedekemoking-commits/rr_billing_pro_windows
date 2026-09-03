@@ -105,6 +105,65 @@ namespace BillingClientApp
             get { lock (_lock) return _lockDesktop != IntPtr.Zero; }
         }
 
+        // TRUE hanya jika desktop input saat ini BENAR-BENAR masih lock desktop
+        // kita. Setelah sleep/resume (atau logoff-lock Windows), desktop input
+        // bisa balik ke "Default"/"Winlogon" walau handle _lockDesktop masih
+        // tersisa — di situ IsLocked=true tapi layar tidak terkunci.
+        public static bool IsActuallyActive()
+        {
+            lock (_lock)
+            {
+                if (_lockDesktop == IntPtr.Zero) return false;
+                try
+                {
+                    IntPtr hInput = OpenInputDesktop(0, false, DESKTOP_ALL_ACCESS);
+                    if (hInput == IntPtr.Zero) return false;
+                    try
+                    {
+                        return string.Equals(GetDesktopName(hInput),
+                            LOCK_DESKTOP_NAME, StringComparison.OrdinalIgnoreCase);
+                    }
+                    finally { CloseDesktopHandle(hInput); }
+                }
+                catch { return false; }
+            }
+        }
+
+        // Pastikan lock benar-benar aktif. Jika handle ada tapi desktop input
+        // sudah lepas (wake/logon Windows), bubarkan status lama lalu bangun
+        // lock baru dari nol (kill UI lama + cleanup + Lock()).
+        public static bool EnsureLockActive(string lockAppPath = null, string args = null)
+        {
+            lock (_lock)
+            {
+                if (_lockDesktop != IntPtr.Zero)
+                {
+                    bool active = false;
+                    try
+                    {
+                        IntPtr hInput = OpenInputDesktop(0, false, DESKTOP_ALL_ACCESS);
+                        if (hInput != IntPtr.Zero)
+                        {
+                            try
+                            {
+                                active = string.Equals(GetDesktopName(hInput),
+                                    LOCK_DESKTOP_NAME, StringComparison.OrdinalIgnoreCase);
+                            }
+                            finally { CloseDesktopHandle(hInput); }
+                        }
+                    }
+                    catch { }
+
+                    if (active) return true; // sudah benar-benar terkunci
+
+                    Log("[DesktopLocker] Lock state stale (desktop input lepas) — membangun ulang...");
+                    KillLockProcess();
+                    Cleanup();
+                }
+                return Lock(lockAppPath, args);
+            }
+        }
+
         public static bool Lock(string lockAppPath = null, string args = null)
         {
             lock (_lock)

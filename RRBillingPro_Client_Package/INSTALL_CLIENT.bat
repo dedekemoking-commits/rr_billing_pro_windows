@@ -20,7 +20,9 @@ REM  "cmd /k" sehingga walaupun terjadi error apa pun,
 REM  window tetap terbuka dan error terlihat.
 REM ============================================================
 if /i "%~1"=="RUNNING" goto :MAIN
-start "RR Billing Installer" cmd /k ""%~f0" RUNNING %*"
+set "TMPBAT=%TEMP%\rr_billing_install.cmd"
+copy /Y "%~f0" "%TMPBAT%" >nul 2>&1
+start "RR Billing Installer" cmd /k ""%TMPBAT%" RUNNING %*"
 exit /b 0
 
 :MAIN
@@ -81,6 +83,9 @@ net stop %SERVICE_NAME% >nul 2>&1
 timeout /t 2 /nobreak >nul
 if /i "%PKG%" NEQ "%CLIENT_DIR%\" (
     echo   Dijalankan dari: !PKG!
+    REM Hapus MotW di SUMBER dulu: copy /Y ikut menyalin tanda "dari internet"
+    REM (Zone.Identifier ADS) dari file sumber ke tujuan.
+    powershell -NoProfile -Command "Get-ChildItem -Path '!PKG!*' -File -Include *.exe,*.dll,*.bat,*.cmd,*.vbs,*.ps1 | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
     echo   Menyalin file ke %CLIENT_DIR% ...
     copy /Y "!PKG!INSTALL_CLIENT.bat" "%CLIENT_DIR%\INSTALL_CLIENT.bat" >nul
     copy /Y "!PKG!BillingClientService.exe" "%CLIENT_DIR%\" >nul
@@ -95,6 +100,10 @@ if /i "%PKG%" NEQ "%CLIENT_DIR%\" (
     ) else (
         if exist "!PKG!rr_billing_config.json" copy /Y "!PKG!rr_billing_config.json" "%CLIENT_DIR%\" >nul
     )
+    REM salin logo lockscreen (opsional, salah satu format saja yang ada)
+    if exist "!PKG!lockscreen_logo.png" copy /Y "!PKG!lockscreen_logo.png" "%CLIENT_DIR%\" >nul
+    if exist "!PKG!lockscreen_logo.jpg" copy /Y "!PKG!lockscreen_logo.jpg" "%CLIENT_DIR%\" >nul
+    if exist "!PKG!lockscreen_logo.jpeg" copy /Y "!PKG!lockscreen_logo.jpeg" "%CLIENT_DIR%\" >nul
     echo   OK - file disalin ke %CLIENT_DIR%
 ) else (
     echo   OK - sudah berada di %CLIENT_DIR%
@@ -112,9 +121,43 @@ timeout /t 2 /nobreak >nul
 copy /Y "!PKG!BillingClientService.exe" "%CLIENT_DIR%\" >nul
 copy /Y "!PKG!BillingLockScreenUI.exe" "%CLIENT_DIR%\" >nul
 copy /Y "!PKG!BillingClientApp.exe" "%CLIENT_DIR%\" >nul
+if exist "!PKG!lockscreen_logo.png" copy /Y "!PKG!lockscreen_logo.png" "%CLIENT_DIR%\" >nul
+if exist "!PKG!lockscreen_logo.jpg" copy /Y "!PKG!lockscreen_logo.jpg" "%CLIENT_DIR%\" >nul
 echo   OK: salinan ulang berhasil.
 echo.
 :skip_retry
+
+REM ---- LANGKAH 0b - hilangkan popup "Open File" + Wake-on-LAN ----
+echo [WOL] Hapus tanda blokir internet (MotW) - fix popup Open File saat boot...
+REM Pakai -Path dengan wildcard ('dir\*') agar -Include benar-benar memfilter.
+powershell -NoProfile -Command "Get-ChildItem -Path '!CLIENT_DIR!\*' -File -Include *.exe,*.dll,*.bat,*.cmd,*.vbs,*.ps1 | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
+echo [WOL] Mengaktifkan Wake-on-LAN pada adapter jaringan...
+powershell -NoProfile -Command "Get-NetAdapter -ErrorAction SilentlyContinue | Set-NetAdapterPowerManagement -WakeOnMagicPacket Enabled -WakeOnPattern Enabled -ErrorAction SilentlyContinue" >nul 2>&1
+for /f "delims=" %%N in ('wmic nic where "NetEnabled=true" get Name /value 2^>nul ^| find "="') do powercfg -deviceenablewake "%%N" >nul 2>&1
+echo [WOL] Adapter yang siap menerima bangun (wake_armed):
+powercfg /devicequery wake_armed
+echo.
+
+REM Verifikasi MotW: hitung file yang MASIH bertanda "dari internet"
+set "MOTW_TMP=%TEMP%\rr_motw_left.txt"
+del "%MOTW_TMP%" >nul 2>&1
+powershell -NoProfile -Command "Get-ChildItem -Path '!CLIENT_DIR!\*' -File -Include *.exe,*.dll,*.bat | Where-Object { $s = Get-Item -LiteralPath $_.FullName -Stream * -ErrorAction SilentlyContinue; $s -and ($s.Stream -contains 'Zone.Identifier') } | Select-Object -ExpandProperty Name | Out-File -LiteralPath '%MOTW_TMP%' -Encoding ascii" >nul 2>&1
+set MOTW_LEFT=0
+if exist "%MOTW_TMP%" (
+    for /f "usebackq delims=" %%Z in ("%MOTW_TMP%") do set /a MOTW_LEFT+=1
+)
+del "%MOTW_TMP%" >nul 2>&1
+if not "%MOTW_LEFT%"=="0" (
+    echo.
+    echo   ERROR: %MOTW_LEFT% file MASIH bertanda "dari internet"!
+    echo   Popup "Open File - Security Warning" akan MUNCUL saat login.
+    echo   Hapus manual: klik kanan file -^> Properties -^> Unblock, lalu ulangi.
+    echo.
+    pause
+    exit /b 1
+)
+echo   [MOTW] OK - semua file BERSIH dari tanda internet (popup tidak akan muncul).
+echo.
 
 REM ---- LANGKAH 1 - cek konfigurasi ----
 echo [2/6] Memeriksa rr_billing_config.json...

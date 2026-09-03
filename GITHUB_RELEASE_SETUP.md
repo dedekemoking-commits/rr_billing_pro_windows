@@ -65,6 +65,40 @@ Workflow akan otomatis:
   - `dist/RRBilling.exe`
   - `manifest.json` (generate lokal dulu)
 
+## Checklist WAJIB Setiap Rilis (PENTING!)
+
+Tombol "Unduh APK TV" di website (`download.html`) dan fitur
+"UPGRADE APK" di aplikasi memakai URL
+`.../releases/latest/download/RRBillingPro-TV.apk`.
+Jika asset ini TIDAK di-upload, link error **404** dan pelanggan tidak bisa
+install/upgrade APK TV.
+
+Sebelum merilis, PASTIKAN upload:
+
+| Asset | Rumus URL |
+|-------|-----------|
+| `RRBILLINGPRO.exe` | `releases/latest/download/RRBILLINGPRO.exe` |
+| `manifest.json` | `releases/latest/download/manifest.json` |
+| `RRBillingPro-TV.apk` | `releases/latest/download/RRBillingPro-TV.apk` |
+| `ffmpeg.exe` | `releases/latest/download/ffmpeg.exe` (opsional) |
+
+APK TV dibangun dari project `android_tv_client`:
+```bash
+cd android_tv_client
+./gradlew assembleDebug
+# hasil: app/build/outputs/apk/debug/app-debug.apk -> salin/rename jadi RRBillingPro-TV.apk
+```
+
+Upload APK ke release terakhir yang sudah dipublish (bila terlupa):
+```bash
+gh release upload v2.4.13 \
+  --repo dedekemoking-commits/rr_billing_pro_windows \
+  "RRBILLINGPRO_2.4.11/tv/RRBillingPro-TV.apk"
+
+# Verifikasi link tidak 404:
+# https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/latest/download/RRBillingPro-TV.apk
+```
+
 ## Cara Generate Manifest Lokal (untuk development)
 
 ```bash

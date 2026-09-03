@@ -343,7 +343,7 @@ def main():
         matikan_server(proc)
 
     win.events.closed += on_closed
-    webview.start(private_mode=False)
+    webview.start(private_mode=False, debug=True)
 
     # fallback jika loop selesai tanpa event closed terpicu
     if api.exit_mode != "saja":

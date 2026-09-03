@@ -1,0 +1,2 @@
+wakeonlan>=4.0.0
+bscpylgtv>=0.5.4

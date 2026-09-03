@@ -50,6 +50,11 @@ class TvOverlayService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
+    // Health-check overlay (interval 30 dtk): jika sesi berjalan tapi overlay
+    // tidak tampil (mis. addView ditolak sekali / di-hide oleh ROM ketat seperti
+    // TCL), langsung re-show dari state terakhir — tidak menunggu pesan server.
+    private var healthCheck: Runnable? = null
+
     @Volatile
     private var locked = false
 
@@ -297,13 +302,43 @@ class TvOverlayService : Service() {
             onStatusChanged = { connected -> notifyStatus(connected) },
         ).also { it.start() }
 
+        startOverlayHealthCheck()
         updateNotification("Terhubung ke $host:$port")
     }
 
     private fun stopTimerAndWs() {
+        stopOverlayHealthCheck()
         timer?.stop()
         ws?.stop()
         ws = null
+    }
+
+    /** Health-check berkala: re-show overlay bila sesi berjalan tapi overlay
+     * menghilang (ROM agresif mematikan window / addView gagal transien).
+     * Dijalankan di main thread (semua operasi window manager harus di sini). */
+    private fun startOverlayHealthCheck() {
+        val runnable = object : Runnable {
+            override fun run() {
+                try {
+                    val t = timer
+                    if (t != null && t.state != TimerEngine.State.STOPPED &&
+                        ws?.connected == true
+                    ) {
+                        updateTimerUi(t.remainingSeconds)
+                    }
+                } catch (_: Exception) {
+                }
+                mainHandler.postDelayed(this, 30_000L)
+            }
+        }
+        healthCheck?.let { mainHandler.removeCallbacks(it) }
+        healthCheck = runnable
+        mainHandler.postDelayed(runnable, 30_000L)
+    }
+
+    private fun stopOverlayHealthCheck() {
+        healthCheck?.let { mainHandler.removeCallbacks(it) }
+        healthCheck = null
     }
 
     // ── Foreground notification ──────────────────────────────────────────────

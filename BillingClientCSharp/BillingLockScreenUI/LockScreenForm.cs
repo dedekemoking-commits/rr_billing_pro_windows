@@ -73,6 +73,15 @@ namespace BillingLockScreenUI
         private DateTime _startTime;
         private bool _sleepTriggered = false;
 
+        // ── Logo support (versi file + live reload) ─────────────────────
+        private const int LOGO_BOX_SIZE = 220;
+        private const double LOGO_REFRESH_INTERVAL_SECONDS = 5.0;
+        private const string LOGO_NAME_PREFIX = "lockscreen_logo";
+        private Image _logoImage;        // Gambar logo yang sedang dipakai
+        private Stream _logoStream;      // Stream pendukung Image (dijaga tetap terbuka)
+        private DateTime _logoLoadedTime = DateTime.MinValue; // mtime file yang dimuat
+        private DateTime _lastLogoScan = DateTime.MinValue;   // jam terakhir cek file
+
         // ── Server communication (optional, for real-time status) ──────
         private TcpClient _tcpClient;
         private NetworkStream _stream;
@@ -154,11 +163,11 @@ namespace BillingLockScreenUI
             // ── Logo / Icon ────────────────────────────────────────────
             _logoBox = new PictureBox
             {
-                Size = new Size(96, 96),
+                Size = new Size(LOGO_BOX_SIZE, LOGO_BOX_SIZE),
                 BackColor = Color.Transparent,
-                Image = TryLoadLogo() ?? DrawLockIcon(96, 96),
-                SizeMode = PictureBoxSizeMode.CenterImage,
+                SizeMode = PictureBoxSizeMode.Zoom,
             };
+            _logoBox.Image = TryLoadLogo() ?? DrawLockIcon(LOGO_BOX_SIZE, LOGO_BOX_SIZE);
 
             // ── Main Message ───────────────────────────────────────────
             _lblMessage = new Label
@@ -230,11 +239,11 @@ namespace BillingLockScreenUI
             int centerX = Screen.PrimaryScreen.Bounds.Width / 2;
             int centerY = Screen.PrimaryScreen.Bounds.Height / 2;
 
-            _logoBox.Location = new Point(centerX - 48, centerY - 220);
-            _lblMessage.Location = new Point(100, centerY - 100);
-            _lblSubMessage.Location = new Point(100, centerY + 10);
-            _lblTime.Location = new Point(centerX - 200, centerY + 100);
-            _lblStatus.Location = new Point(centerX - 200, centerY + 190);
+            _logoBox.Location = new Point(centerX - LOGO_BOX_SIZE / 2, centerY - 300);
+            _lblMessage.Location = new Point(100, centerY - 40);
+            _lblSubMessage.Location = new Point(100, centerY + 70);
+            _lblTime.Location = new Point(centerX - 200, centerY + 170);
+            _lblStatus.Location = new Point(centerX - 200, centerY + 260);
             _lblWatermark.Location = new Point(0, Screen.PrimaryScreen.Bounds.Height - 40);
 
             Controls.Add(_logoBox);
@@ -253,6 +262,14 @@ namespace BillingLockScreenUI
         private void Timer_Tick(object sender, EventArgs e)
         {
             _lblTime.Text = DateTime.Now.ToString("HH:mm:ss");
+
+            // Logo auto-reload bila file berubah (update logo via server).
+            try
+            {
+                if ((DateTime.UtcNow - _lastLogoScan).TotalSeconds >= LOGO_REFRESH_INTERVAL_SECONDS)
+                    RefreshLogoIfChanged();
+            }
+            catch { }
 
             TimeSpan elapsed = DateTime.Now - _startTime;
             if (elapsed.TotalMinutes >= 1)
@@ -349,6 +366,7 @@ namespace BillingLockScreenUI
                 _keepRunning = false;
                 _timer?.Dispose();
                 _logoBox?.Dispose();
+                ReleaseLogoImage();
             }
             base.Dispose(disposing);
         }
@@ -375,22 +393,82 @@ namespace BillingLockScreenUI
         static extern IntPtr GetThreadDesktop(uint dwThreadId);
 
         // ── Logo dari file eksternal (opsional) ───────────────────────
-        // Letakkan lockscreen_logo.png (atau .jpg/.jpeg) di folder yang sama
-        // dengan BillingLockScreenUI.exe → tampil di kotak ikon menggantikan emoji.
-        // Ganti logo = cukup replace file-nya, tanpa build ulang.
-        private Image TryLoadLogo()
+        // Logo bisa berupa lockscreen_logo.png/jpg/jpeg ATAU versi ber-timestamp
+        // (lockscreen_logo_<unix>.png) hasil push otomatis dari server. File
+        // terbanyak mtime terbaru yang dipakai. GDI+ Image.FromFile mengunci file
+        // lama, jadi di sini dipakai Image.FromStream dengan FileShare.ReadWrite
+        // agar service server bisa menimpa/menambah versi logo kapan saja.
+        private void FindNewestLogo(out string path, out DateTime time)
         {
+            path = null;
+            time = DateTime.MinValue;
             try
             {
-                foreach (string name in new[] { "lockscreen_logo.png", "lockscreen_logo.jpg", "lockscreen_logo.jpeg" })
+                string dir = AppDomain.CurrentDomain.BaseDirectory;
+                foreach (string pat in new[] { LOGO_NAME_PREFIX + "*.png", LOGO_NAME_PREFIX + "*.jpg", LOGO_NAME_PREFIX + "*.jpeg" })
                 {
-                    string p = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name);
-                    if (File.Exists(p))
-                        return Image.FromFile(p);
+                    foreach (string f in Directory.GetFiles(dir, pat))
+                    {
+                        if (f.ToLowerInvariant().Contains(".downloading")) continue;
+                        try
+                        {
+                            DateTime t = File.GetLastWriteTimeUtc(f);
+                            if (t > time) { time = t; path = f; }
+                        }
+                        catch { }
+                    }
                 }
             }
             catch { }
-            return null;
+        }
+
+        private void ReleaseLogoImage()
+        {
+            try { if (_logoImage != null) { _logoImage.Dispose(); _logoImage = null; } } catch { }
+            try { if (_logoStream != null) { _logoStream.Dispose(); _logoStream = null; } } catch { }
+        }
+
+        private Image TryLoadLogo()
+        {
+            string best;
+            DateTime bestT;
+            FindNewestLogo(out best, out bestT);
+            if (best == null) return null;
+            return LoadLogoFile(best, bestT);
+        }
+
+        private Image LoadLogoFile(string path, DateTime mtime)
+        {
+            try
+            {
+                var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                var img = Image.FromStream(fs);
+                ReleaseLogoImage();
+                _logoStream = fs;
+                _logoImage = img;
+                _logoLoadedTime = mtime;
+                return img;
+            }
+            catch
+            {
+                try { ReleaseLogoImage(); } catch { }
+                return null;
+            }
+        }
+
+        private void RefreshLogoIfChanged()
+        {
+            try
+            {
+                string best;
+                DateTime bestT;
+                FindNewestLogo(out best, out bestT);
+                if (best == null || bestT == _logoLoadedTime) return;
+                Image img = LoadLogoFile(best, bestT);
+                if (img != null && _logoBox != null)
+                    _logoBox.Image = img;
+            }
+            catch { }
         }
 
         // ── Draw a lock icon ───────────────────────────────────────────
@@ -403,7 +481,7 @@ namespace BillingLockScreenUI
                 g.TextRenderingHint = TextRenderingHint.AntiAlias;
 
                 // Simple lock icon using text
-                using (var font = new Font("Segoe UI", 48, FontStyle.Bold))
+                using (var font = new Font("Segoe UI", width / 2 - 30, FontStyle.Bold))
                 using (var brush = new SolidBrush(Color.FromArgb(124, 77, 255)))
                 {
                     g.DrawString("🔒", font, brush, width / 2 - 30, height / 2 - 30);

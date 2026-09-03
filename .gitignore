@@ -109,3 +109,6 @@ installer/
 # OS
 Thumbs.db
 .DS_Store
+
+# Firebase Hosting build cache
+.firebase/

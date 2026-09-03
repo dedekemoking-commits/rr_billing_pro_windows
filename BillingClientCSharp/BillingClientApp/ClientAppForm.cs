@@ -15,7 +15,10 @@ namespace BillingClientApp
     {
         // ── Named Pipe IPC ke Service ─────────────────────────────────
         private const string PIPE_NAME = "RRBillingClientService_Pipe";
+        private const string EVENT_PIPE_NAME = "RRBillingClientService_Pipe_Events";
         private System.Windows.Forms.Timer _pollTimer;
+        private Thread _eventThread;
+        private volatile bool _eventsRunning = true;
         private bool _isLocked = false;
         private bool _isConnected = false;
         private string _paketAktif = "-";
@@ -51,6 +54,18 @@ namespace BillingClientApp
                 "BillingLockScreenUI.exe");
             _previousIsLocked = _isLocked;
             StartPolling();
+            StartEventListener();
+
+            // Re-lock otomatis setelah PC bangun dari sleep: desktop input
+            // sudah lepas dari lock desktop, langsung cek ulang kondisi.
+            Microsoft.Win32.SystemEvents.PowerModeChanged += (s, e) =>
+            {
+                if (e.Mode == Microsoft.Win32.PowerModes.Resume)
+                {
+                    Log("[ClientApp] PC bangun dari sleep — cek ulang status lock.");
+                    try { BeginInvoke(new Action(PollStatus)); } catch { }
+                }
+            };
         }
 
         private void InitializeComponent()
@@ -121,13 +136,120 @@ namespace BillingClientApp
 
             // ── Poll Timer ────────────────────────────────────────────
             _pollTimer = new System.Windows.Forms.Timer();
-            _pollTimer.Interval = 3000;
+            _pollTimer.Interval = 1000;
             _pollTimer.Tick += (s, e) => PollStatus();
         }
 
         private void StartPolling()
         {
             _pollTimer?.Start();
+        }
+
+        // ── Event pipe — notifikasi LOCK/UNLOCK instan dari service ──
+        // Service mendorong (push) frame NOTIFY_LOCK/NOTIFY_UNLOCK tanpa
+        // menunggu poll berikutnya → lockscreen tampil cepat setelah
+        // admin menekan tombol kunci di server.
+        private void StartEventListener()
+        {
+            _eventThread = new Thread(EventLoop)
+            {
+                IsBackground = true,
+                Name = "BillingEventListener",
+            };
+            _eventThread.Start();
+        }
+
+        private void EventLoop()
+        {
+            while (_eventsRunning)
+            {
+                try
+                {
+                    using (var pipe = new NamedPipeClientStream(".", EVENT_PIPE_NAME,
+                        PipeDirection.InOut, PipeOptions.Asynchronous))
+                    {
+                        pipe.Connect(3000);
+                        using (var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true))
+                        {
+                            string line;
+                            while (_eventsRunning && (line = reader.ReadLine()) != null)
+                            {
+                                line = line.Trim();
+                                if (line.Length > 0) ProcessEventFrame(line);
+                            }
+                        }
+                    }
+                }
+                catch (TimeoutException) { }
+                catch (FileNotFoundException) { }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[EventClient] Error: {ex.Message}");
+                }
+                if (_eventsRunning) Thread.Sleep(1000);
+            }
+        }
+
+        private void ProcessEventFrame(string frame)
+        {
+            try
+            {
+                var dict = ManualJsonDeserialize(frame);
+                string evt = dict.GetValueOrDefault("event", "")?.ToString() ?? "";
+                if (string.Equals(evt, "NOTIFY_LOCK", StringComparison.OrdinalIgnoreCase))
+                {
+                    string msg = dict.GetValueOrDefault("message", "")?.ToString() ?? "";
+                    try { BeginInvoke(new Action(() => OnServerLockEvent(msg))); }
+                    catch { }
+                }
+                else if (string.Equals(evt, "NOTIFY_UNLOCK", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { BeginInvoke(new Action(OnServerUnlockEvent)); }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void OnServerLockEvent(string message)
+        {
+            try
+            {
+                if (!_isLocked)
+                {
+                    _trayIcon.ShowBalloonTip(5000, "🔒 PC Terkunci",
+                        string.IsNullOrEmpty(message)
+                            ? "Waktu habis. Silahkan hubungi admin."
+                            : message,
+                        ToolTipIcon.Warning);
+                }
+                _isLocked = true;
+                _lockMessage = message ?? "";
+                string lockArgs = "";
+                if (!string.IsNullOrEmpty(_lockMessage))
+                    lockArgs = "--message \"" + _lockMessage.Replace("\"", "\\\"") + "\"";
+                DesktopLocker.EnsureLockActive(_lockAppPath, lockArgs);
+                Log($"[ClientApp] Event NOTIFY_LOCK diterima ({message}).");
+            }
+            catch (Exception ex)
+            {
+                Log($"[ClientApp] Event lock error: {ex.Message}");
+            }
+        }
+
+        private void OnServerUnlockEvent()
+        {
+            try
+            {
+                _isLocked = false;
+                _lockMessage = "";
+                DesktopLocker.Unlock();
+                Log("[ClientApp] Event NOTIFY_UNLOCK diterima.");
+            }
+            catch (Exception ex)
+            {
+                Log($"[ClientApp] Event unlock error: {ex.Message}");
+            }
         }
 
         private void PollStatus()
@@ -164,7 +286,9 @@ namespace BillingClientApp
                     // proses lama sudah di-kill saat update), adopsi dulu supaya
                     // Unlock() bisa memindahkan user kembali ke desktop normal.
                     DesktopLocker.AdoptOrphanDesktop();
-                    actuallyLocked = DesktopLocker.IsLocked;
+                    // Cek desktop input AKTUAL (bukan sekadar handle). Setelah
+                    // sleep/resume, handle tetap ada tapi layar tidak terkunci.
+                    actuallyLocked = DesktopLocker.IsActuallyActive();
                 }
                 catch { }
 
@@ -185,7 +309,7 @@ namespace BillingClientApp
                         string lockArgs = "";
                         if (!string.IsNullOrEmpty(_lockMessage))
                             lockArgs = "--message \"" + _lockMessage.Replace("\"", "\\\"") + "\"";
-                        if (DesktopLocker.Lock(_lockAppPath, lockArgs))
+                        if (DesktopLocker.EnsureLockActive(_lockAppPath, lockArgs))
                         {
                             if (!wasLocked) Log($"[ClientApp] PC terkunci. ({_lockMessage})");
                         }

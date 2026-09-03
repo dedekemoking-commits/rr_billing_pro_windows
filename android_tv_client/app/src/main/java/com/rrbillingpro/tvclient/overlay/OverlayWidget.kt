@@ -30,11 +30,24 @@ class OverlayWidget(private val context: Context) {
     private var tvRental: TextView? = null
     private var tvLunas: TextView? = null
     private var tvTagihan: TextView? = null
+    private var tvTotal: TextView? = null
 
     val isShowing: Boolean get() = root != null
 
     fun show(mejaId: String, namaRental: String, totalTagihan: String,
              lunasTotal: String = "", tagihanTotal: String = "") {
+        if (root != null) return
+        tryShow(mejaId, namaRental, totalTagihan, lunasTotal, tagihanTotal, attempt = 0)
+    }
+
+    /**
+     * Tampilkan overlay dengan retry 3× (jeda 1,5 detik) bila wm.addView gagal.
+     * ROM ketat seperti TCL kadang menolak addView sekali pada percobaan
+     * pertama (izin overlay baru di-grant via AppOps / window manager belum
+     * sinkron) — overlay tidak boleh langsung menyerah.
+     */
+    private fun tryShow(mejaId: String, namaRental: String, totalTagihan: String,
+                        lunasTotal: String, tagihanTotal: String, attempt: Int) {
         if (root != null) return
         val view = inflater.inflate(R.layout.overlay_view, null)
         tvTimer = view.findViewById(R.id.tv_timer)
@@ -42,6 +55,7 @@ class OverlayWidget(private val context: Context) {
         tvRental = view.findViewById(R.id.tv_rental)
         tvLunas = view.findViewById(R.id.tv_lunas)
         tvTagihan = view.findViewById(R.id.tv_tagihan)
+        tvTotal = view.findViewById(R.id.tv_total)
 
         tvMeja?.text = mejaId
         tvRental?.text = namaRental
@@ -75,11 +89,19 @@ class OverlayWidget(private val context: Context) {
         try {
             wm.addView(view, params)
             root = view
+            Log.i("RRBillingTV", "Overlay tampil (percobaan ${attempt + 1})")
         } catch (e: Exception) {
             root = null
-            Log.w("RRBillingTV", "Gagal menampilkan overlay: ${e.message} — " +
-                    "cek izin \u201cTampilkan di atas aplikasi lain\u201d " +
-                    "(Settings.canDrawOverlays=${OverlayPermission.isGranted(context)})")
+            if (attempt >= 2) {
+                Log.w("RRBillingTV", "Gagal menampilkan overlay setelah 3x: ${e.message} — " +
+                        "izin \u201cTampilkan di atas aplikasi lain\u201d belum aktif? " +
+                        "(canDrawOverlays=${OverlayPermission.isGranted(context)})")
+            } else {
+                Log.w("RRBillingTV", "addView gagal (${e.message}) — retry ${attempt + 2}/3")
+                mainHandler.postDelayed({
+                    tryShow(mejaId, namaRental, totalTagihan, lunasTotal, tagihanTotal, attempt + 1)
+                }, 1500L)
+            }
         }
     }
 
@@ -89,11 +111,13 @@ class OverlayWidget(private val context: Context) {
 
     fun updateBill(totalTagihan: String, lunasTotal: String = "", tagihanTotal: String = "") {
         mainHandler.post {
+            tvTotal?.text = buildTotal(totalTagihan)
             tvTagihan?.text = buildTagihan(tagihanTotal)
             tvLunas?.text = buildLunas(lunasTotal)
             // Sembunyikan baris yang nilainya nol/kosong agar popup ringkas
             tvLunas?.visibility = if (isNonZero(lunasTotal)) View.VISIBLE else View.GONE
             tvTagihan?.visibility = if (isNonZero(tagihanTotal)) View.VISIBLE else View.GONE
+            tvTotal?.visibility = if (isNonZero(totalTagihan)) View.VISIBLE else View.GONE
         }
     }
 
@@ -110,6 +134,9 @@ class OverlayWidget(private val context: Context) {
     private fun buildTagihan(value: String): String =
         if (isNonZero(value)) "${value.trim()}  ⏳ TAGIHAN" else ""
 
+    private fun buildTotal(value: String): String =
+        if (isNonZero(value)) "${value.trim()}  TOTAL" else ""
+
     fun hide() {
         val view = root ?: return
         mainHandler.post {
@@ -123,6 +150,7 @@ class OverlayWidget(private val context: Context) {
             tvRental = null
             tvLunas = null
             tvTagihan = null
+            tvTotal = null
         }
     }
 

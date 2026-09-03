@@ -150,11 +150,14 @@ namespace BillingClientService
                             "SetThreadDesktop failed.");
 
                     // 5. Launch lock screen UI on the new desktop
+                    //    CreateProcess (UseShellExecute=false): menghindari
+                    //    dialog "Open File - Security Warning" (Mark-of-the-Web)
+                    //    yang dipicu ShellExecute untuk exe bermotW.
                     if (!string.IsNullOrWhiteSpace(lockAppPath))
                     {
                         var psi = new ProcessStartInfo(lockAppPath, args ?? "")
                         {
-                            UseShellExecute = true,
+                            UseShellExecute = false,
                             WindowStyle = ProcessWindowStyle.Normal,
                             CreateNoWindow = false,
                             ErrorDialog = false,

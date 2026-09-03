@@ -430,7 +430,7 @@ class FirebaseAuth:
                     "grant_type": "refresh_token",
                     "refresh_token": self._refresh_token,
                 },
-                timeout=15,
+                timeout=5,
             )
             data = resp.json()
             if "id_token" in data:
@@ -441,6 +441,10 @@ class FirebaseAuth:
             return False
         except requests.RequestException:
             return False
+
+    def clear_auth(self) -> None:
+        """Hapus auth file untuk force re-authentikasi Google."""
+        self.clear()
 
     def _get_user_info(self) -> Optional[dict]:
         try:
