@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import threading
+from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 import requests
@@ -22,6 +23,69 @@ MAX_ACTIVATIONS_DEFAULT = 2
 # bersama-sama saat kuota habis — bukan hanya per-objek.
 _THROTTLED_UNTIL = 0.0
 _TX_SAVE_LOCK = threading.Lock()
+
+# ── Document Cache (hemat reads) ──────────────────────────────────────────
+# Cache document Firestore di memori agar tidak perlu GET berulang.
+# TTL 30 detik — cukup untuk batch upload beberapa transaksi.
+_DOC_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_DOC_CACHE_MAX = 100  # max items
+_DOC_CACHE_TTL = 30.0  # detik
+
+
+def _cache_get(path: str) -> Optional[dict]:
+    """Ambil document dari cache jika masih valid (TTL belum expired)."""
+    entry = _DOC_CACHE.get(path)
+    if entry is None:
+        return None
+    ts, doc = entry
+    if time.time() - ts > _DOC_CACHE_TTL:
+        _DOC_CACHE.pop(path, None)
+        return None
+    return doc
+
+
+def _cache_put(path: str, doc: dict) -> None:
+    """Simpan document ke cache. LRU: hapus item terlama jika penuh."""
+    _DOC_CACHE[path] = (time.time(), doc)
+    while len(_DOC_CACHE) > _DOC_CACHE_MAX:
+        _DOC_CACHE.popitem(last=False)
+
+
+def _cache_invalidate(path: str) -> None:
+    """Hapus document dari cache (setelah write)."""
+    _DOC_CACHE.pop(path, None)
+
+
+def _cache_clear() -> None:
+    """Bersihkan seluruh cache."""
+    _DOC_CACHE.clear()
+
+
+# ── Batch Upload Queue ────────────────────────────────────────────────────
+# Antrian transaksi untuk di-upload secara batch (hemat writes).
+# Batch dikumpulkan dulu, baru push sekaligus setelah jeda tertentu.
+_BATCH_QUEUE: list[dict] = []  # [(username, tx), ...]
+_BATCH_LOCK = threading.Lock()
+_BATCH_FLUSH_INTERVAL = 10.0  # detik — jeda antar batch
+_BATCH_MAX_SIZE = 20  # maks transaksi per batch
+
+
+def _batch_add(username: str, tx: dict) -> None:
+    """Tambah transaksi ke antrian batch."""
+    with _BATCH_LOCK:
+        _BATCH_QUEUE.append((username, tx))
+
+
+def _batch_flush() -> list[tuple[str, list[dict]]]:
+    """Ambil semua item dari antrian, kelompokkan per username."""
+    with _BATCH_LOCK:
+        if not _BATCH_QUEUE:
+            return []
+        grouped: dict[str, list[dict]] = {}
+        for username, tx in _BATCH_QUEUE:
+            grouped.setdefault(username, []).append(tx)
+        _BATCH_QUEUE.clear()
+    return list(grouped.items())
 
 
 # ── Firestore Value Converters ────────────────────────────────────────────
@@ -81,9 +145,10 @@ def _dict_to_doc(data: dict) -> dict:
 # ── Firestore Client ──────────────────────────────────────────────────────
 
 class FirestoreClient:
-    # Jeda setelah HTTP 429 (kuota Firestore habis) — poller berhenti mem-bombardir
-    # server, lalu otomatis coba lagi setelah jeda. Prevent spiral rate-limit.
-    THROTTLE_429_SECONDS = 60.0
+    # Exponential backoff untuk 429: mulai 60 detik, max 900 detik (15 menit)
+    THROTTLE_429_BASE = 60.0
+    THROTTLE_429_MAX = 900.0
+    _throttle_count = 0  # hitung berapa kali 429 berturut-turut
 
     def __init__(self):
         self._auth = get_firebase_auth()
@@ -96,10 +161,19 @@ class FirestoreClient:
     def _note_response(self, status: int, ctx: str) -> None:
         global _THROTTLED_UNTIL
         if status == 429:
-            _THROTTLED_UNTIL = time.time() + self.THROTTLE_429_SECONDS
+            # Exponential backoff: 60 → 120 → 240 → 480 → 900 detik
+            self._throttle_count += 1
+            delay = min(
+                self.THROTTLE_429_BASE * (2 ** (self._throttle_count - 1)),
+                self.THROTTLE_429_MAX
+            )
+            _THROTTLED_UNTIL = time.time() + delay
             _LOGGER.warning(
-                "%s HTTP 429 (kuota Firestore habis) — jeda request %ds",
-                ctx, int(self.THROTTLE_429_SECONDS))
+                "%s HTTP 429 (kuota Firestore habis) — jeda request %ds (ke-%d)",
+                ctx, int(delay), self._throttle_count)
+        elif status in (200, 201, 204):
+            # Reset backoff jika request berhasil
+            self._throttle_count = 0
 
     def _token(self) -> str:
         if not self._auth.get_id_token():
@@ -114,14 +188,24 @@ class FirestoreClient:
 
     # ── Document CRUD ─────────────────────────────────────────────────────
 
-    def get_document(self, path: str) -> Optional[dict]:
+    def get_document(self, path: str, use_cache: bool = True) -> Optional[dict]:
+        """Ambil document dari Firestore. Gunakan cache untuk hemat reads."""
+        # Cek cache dulu
+        if use_cache:
+            cached = _cache_get(path)
+            if cached is not None:
+                return cached
+        
         if self._throttled():
             return None
         url = f"{FIRESTORE_BASE}/{path}"
         try:
             resp = self._session.get(url, headers=self._headers(), timeout=15)
             if resp.status_code == 200:
-                return _doc_to_dict(resp.json())
+                doc = _doc_to_dict(resp.json())
+                if use_cache:
+                    _cache_put(path, doc)
+                return doc
             if resp.status_code == 404:
                 return None
             self._note_response(resp.status_code, f"get_document({path})")
@@ -146,6 +230,8 @@ class FirestoreClient:
         try:
             resp = self._session.patch(url, params=params, json=doc, headers=self._headers(), timeout=30)
             if resp.status_code in (200, 201):
+                # Invalidate cache setelah write berhasil
+                _cache_invalidate(path)
                 return True, ""
             self._note_response(resp.status_code, f"set_document({path})")
             err_msg = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
@@ -275,6 +361,8 @@ class FirestoreClient:
         """Merge beberapa transaksi ke billingps_users/{username}.transaksiList.
         Idempoten: transaksi yang id-nya sudah ada di cloud TIDAK ditulis ulang,
         sehingga sinkronisasi desktop & Android tidak saling menimpa.
+        
+        Optimasi: gunakan cache untuk mengurangi reads.
         """
         if not txs:
             return True
@@ -288,12 +376,18 @@ class FirestoreClient:
             if not fresh:
                 return True
             merged = list(fresh) + list(tx_list)
-            return self.set_user_doc(username, {"transaksiList": merged}, merge=True)
+            ok = self.set_user_doc(username, {"transaksiList": merged}, merge=True)
+            if ok:
+                # Invalidate cache setelah write berhasil
+                _cache_invalidate(f"billingps_users/{username}")
+            return ok
 
     def upsert_transactions(self, username: str, txs: list[dict]) -> bool:
         """Update (replace by id) transaksi yang sudah ada di cloud; tambahkan
         yang belum ada. Dipakai saat detail transaksi berubah di riwayat lokal
         (mis. pesanan makanan/minuman ditambahkan, status bayar berubah).
+        
+        Optimasi: gunakan cache untuk mengurangi reads.
         """
         if not txs:
             return True
@@ -307,7 +401,34 @@ class FirestoreClient:
                 if isinstance(t, dict) and t.get("id"):
                     by_id[t["id"]] = t
             merged = list(by_id.values())
-            return self.set_user_doc(username, {"transaksiList": merged}, merge=True)
+            ok = self.set_user_doc(username, {"transaksiList": merged}, merge=True)
+            if ok:
+                # Invalidate cache setelah write berhasil
+                _cache_invalidate(f"billingps_users/{username}")
+            return ok
+
+    def flush_batch_uploads(self) -> int:
+        """Flush semua transaksi di antrian batch ke Firestore.
+        Mengembalikan jumlah transaksi yang berhasil di-upload.
+        
+        Optimasi: mengelompokkan transaksi per username, lalu push sekaligus.
+        Ini mengurangi jumlah READ dari N menjadi 1 per username.
+        """
+        batches = _batch_flush()
+        if not batches:
+            return 0
+        
+        total_uploaded = 0
+        for username, txs in batches:
+            if txs:
+                ok = self.push_transactions(username, txs)
+                if ok:
+                    total_uploaded += len(txs)
+                    _LOGGER.info("Batch upload %d transaksi ke %s berhasil", len(txs), username)
+                else:
+                    _LOGGER.warning("Batch upload %d transaksi ke %s gagal", len(txs), username)
+        
+        return total_uploaded
 
     def fetch_transactions(self, username: str, max_days: int = 6) -> list[dict]:
         doc = self.get_user_doc(username)
@@ -798,3 +919,11 @@ def get_firestore_client() -> FirestoreClient:
             if _client_instance is None:
                 _client_instance = FirestoreClient()
     return _client_instance
+
+
+def flush_batch_uploads() -> int:
+    """Flush semua transaksi di antrian batch ke Firestore.
+    Wrapper untuk FirestoreClient.flush_batch_uploads().
+    Mengembalikan jumlah transaksi yang berhasil di-upload."""
+    client = get_firestore_client()
+    return client.flush_batch_uploads()

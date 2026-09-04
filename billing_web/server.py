@@ -44,7 +44,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 import main as M  # noqa: E402  (ConfigManager, fmt_rp, hitung_tarif_per_menit, verify_password, ...)
 from rr_license import LicenseManager  # noqa: E402
-WEB_APP_VERSION = "2.4.15"   # versi aplikasi Web Kasir (billing_web)
+WEB_APP_VERSION = "2.4.16"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
@@ -1044,8 +1044,11 @@ class Store:
             try:
                 tx_cloud = self._build_tx_cloud(row, self.riwayat_meta[idx])
                 if tx_cloud:
-                    self._pending_tx_uploads.append(tx_cloud)
-                    threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+                    # Optimasi: gunakan batch queue untuk hemat reads/writes
+                    from firestore_sync import _batch_add
+                    target = self._resolve_license_user()
+                    if target:
+                        _batch_add(target, tx_cloud)
             except Exception as e:
                 _LOGGER.warning("Gagal siapkan upload: %s", e)
             self.save_riwayat()
@@ -1166,24 +1169,19 @@ class Store:
             return None
 
     def _flush_cloud_uploads(self):
+        """Upload batch transaksi ke Firestore.
+        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
         try:
-            if not self._pending_tx_uploads:
-                return
-            target = self._resolve_license_user()
-            if not target:
-                self._pending_tx_uploads.clear()
-                return
-            pending = list(self._pending_tx_uploads)
-            fc = FirestoreClient()
-            ok = fc.push_transactions(target, pending)
-            if ok:
-                sent_ids = {t.get("id") for t in pending}
-                self._pending_tx_uploads = [
-                    t for t in self._pending_tx_uploads if t.get("id") not in sent_ids]
+            from firestore_sync import flush_batch_uploads
+            flushed = flush_batch_uploads()
+            if flushed > 0:
+                _LOGGER.info("Batch upload %d transaksi ke cloud berhasil", flushed)
         except Exception as e:
-            _LOGGER.warning("Gagal upload transaksi ke cloud: %s", e)
+            _LOGGER.warning("Gagal upload batch transaksi ke cloud: %s", e)
 
     def _upsert_tx_cloud_from_index(self, idx):
+        """Upload ulang transaksi ke cloud setelah detailnya berubah.
+        Optimasi: gunakan batch queue untuk hemat writes."""
         try:
             if idx is None or not (0 <= idx < len(self.riwayat_transaksi)):
                 return
@@ -1197,19 +1195,22 @@ class Store:
             target = self._resolve_license_user()
             if not target:
                 return
-            fc = FirestoreClient()
-            ok = fc.upsert_transactions(target, [tx])
-            if ok:
-                _LOGGER.info("Transaksi %s di-update di cloud", tx.get("id"))
+            # Optimasi: tambah ke batch queue alih-alih upsert langsung
+            from firestore_sync import _batch_add
+            _batch_add(target, tx)
         except Exception as e:
             _LOGGER.warning("Gagal update transaksi cloud: %s", e)
 
     def _cloud_retry_tick(self):
+        """Retry upload batch transaksi yang gagal.
+        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
         while True:
-            time.sleep(30)
+            time.sleep(60)  # Optimasi: interval lebih lama (60 detik)
             try:
-                if self._pending_tx_uploads:
-                    threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+                from firestore_sync import flush_batch_uploads
+                flushed = flush_batch_uploads()
+                if flushed > 0:
+                    _LOGGER.info("Batch retry: %d transaksi di-upload ke cloud", flushed)
             except Exception:
                 pass
 

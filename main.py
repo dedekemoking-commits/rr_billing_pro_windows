@@ -1282,7 +1282,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.15"
+APP_VERSION = "2.4.16"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -14551,34 +14551,31 @@ class AutoRentApp(ctk.CTk):
             self._save_riwayat()
 
     def _flush_cloud_uploads(self):
-        """Upload antrian transaksi ke billingps_users/{target}.transaksiList.
-        Dipanggil dari thread background; idempoten via id transaksi."""
+        """Upload batch transaksi ke Firestore.
+        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
         try:
-            if not self._pending_tx_uploads:
-                return
-            target = self._cloud_upload_target()
-            if not target:
-                self._pending_tx_uploads.clear()
-                return
-            pending = list(self._pending_tx_uploads)
-            fc = FirestoreClient()
-            ok = fc.push_transactions(target, pending)
-            if ok:
-                sent_ids = {t.get("id") for t in pending}
-                self._pending_tx_uploads = [
-                    t for t in self._pending_tx_uploads if t.get("id") not in sent_ids]
+            from firestore_sync import flush_batch_uploads
+            flushed = flush_batch_uploads()
+            if flushed > 0:
+                _LOGGER.info("Batch upload %d transaksi ke cloud berhasil", flushed)
         except Exception as e:
-            _LOGGER.warning("Gagal upload transaksi ke cloud: %s", e)
+            _LOGGER.warning("Gagal upload batch transaksi ke cloud: %s", e)
 
     def _schedule_cloud_retry(self):
+        """Jadwalkan retry batch upload.
+        Optimasi: interval lebih lama (60 detik) untuk hemat kuota."""
         try:
-            self._cloud_retry_job = self.after(30000, self._cloud_retry_tick)
+            self._cloud_retry_job = self.after(60000, self._cloud_retry_tick)  # 60 detik
         except Exception:
             pass
 
     def _upsert_tx_cloud_from_index(self, idx):
         """Upload ulang (replace by id) transaksi ke cloud setelah detailnya
-        berubah di riwayat lokal (mis. pesanan makanan/minuman ditambahkan)."""
+        berubah di riwayat lokal (mis. pesanan makanan/minuman ditambahkan).
+        
+        Optimasi: gunakan batch queue untuk hemat writes.
+        Tidak perlu upsert setiap perubahan kecil — cukup push sekali saat selesai.
+        """
         try:
             if idx is None or not (0 <= idx < len(self.riwayat_transaksi)):
                 return
@@ -14592,17 +14589,20 @@ class AutoRentApp(ctk.CTk):
             target = self._cloud_upload_target()
             if not target:
                 return
-            fc = FirestoreClient()
-            ok = fc.upsert_transactions(target, [tx])
-            if ok:
-                _LOGGER.info("Transaksi %s di-update di cloud", tx.get("id"))
+            # Optimasi: tambah ke batch queue alih-alih upsert langsung
+            from firestore_sync import _batch_add
+            _batch_add(target, tx)
         except Exception as e:
             _LOGGER.warning("Gagal update transaksi cloud: %s", e)
 
     def _cloud_retry_tick(self):
+        """Retry upload batch transaksi yang gagal.
+        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
         try:
-            if self._pending_tx_uploads:
-                threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+            from firestore_sync import flush_batch_uploads
+            flushed = flush_batch_uploads()
+            if flushed > 0:
+                _LOGGER.info("Batch retry: %d transaksi di-upload ke cloud", flushed)
         except Exception:
             pass
         self._schedule_cloud_retry()
@@ -17404,11 +17404,14 @@ class AutoRentApp(ctk.CTk):
 
         # Upload ke Firestore (billingps_users/{admin_utama}.transaksiList) agar
         # admin bisa memantau transaksi desktop dari HP (APTV2: RiwayatScreen).
+        # Optimasi: gunakan batch queue untuk hemat reads/writes.
         try:
             tx_cloud = self._build_tx_cloud(row, self.riwayat_meta[-1])
             if tx_cloud:
-                self._pending_tx_uploads.append(tx_cloud)
-                threading.Thread(target=self._flush_cloud_uploads, daemon=True).start()
+                from firestore_sync import _batch_add
+                target = self._cloud_upload_target()
+                if target:
+                    _batch_add(target, tx_cloud)
         except Exception as e:
             _LOGGER.warning("Gagal menyiapkan upload transaksi: %s", e)
 

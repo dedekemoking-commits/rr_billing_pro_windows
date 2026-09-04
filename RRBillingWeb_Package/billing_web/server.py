@@ -44,7 +44,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 import main as M  # noqa: E402  (ConfigManager, fmt_rp, hitung_tarif_per_menit, verify_password, ...)
 from rr_license import LicenseManager  # noqa: E402
-WEB_APP_VERSION = "2.4.15"   # versi aplikasi Web Kasir (billing_web)
+WEB_APP_VERSION = "2.4.16"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
