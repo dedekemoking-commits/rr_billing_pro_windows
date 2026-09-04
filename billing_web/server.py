@@ -1045,10 +1045,10 @@ class Store:
                 tx_cloud = self._build_tx_cloud(row, self.riwayat_meta[idx])
                 if tx_cloud:
                     # Optimasi: gunakan batch queue untuk hemat reads/writes
-                    from firestore_sync import _batch_add
+                    from supabase_sync import batch_add
                     target = self._resolve_license_user()
                     if target:
-                        _batch_add(target, tx_cloud)
+                        batch_add(target, tx_cloud)
             except Exception as e:
                 _LOGGER.warning("Gagal siapkan upload: %s", e)
             self.save_riwayat()
@@ -1169,15 +1169,15 @@ class Store:
             return None
 
     def _flush_cloud_uploads(self):
-        """Upload batch transaksi ke Firestore.
-        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
+        """Upload batch transaksi ke Supabase.
+        Optimasi: gunakan batch_flush() untuk hemat reads/writes."""
         try:
-            from firestore_sync import flush_batch_uploads
-            flushed = flush_batch_uploads()
+            from supabase_sync import batch_flush
+            flushed = batch_flush()
             if flushed > 0:
-                _LOGGER.info("Batch upload %d transaksi ke cloud berhasil", flushed)
+                _LOGGER.info("Supabase: batch upload %d transaksi berhasil", flushed)
         except Exception as e:
-            _LOGGER.warning("Gagal upload batch transaksi ke cloud: %s", e)
+            _LOGGER.warning("Gagal upload batch transaksi ke Supabase: %s", e)
 
     def _upsert_tx_cloud_from_index(self, idx):
         """Upload ulang transaksi ke cloud setelah detailnya berubah.
@@ -1196,21 +1196,21 @@ class Store:
             if not target:
                 return
             # Optimasi: tambah ke batch queue alih-alih upsert langsung
-            from firestore_sync import _batch_add
-            _batch_add(target, tx)
+            from supabase_sync import batch_add
+            batch_add(target, tx)
         except Exception as e:
             _LOGGER.warning("Gagal update transaksi cloud: %s", e)
 
     def _cloud_retry_tick(self):
         """Retry upload batch transaksi yang gagal.
-        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
+        Optimasi: gunakan batch_flush() untuk hemat reads/writes."""
         while True:
-            time.sleep(60)  # Optimasi: interval lebih lama (60 detik)
+            time.sleep(60)
             try:
-                from firestore_sync import flush_batch_uploads
-                flushed = flush_batch_uploads()
+                from supabase_sync import batch_flush
+                flushed = batch_flush()
                 if flushed > 0:
-                    _LOGGER.info("Batch retry: %d transaksi di-upload ke cloud", flushed)
+                    _LOGGER.info("Supabase batch retry: %d transaksi di-upload", flushed)
             except Exception:
                 pass
 

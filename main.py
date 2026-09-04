@@ -1282,7 +1282,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.16"
+APP_VERSION = "2.4.17"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -14551,15 +14551,15 @@ class AutoRentApp(ctk.CTk):
             self._save_riwayat()
 
     def _flush_cloud_uploads(self):
-        """Upload batch transaksi ke Firestore.
-        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
+        """Upload batch transaksi ke Supabase.
+        Optimasi: gunakan batch_flush() untuk hemat reads/writes."""
         try:
-            from firestore_sync import flush_batch_uploads
-            flushed = flush_batch_uploads()
+            from supabase_sync import batch_flush
+            flushed = batch_flush()
             if flushed > 0:
-                _LOGGER.info("Batch upload %d transaksi ke cloud berhasil", flushed)
+                _LOGGER.info("Supabase: batch upload %d transaksi berhasil", flushed)
         except Exception as e:
-            _LOGGER.warning("Gagal upload batch transaksi ke cloud: %s", e)
+            _LOGGER.warning("Gagal upload batch transaksi ke Supabase: %s", e)
 
     def _schedule_cloud_retry(self):
         """Jadwalkan retry batch upload.
@@ -14590,19 +14590,19 @@ class AutoRentApp(ctk.CTk):
             if not target:
                 return
             # Optimasi: tambah ke batch queue alih-alih upsert langsung
-            from firestore_sync import _batch_add
-            _batch_add(target, tx)
+            from supabase_sync import batch_add
+            batch_add(target, tx)
         except Exception as e:
             _LOGGER.warning("Gagal update transaksi cloud: %s", e)
 
     def _cloud_retry_tick(self):
         """Retry upload batch transaksi yang gagal.
-        Optimasi: gunakan flush_batch_uploads() untuk hemat reads/writes."""
+        Optimasi: gunakan batch_flush() untuk hemat reads/writes."""
         try:
-            from firestore_sync import flush_batch_uploads
-            flushed = flush_batch_uploads()
+            from supabase_sync import batch_flush
+            flushed = batch_flush()
             if flushed > 0:
-                _LOGGER.info("Batch retry: %d transaksi di-upload ke cloud", flushed)
+                _LOGGER.info("Supabase batch retry: %d transaksi di-upload", flushed)
         except Exception:
             pass
         self._schedule_cloud_retry()
@@ -17402,16 +17402,16 @@ class AutoRentApp(ctk.CTk):
             item_id = self.tree.insert("", 0, values=row, tags=("paid" if paid else "unpaid",))
             self._tree_item_to_index[item_id] = len(self.riwayat_transaksi) - 1
 
-        # Upload ke Firestore (billingps_users/{admin_utama}.transaksiList) agar
+        # Upload ke Supabase (billingps_users/{admin_utama}.transaksiList) agar
         # admin bisa memantau transaksi desktop dari HP (APTV2: RiwayatScreen).
         # Optimasi: gunakan batch queue untuk hemat reads/writes.
         try:
             tx_cloud = self._build_tx_cloud(row, self.riwayat_meta[-1])
             if tx_cloud:
-                from firestore_sync import _batch_add
+                from supabase_sync import batch_add
                 target = self._cloud_upload_target()
                 if target:
-                    _batch_add(target, tx_cloud)
+                    batch_add(target, tx_cloud)
         except Exception as e:
             _LOGGER.warning("Gagal menyiapkan upload transaksi: %s", e)
 

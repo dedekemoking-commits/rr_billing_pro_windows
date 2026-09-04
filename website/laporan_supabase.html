@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Laporan RR Billing Pro (Supabase)</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f1830; color:#e2e8f0; min-height:100vh; }
+    .container { max-width:1200px; margin:0 auto; padding:20px; }
+    h1 { color:#7c3aed; margin-bottom:20px; font-size:24px; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:15px; margin-bottom:25px; }
+    .card { background:linear-gradient(160deg,#1a2744,#0f1830); border:1px solid #1e3a5f; border-radius:12px; padding:18px; }
+    .card .label { font-size:11px; color:#8fa3bf; text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px; }
+    .card .val { font-size:24px; font-weight:800; }
+    .card .val.green { color:#34d399; }
+    .card .val.amber { color:#fbbf24; }
+    .card .val.red { color:#f87171; }
+    .card .val.sky { color:#38bdf8; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th { background:#1a2744; color:#8fa3bf; padding:10px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+    td { padding:10px; border-bottom:1px solid #1e3a5f; }
+    tr:hover { background:#1a2744; }
+    .badge { padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; }
+    .badge.lunas { background:#064e3b; color:#6ee7b7; }
+    .badge.tagihan { background:#7f1d1d; color:#fca5a5; }
+    .badge.tv { background:#3e0764; color:#d8b4fe; }
+    .badge.pc { background:#134e4a; color:#5eead4; }
+    input[type="date"], input[type="text"], select { background:#1a2744; color:#e2e8f0; border:1px solid #1e3a5f; border-radius:8px; padding:8px 12px; font-size:13px; outline:none; }
+    input:focus, select:focus { border-color:#7c3aed; }
+    .btn { background:#7c3aed; color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px; }
+    .btn:hover { background:#6d28d9; }
+    .filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; align-items:end; }
+    .empty { color:#8fa3bf; text-align:center; padding:40px; font-size:14px; }
+    .loading { color:#7c3aed; text-align:center; padding:40px; }
+    #summary { color:#8fa3bf; font-size:12px; margin-top:10px; text-align:right; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Laporan Pendapatan (Supabase)</h1>
+  
+  <div id="login-box" style="max-width:400px;margin:80px auto;text-align:center;background:#1a2744;padding:30px;border-radius:16px;">
+    <h2 style="margin-bottom:15px;">Masukkan Username</h2>
+    <input type="text" id="username-input" placeholder="username rental" style="width:100%;margin-bottom:15px;">
+    <button class="btn" onclick="loadData()" style="width:100%;">Lihat Laporan</button>
+    <p id="login-err" style="color:#f87171;margin-top:10px;display:none;"></p>
+  </div>
+
+  <div id="dashboard" style="display:none;">
+    <div class="filters">
+      <input type="date" id="f-from" placeholder="Dari">
+      <input type="date" id="f-to" placeholder="Sampai">
+      <select id="f-status">
+        <option value="">Semua Status</option>
+        <option value="true">Lunas</option>
+        <option value="false">Tagihan</option>
+      </select>
+      <input type="text" id="f-search" placeholder="Cari paket/kasir...">
+      <button class="btn" onclick="applyFilter()">Filter</button>
+      <button class="btn" style="background:#34d399;" onclick="exportCSV()">Download CSV</button>
+    </div>
+
+    <div class="cards">
+      <div class="card"><div class="label">Total Omzet</div><div class="val green" id="c-omzet">Rp 0</div></div>
+      <div class="card"><div class="label">Transaksi</div><div class="val sky" id="c-count">0</div></div>
+      <div class="card"><div class="label">Rata-rata</div><div class="val amber" id="c-avg">Rp 0</div></div>
+      <div class="card"><div class="label">Lunas</div><div class="val green" id="c-lunas">0</div></div>
+      <div class="card"><div class="label">Belum Lunas</div><div class="val red" id="c-unpaid">0</div></div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Waktu</th>
+          <th>Kasir</th>
+          <th>Kota</th>
+          <th>Sumber</th>
+          <th>Paket</th>
+          <th style="text-align:right">Total</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <p id="summary"></p>
+    <p id="kosong" class="empty" style="display:none;">Belum ada transaksi.</p>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://nxaucjpbnewcdqcezbb.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xYXVjanBibmV3Y2tlZHFjZXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MjUyNzUsImV4cCI6MjEwNDEwMTI3NX0.xi-h-3E2Yww95HzXsNmmiOmdvMKi_TaFNw8Op7xryig';
+const TABLE = 'transaksi';
+let ALL_DATA = [];
+let USERNAME = '';
+
+function rp(n) { return 'Rp ' + Math.round(n||0).toLocaleString('id-ID'); }
+function esc(s) { return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadData() {
+  USERNAME = document.getElementById('username-input').value.trim();
+  if (!USERNAME) {
+    document.getElementById('login-err').textContent = 'Masukkan username!';
+    document.getElementById('login-err').style.display = 'block';
+    return;
+  }
+  document.getElementById('login-err').style.display = 'none';
+  document.getElementById('login-box').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  document.getElementById('tbody').innerHTML = '<tr><td colspan="7" class="loading">Memuat data...</td></tr>';
+
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/${TABLE}?username=eq.${encodeURIComponent(USERNAME)}&order=waktu.desc&limit=5000`;
+    const res = await fetch(url, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+      }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    ALL_DATA = await res.json();
+    applyFilter();
+  } catch(e) {
+    document.getElementById('tbody').innerHTML = `<tr><td colspan="7" style="color:#f87171;text-align:center;">Gagal memuat: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function applyFilter() {
+  const dari = document.getElementById('f-from').value;
+  const sampai = document.getElementById('f-to').value;
+  const status = document.getElementById('f-status').value;
+  const q = document.getElementById('f-search').value.toLowerCase();
+  let filtered = ALL_DATA.filter(x => {
+    const w = (x.waktu||'').slice(0,10);
+    if (dari && w < dari) return false;
+    if (sampai && w > sampai) return false;
+    if (status === 'true' && x.paid === false) return false;
+    if (status === 'false' && x.paid !== false) return false;
+    if (q && `${x.paket||''} ${x.kasir||''} ${x.kota||''}`.toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+  renderTable(filtered);
+  renderSummary(filtered);
+}
+
+function renderSummary(data) {
+  const total = data.reduce((s,x) => s + (Number(x.total)||0), 0);
+  const lunas = data.filter(x => x.paid !== false).length;
+  const unpaid = data.length - lunas;
+  document.getElementById('c-omzet').textContent = rp(total);
+  document.getElementById('c-count').textContent = data.length;
+  document.getElementById('c-avg').textContent = data.length ? rp(Math.round(total/data.length)) : 'Rp 0';
+  document.getElementById('c-lunas').textContent = lunas;
+  document.getElementById('c-unpaid').textContent = unpaid;
+}
+
+function renderTable(data) {
+  const body = document.getElementById('tbody');
+  body.innerHTML = '';
+  document.getElementById('kosong').style.display = data.length ? 'none' : 'block';
+  if (!data.length) return;
+  data.slice(0, 3000).forEach(x => {
+    const d = x.waktu ? new Date(x.waktu.replace('Z','')) : null;
+    const waktuStr = d ? d.toLocaleString('id-ID',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : (x.waktu||'–');
+    const src = x.tvjenisps === 'PC' ? '<span class="badge pc">PC</span>' : '<span class="badge tv">TV</span>';
+    const status = x.paid === false ? '<span class="badge tagihan">TAGIHAN</span>' : '<span class="badge lunas">LUNAS</span>';
+    body.innerHTML += `<tr>
+      <td>${esc(waktuStr)}</td>
+      <td>${esc(x.kasir||'–')}</td>
+      <td>${esc(x.kota||'–')}</td>
+      <td>${src}</td>
+      <td>${esc(x.paket||'–')}</td>
+      <td style="text-align:right;font-weight:600">${rp(x.total)}</td>
+      <td>${status}</td>
+    </tr>`;
+  });
+  document.getElementById('summary').textContent = `Total: ${data.length} transaksi`;
+}
+
+function exportCSV() {
+  let csv = 'Waktu,Kasir,Kota,Sumber,Paket,Total,Status\n';
+  ALL_DATA.forEach(x => {
+    csv += `"${x.waktu||''}","${x.kasir||''}","${x.kota||''}","${x.tvjenisps||'TV'}","${x.paket||''}","${x.total||0}","${x.paid===false?'TAGIHAN':'LUNAS'}"\n`;
+  });
+  const blob = new Blob(['\uFEFF'+csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `laporan_supabase_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+}
+
+// Enter key
+document.getElementById('username-input').addEventListener('keydown', e => { if(e.key==='Enter') loadData(); });
+</script>
+</body>
+</html>
