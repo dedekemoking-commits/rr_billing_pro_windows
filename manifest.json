@@ -1,6 +1,13 @@
 {
-  "version": "2.4.18",
-  "asset_url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/download/v2.4.18/RRBILLINGPRO.exe",
-  "sha256": "2C447BF4FCFCF931774ED82324892A49E67D951E9941D51C11E5D9C2F1995B2E",
-  "sig": "YWiu5r/iwuNSHfKceKFI6aC4Ybtd8/WK5YgjuJqacUJvBglJAJ58HlVaAR67SFsSGWi3OdFidrVHDgjGJEz+STkaje69i8yopa4xUnAD6WkMn8FthnVbK5dC1RJoB6vO9zdhyKx/H30woHrZkzaWf1KZ2f96XMecQupiWm3D1fuC9F1x5RtG5JPw3ZMV79zrYV5fHgbBCe4hRjIPRY7iYaXD+//fLwYqbB10UcL/mKhZzREkZtvn22jaQEmf+qXiK6flkytHRkSmfI8IcMC7iFIOkCK1R2sbJSKl4gYZximp7JerQ8lxAgiHyzppD4X6HHxPamwmQjTEi0DM6iJcKg=="
+  "version": "2.4.19",
+  "sha256": "dc993e75798e1d56f1d3abcd50c8ad99583e2d09f44ba5a6de62bf3eaccc7b32",
+  "size": 64248227,
+  "url": "https://github.com/dedekemoking-commits/rr_billing_pro_windows/releases/latest/download/RRBILLINGPRO.exe",
+  "release_date": "2026-09-05 09:57:04",
+  "changelog": [
+    "Migrasi calls + qr_sessions ke Supabase",
+    "call.html rewrite ke Supabase REST API",
+    "Sidebar icon-only mode",
+    "Android TV Client v4.8"
+  ]
 }
