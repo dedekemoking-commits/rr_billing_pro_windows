@@ -528,6 +528,7 @@ class TvOverlayService : Service() {
             // Main Bebas (∞) — overlay selalu tampil di mode apapun.
             ensureOverlayVisible()
             overlay?.updateTimer("∞ BEBAS")
+            overlay?.updateBill(lastTotal, lastLunas, lastTagihan)
         } else {
             val visible = when (overlayMode) {
                 "hidden" -> false
@@ -541,7 +542,7 @@ class TvOverlayService : Service() {
                 overlay?.hide()
             }
         }
-        if (remaining <= 0) updateNotification("Waktu habis")
+        if (remaining <= 0 && !bebas) updateNotification("Waktu habis")
     }
 
     private fun ensureOverlayVisible() {

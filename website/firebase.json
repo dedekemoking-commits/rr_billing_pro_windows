@@ -98,6 +98,18 @@
         ]
       },
       {
+        "source": "/laporan_supabase",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+        ]
+      },
+      {
+        "source": "/laporan_supabase.html",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+        ]
+      },
+      {
         "source": "/demo-slider",
         "headers": [
           { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }

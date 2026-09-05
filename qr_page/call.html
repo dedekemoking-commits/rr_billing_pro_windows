@@ -36,25 +36,25 @@
 </head>
 <body>
 <header>
-  <h1>🔔 PANGGIL KASIR</h1>
-  <p id="tvLabel">TV …</p>
+  <h1>PANGGIL KASIR</h1>
+  <p id="tvLabel">TV ...</p>
 </header>
 <main id="app">
   <div class="card" id="card-keluhan">
-    <h2>💬 Keluhan / Butuh Bantuan</h2>
+    <h2>Keluhan / Butuh Bantuan</h2>
     <label>Ceritakan masalah Anda (opsional)</label>
-    <textarea id="catatan" rows="2" placeholder="mis. remote tidak berfungsi…"></textarea>
+    <textarea id="catatan" rows="2" placeholder="mis. remote tidak berfungsi..."></textarea>
   </div>
-  <div class="card" id="card-paket"><h2>➕ Tambah Paket / Tambah Waktu</h2></div>
-  <div class="card" id="card-makanan"><h2>🍔 Pesan Makanan</h2></div>
-  <div class="card" id="card-minuman"><h2>🥤 Pesan Minuman</h2></div>
-  <button class="big" id="btnKirim" onclick="kirimPanggilan()">📨  KIRIM KE KASIR</button>
+  <div class="card" id="card-paket"><h2>Tambah Paket / Tambah Waktu</h2></div>
+  <div class="card" id="card-makanan"><h2>Pesan Makanan</h2></div>
+  <div class="card" id="card-minuman"><h2>Pesan Minuman</h2></div>
+  <button class="big" id="btnKirim" onclick="kirimPanggilan()">KIRIM KE KASIR</button>
   <div id="status"></div>
 </main>
 
 <div id="pinView" style="display:none; max-width:520px; margin:16px auto; padding:16px; text-align:center;">
   <div class="card" style="margin: 0 auto;">
-    <h2 style="font-size:15px">🔐 Verifikasi Anda di Tempat</h2>
+    <h2 style="font-size:15px">Verifikasi Anda di Tempat</h2>
     <div id="pinMsg" style="font-size:14px; color:#cfe6f5; margin:10px 0;"></div>
     <div id="pinBox" style="display:none;">
       <input id="pinInput" type="text" inputmode="text" maxlength="5" autocomplete="off" placeholder="ABCD1"
@@ -67,10 +67,11 @@
   </div>
 </div>
 
-<script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script>
+var SUPABASE_URL = 'https://nqaucjpbnewckedqcezb.supabase.co';
+var SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xYXVjanBibmV3Y2tlZHFjZXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MjUyNzUsImV4cCI6MjEwNDEwMTI3NX0.xi-h-3E2Yww95HzXsNmmiOmdvMKi_TaFNw8Op7xryig';
+
 var params = new URLSearchParams(location.search);
 var TV = params.get('tv') || '';
 var KODE = params.get('k') || '';
@@ -88,42 +89,67 @@ function tampilStatus(msg, ok) {
   document.getElementById('status').innerHTML =
     '<div class="status' + (ok ? ' ok' : ' err') + '">' + msg + '</div>';
 }
-
 function tampilPinStatus(msg, ok) {
   document.getElementById('pinStatus').innerHTML =
     '<div class="status' + (ok ? ' ok' : ' err') + '">' + msg + '</div>';
 }
-
 function showPin() {
   document.getElementById('app').style.display = 'none';
   document.getElementById('pinView').style.display = 'block';
+}
+
+function supaGet(table, query) {
+  return fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + query, {
+    headers: { 'apikey': SUPABASE_ANON, 'Authorization': 'Bearer ' + SUPABASE_ANON }
+  }).then(function (r) { return r.json(); });
+}
+function supaInsert(table, data) {
+  return fetch(SUPABASE_URL + '/rest/v1/' + table, {
+    method: 'POST',
+    headers: { 'apikey': SUPABASE_ANON, 'Authorization': 'Bearer ' + SUPABASE_ANON,
+      'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    body: JSON.stringify(data)
+  }).then(function (r) { return r.json(); });
+}
+function supaUpdate(table, id, data) {
+  return fetch(SUPABASE_URL + '/rest/v1/' + table + '?id=eq.' + encodeURIComponent(id), {
+    method: 'PATCH',
+    headers: { 'apikey': SUPABASE_ANON, 'Authorization': 'Bearer ' + SUPABASE_ANON,
+      'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    body: JSON.stringify(data)
+  }).then(function (r) { return r.json(); });
+}
+function supaGetById(table, id) {
+  return supaGet(table, 'id=eq.' + encodeURIComponent(id) + '&limit=1').then(function (rows) {
+    return rows && rows[0] ? rows[0] : null;
+  });
+}
+
+function parseJsonField(v) {
+  if (!v) return {};
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch (e) { return {}; }
 }
 
 if (!TV || !KODE) {
   document.getElementById('app').innerHTML =
     '<div class="card status err">QR tidak valid atau sudah kedaluwarsa.<br>Silakan hubungi kasir langsung.</div>';
 } else {
-  firebase.initializeApp({
-    apiKey: 'AIzaSyAqOxWEBD9_AqaMiMtFwbyTvh-d_mdVofQ',
-    authDomain: 'rrbillingpro.firebaseapp.com',
-    projectId: 'rrbillingpro'
-  });
-  firebase.auth().signInAnonymously()
-    .then(function () { showPin(); mulaiSesi(); })
-    .catch(function (e) { tampilStatus('Gagal terhubung: ' + e.message, false); });
+  showPin();
+  mulaiSesi();
 }
 
 function muatMenu() {
   if (!OWNER || OWNER === '') return renderSemua();
-  return firebase.firestore().collection('call_meta').doc(OWNER).get()
-    .then(function (doc) {
-      if (doc.exists) {
-        var d = doc.data();
+  return supaGet('call_meta', 'id=eq.' + encodeURIComponent(OWNER) + '&limit=1')
+    .then(function (rows) {
+      if (rows && rows[0]) {
+        var d = rows[0];
         data.nama_rental = d.nama_rental || '';
-        data.paket_grup = d.paket_grup || {};
-        data.makanan = d.makanan || {};
-        data.minuman = d.minuman || {};
-        data.stok = d.stok || {};
+        data.paket_grup = parseJsonField(d.paket_grup);
+        data.makanan = parseJsonField(d.makanan);
+        data.minuman = parseJsonField(d.minuman);
+        data.stok = parseJsonField(d.stok);
       }
       renderSemua();
       mulaiRefreshMenu();
@@ -131,22 +157,20 @@ function muatMenu() {
     .catch(function () { renderSemua(); });
 }
 
-// ── Refresh otomatis: menu & harga mengikuti update kasir (Kontrol Harga) ──
-// Halaman di-refetch tiap 20 detik TANPA menghapus pilihan pelanggan.
 var _menuTimer = null;
 function mulaiRefreshMenu() {
   if (_menuTimer || !OWNER) return;
   _menuTimer = setInterval(function () {
     var snap = simpanPilihan();
-    firebase.firestore().collection('call_meta').doc(OWNER).get()
-      .then(function (doc) {
-        if (doc.exists) {
-          var d = doc.data();
+    supaGet('call_meta', 'id=eq.' + encodeURIComponent(OWNER) + '&limit=1')
+      .then(function (rows) {
+        if (rows && rows[0]) {
+          var d = rows[0];
           data.nama_rental = d.nama_rental || '';
-          data.paket_grup = d.paket_grup || {};
-          data.makanan = d.makanan || {};
-          data.minuman = d.minuman || {};
-          data.stok = d.stok || {};
+          data.paket_grup = parseJsonField(d.paket_grup);
+          data.makanan = parseJsonField(d.makanan);
+          data.minuman = parseJsonField(d.minuman);
+          data.stok = parseJsonField(d.stok);
         }
         renderSemua();
         pulihkanPilihan(snap);
@@ -178,7 +202,7 @@ function pulihkanPilihan(s) {
     var q = s.qty[k] || 0;
     if (q > 0) {
       var st = parseInt(ch.getAttribute('data-stok') || '0', 10) || 0;
-      if (st > 0 && q > st) q = st;   // stok mengecil setelah kasir update → ikuti
+      if (st > 0 && q > st) q = st;
       if (q > 99) q = 99;
       ch.setAttribute('data-qty', q);
       ch.checked = true;
@@ -202,21 +226,18 @@ function renderSemua() {
 function renderPaket() {
   var el = document.getElementById('card-paket');
   var semua = data.paket_grup || {};
-  // Jika QR menyertakan grup kartu TV (param g=), tampilkan paket grup itu saja.
   var g = {};
   if (GRUP && semua[GRUP]) {
     g[GRUP] = semua[GRUP];
   } else if (!GRUP) {
     g = semua;
   }
-  var html = '<h2>➕ Tambah Paket / Tambah Waktu</h2>';
+  var html = '<h2>Tambah Paket / Tambah Waktu</h2>';
   Object.keys(g).forEach(function (gr) {
     html += '<label>' + esc(gr) + '</label>';
     Object.keys(g[gr]).forEach(function (nm) {
       var p = g[gr][nm] || {};
       var menit = p.menit || 60;
-      // Tidak ada paket yang otomatis terpilih: pelanggan boleh mengirim
-      // panggilan tanpa paket (hanya pesan makanan/minuman / keluhan).
       html += '<div class="menu-line">' +
         '<input type="radio" name="paket" value="' + esc(nm) + '" data-g="' + esc(gr) + '" data-menit="' + menit + '" data-harga="' + (p.harga || 0) + '" onmousedown="paketMdo(this)" onclick="togglePaket(this)">' +
         '<span class="nm">' + esc(nm) + ' (' + menit + ' menit)</span>' +
@@ -229,18 +250,17 @@ function renderPaket() {
   el.innerHTML = html;
 }
 
-// Stok item (0 = tidak dilacak / tanpa batas). -1 = habis (blokir).
 function stokItem(type, nm) {
   var m = (data.stok || {})[type] || {};
-  if (m[nm] === undefined || m[nm] === null) return 0;      // tidak dilacak → bebas
+  if (m[nm] === undefined || m[nm] === null) return 0;
   var v = parseInt(m[nm], 10) || 0;
-  return v <= 0 ? -1 : v;                                     // dilacak, habis → -1
+  return v <= 0 ? -1 : v;
 }
 
 function renderMenu(type, cardId) {
   var el = document.getElementById(cardId);
   var d = data[type] || {};
-  var judul = type === 'makanan' ? '🍔 Pesan Makanan' : '🥤 Pesan Minuman';
+  var judul = type === 'makanan' ? 'Pesan Makanan' : 'Pesan Minuman';
   var html = '<h2>' + judul + '</h2>';
   Object.keys(d).forEach(function (nm) {
     var st = stokItem(type, nm);
@@ -254,7 +274,7 @@ function renderMenu(type, cardId) {
       '<input type="checkbox" class="chk" data-type="' + type + '" data-name="' + esc(nm) + '" data-harga="' + (d[nm] || 0) + '" data-qty="0" data-stok="' + st + '">' +
       '<span class="nm">' + esc(nm) + '</span>' +
       '<span class="qtyw">' +
-      '<button type="button" class="qbtn" onclick="qty(this,-1)">−</button>' +
+      '<button type="button" class="qbtn" onclick="qty(this,-1)">-</button>' +
       '<span class="qnum">0</span>' +
       '<button type="button" class="qbtn" onclick="qty(this,1)">+</button>' +
       '</span>' +
@@ -266,8 +286,6 @@ function renderMenu(type, cardId) {
   el.innerHTML = html;
 }
 
-// Ubah jumlah (qty) makanan/minuman: + / −. qty 0 = tidak dipesan.
-// Item dilacak stoknya → qty tidak boleh melebihi stok tersisa.
 function qty(btn, d) {
   var line = btn.closest('.menu-line');
   var ch = line.querySelector('.chk');
@@ -290,16 +308,12 @@ function esc(s) {
 // ── Sesi PIN QR ────────────────────────────────────────────────────────────
 function mulaiSesi() {
   if (SID) { cekSesi(SID); return; }
-  var fire = firebase.firestore();
-  fire.collection('qr_sessions').add({
-    tv: TV,
-    kode: KODE,
-    owner: OWNER || '',
-    uid: firebase.auth().currentUser.uid,
-    status: 'awaiting',
-    created: Date.now()
-  }).then(function (doc) {
-    SID = doc.id;
+  supaInsert('qr_sessions', {
+    tv: TV, kode: KODE, owner: OWNER || '', pin: '', pin_user: '',
+    status: 'awaiting', sid: '', created: Date.now(), updatedAt: ''
+  }).then(function (rows) {
+    if (!rows || !rows.length) throw new Error('Gagal membuat sesi');
+    SID = rows[0].id;
     var u = new URLSearchParams(location.search);
     u.set('s', SID);
     history.replaceState(null, '', '?' + u.toString());
@@ -310,17 +324,15 @@ function mulaiSesi() {
 }
 
 function cekSesi(sid) {
-  var ref = firebase.firestore().collection('qr_sessions').doc(sid);
   if (piTimer) clearInterval(piTimer);
   piTimer = setInterval(function () {
-    ref.get().then(function (snap) {
-      if (!snap.exists) {
+    supaGetById('qr_sessions', sid).then(function (d) {
+      if (!d) {
         clearInterval(piTimer); piTimer = null;
         document.getElementById('pinBox').style.display = 'none';
         tampilPinStatus('Sesi tidak berlaku lagi. Ulangi scan QR.', false);
         return;
       }
-      var d = snap.data();
       if (d.status === 'verified') {
         clearInterval(piTimer); piTimer = null;
         document.getElementById('pinView').style.display = 'none';
@@ -345,13 +357,13 @@ function cekSesi(sid) {
       }
       if (!d.pin) {
         document.getElementById('pinBox').style.display = 'none';
-        document.getElementById('pinMsg').innerHTML = 'Scan diterima…<br>PIN sedang ditampilkan di layar TV.';
+        document.getElementById('pinMsg').innerHTML = 'Scan diterima...<br>PIN sedang ditampilkan di layar TV.';
         tampilPinStatus('', false);
         return;
       }
       if (d.pin_user) {
         document.getElementById('pinBox').style.display = 'none';
-        document.getElementById('pinMsg').innerHTML = 'PIN terkirim…<br>sedang diverifikasi kasir.';
+        document.getElementById('pinMsg').innerHTML = 'PIN terkirim...<br>sedang diverifikasi kasir.';
         tampilPinStatus('', false);
         return;
       }
@@ -370,10 +382,10 @@ function kirimPin() {
     return;
   }
   document.getElementById('btnPin').disabled = true;
-  document.getElementById('btnPin').textContent = 'MEMVERIFIKASI …';
-  firebase.firestore().collection('qr_sessions').doc(SID).update({ pin_user: v })
+  document.getElementById('btnPin').textContent = 'MEMVERIFIKASI ...';
+  supaUpdate('qr_sessions', SID, { pin_user: v })
     .then(function () {
-      tampilPinStatus('PIN terkirim — menunggu verifikasi kasir…', false);
+      tampilPinStatus('PIN terkirim — menunggu verifikasi kasir...', false);
     })
     .catch(function (e) {
       document.getElementById('btnPin').disabled = false;
@@ -382,17 +394,14 @@ function kirimPin() {
     });
 }
 
-// Paket bersifat toggle: klik lagi pada paket yang sama = BATAL pilih (tidak
-// mengunci). Sama seperti perilaku checkbox makanan/minuman.
-// onmousedown mencatat status SEBELUM klik; onclick baru menerjemahkannya.
 function paketMdo(rad) { rad.dataset.prev = rad.checked ? '1' : '0'; }
 function togglePaket(rad) {
   var prev = rad.dataset.prev === '1';
   if (prev) {
-    rad.checked = false;               // klik ulang paket terpilih → batalkan
+    rad.checked = false;
   } else {
     document.querySelectorAll('input[name=paket]').forEach(function (x) { x.checked = false; });
-    rad.checked = true;                // pilih paket ini
+    rad.checked = true;
   }
 }
 
@@ -418,7 +427,7 @@ function kirimPanggilan() {
     if (tipe === 'makanan') mkn++; else min++;
     var nm = ch.getAttribute('data-name');
     var hr = ch.getAttribute('data-harga');
-    var teks = (tipe === 'makanan' ? '🍔 ' : '🥤 ') + (qn > 1 ? qn + ' ' : '') + nm +
+    var teks = (tipe === 'makanan' ? ' ' : ' ') + (qn > 1 ? qn + ' ' : '') + nm +
       ' (' + rupiah(hr) + ')';
     item.push(teks);
     items.push({ t: tipe, n: nm, q: qn, h: parseInt(hr || '0', 10) || 0 });
@@ -437,25 +446,21 @@ function kirimPanggilan() {
   else jenis = 'keluhan';
 
   document.getElementById('btnKirim').disabled = true;
-  document.getElementById('btnKirim').textContent = 'MENGIRIM …';
+  document.getElementById('btnKirim').textContent = 'MENGIRIM ...';
 
   var payload = {
-    tv: TV,
-    kode: KODE,
-    jenis: jenis,
-    item: item,
-    items: items,
-    catatan: catatan,
-    ts: Date.now()
+    tv: TV, kode: KODE, jenis: jenis, item: item, items: items,
+    catatan: catatan, ts: Date.now(), sid: SID || '',
+    createdAt: new Date().toISOString()
   };
-  if (SID) payload.sid = SID;
-  firebase.firestore().collection('calls').add(payload).then(function () {
+  supaInsert('calls', payload).then(function (rows) {
+    if (!rows || !rows.length) throw new Error('Gagal menyimpan');
     document.getElementById('app').innerHTML =
-      '<div class="card status ok" style="font-size:17px">✅ Panggilan terkirim!<br>' +
+      '<div class="card status ok" style="font-size:17px">Panggilan terkirim!<br>' +
       '<span style="font-size:14px;color:#9fe8c0">Kasir akan segera datang. Mohon tunggu.</span></div>';
   }).catch(function (e) {
     document.getElementById('btnKirim').disabled = false;
-    document.getElementById('btnKirim').textContent = '📨  KIRIM KE KASIR';
+    document.getElementById('btnKirim').textContent = 'KIRIM KE KASIR';
     tampilStatus('Gagal terkirim: ' + e.message, false);
   });
 }

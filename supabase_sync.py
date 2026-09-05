@@ -17,8 +17,8 @@ import requests
 _LOGGER = logging.getLogger(__name__)
 
 # ── Konfigurasi Supabase ──────────────────────────────────────────────────
-SUPABASE_URL = "https://nxaucjpbnewcdqcezbb.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xYXVjanBibmV3Y2tlZHFjZXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MjUyNzUsImV4cCI6jMxNDEwMTI3NX0.xi-h-3E2Yww95HzXsNmmiOmdvMKi_TaFNw8Op7xryig"
+SUPABASE_URL = "https://nqaucjpbnewckedqcezb.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xYXVjanBibmV3Y2tlZHFjZXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MjUyNzUsImV4cCI6MjEwNDEwMTI3NX0.xi-h-3E2Yww95HzXsNmmiOmdvMKi_TaFNw8Op7xryig"
 SUPABASE_TABLE = "transaksi"
 
 # ── Global State ───────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ class SupabaseClient:
 def batch_add(username: str, tx: dict) -> None:
     """Tambah transaksi ke antrian batch."""
     with _BATCH_LOCK:
-        tx["_username"] = username
+        tx["username"] = username
         _BATCH_QUEUE.append(tx)
 
 
@@ -180,7 +180,7 @@ def push_transaction(username: str, tx: dict) -> bool:
     """Upload 1 transaksi langsung ke Supabase."""
     with _UPLOAD_LOCK:
         client = SupabaseClient()
-        tx["_username"] = username
+        tx["username"] = username
         return client.upsert([tx])
 
 
@@ -189,7 +189,7 @@ def push_transactions(username: str, txs: list[dict]) -> bool:
     with _UPLOAD_LOCK:
         client = SupabaseClient()
         for tx in txs:
-            tx["_username"] = username
+            tx["username"] = username
         return client.upsert(txs)
 
 
@@ -212,7 +212,334 @@ def fetch_transactions(username: str, limit: int = 1000) -> list[dict]:
     return result
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  BOOKING — CRUD via Supabase REST (menggantikan Firestore bookings)
+# ══════════════════════════════════════════════════════════════════════════════
+
+BOOKINGS_TABLE = "bookings"
+CALL_META_TABLE = "call_meta"
+CALLS_TABLE = "calls"
+QR_SESSIONS_TABLE = "qr_sessions"
+
+
+class SupabaseCalls:
+    """Query + delete from calls table (Supabase)."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def query_all(self, **filters) -> list:
+        params = {}
+        for k, v in filters.items():
+            if v is not None:
+                params[k] = f"eq.{v}"
+        params["order"] = "ts.desc"
+        url = f"{SUPABASE_URL}/rest/v1/{CALLS_TABLE}"
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json() or []
+                for r in rows:
+                    r["_id"] = r.get("id", "")
+                return rows
+        except Exception as e:
+            _LOGGER.warning("SupabaseCalls.query_all error: %s", e)
+        return []
+
+    def delete(self, row_id: str) -> bool:
+        url = f"{SUPABASE_URL}/rest/v1/{CALLS_TABLE}?id=eq.{row_id}"
+        try:
+            resp = self._session.delete(url, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseCalls.delete error: %s", e)
+        return False
+
+
+class SupabaseQrSession:
+    """Query + update qr_sessions table (Supabase)."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def query_all(self, **filters) -> list:
+        params = {}
+        for k, v in filters.items():
+            if v is not None:
+                params[k] = f"eq.{v}"
+        params["order"] = "created.desc"
+        url = f"{SUPABASE_URL}/rest/v1/{QR_SESSIONS_TABLE}"
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json() or []
+                for r in rows:
+                    r["_id"] = r.get("id", "")
+                return rows
+        except Exception as e:
+            _LOGGER.warning("SupabaseQrSession.query_all error: %s", e)
+        return []
+
+    def get_by_id(self, row_id: str) -> dict:
+        params = {"id": f"eq.{row_id}", "limit": "1"}
+        url = f"{SUPABASE_URL}/rest/v1/{QR_SESSIONS_TABLE}"
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                if rows:
+                    rows[0]["_id"] = rows[0].get("id", "")
+                    return rows[0]
+        except Exception as e:
+            _LOGGER.warning("SupabaseQrSession.get_by_id error: %s", e)
+        return {}
+
+    def update(self, row_id: str, data: dict) -> bool:
+        url = f"{SUPABASE_URL}/rest/v1/{QR_SESSIONS_TABLE}?id=eq.{row_id}"
+        try:
+            resp = self._session.patch(url, json=data, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseQrSession.update error: %s", e)
+        return False
+
+    def delete(self, row_id: str) -> bool:
+        url = f"{SUPABASE_URL}/rest/v1/{QR_SESSIONS_TABLE}?id=eq.{row_id}"
+        try:
+            resp = self._session.delete(url, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseQrSession.delete error: %s", e)
+        return False
+
+
+class SupabaseBooking:
+    """Helper untuk operasi booking di Supabase.
+    Semua method mengembalikan dict dengan key '_id' (= Supabase 'id')
+    agar kompatibel dengan kode existing yang memakai `_id`."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    @staticmethod
+    def _map_id(rows: list) -> list:
+        """Map 'id' -> '_id' agar kode existing tetap jalan."""
+        for r in rows:
+            if "id" in r and "_id" not in r:
+                r["_id"] = r["id"]
+        return rows
+
+    @staticmethod
+    def _map_one(row: dict) -> dict:
+        if row and "id" in row and "_id" not in row:
+            row["_id"] = row["id"]
+        return row
+
+    # ── Query ───────────────────────────────────────────────────────────────
+    def query_all(self, owner: str = "", status: str = "", limit: int = 100) -> list:
+        """Query bookings, optional filter owner/status."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}"
+        params = {"order": "createdAt.desc", "limit": str(limit)}
+        if owner:
+            params["owner"] = f"eq.{owner}"
+        if status:
+            params["status"] = f"eq.{status}"
+        try:
+            resp = self._session.get(url, params=params, timeout=15)
+            if resp.status_code == 200:
+                return self._map_id(resp.json())
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.query_all error: %s", e)
+        return []
+
+    def get_by_id(self, did: str) -> dict:
+        """Ambil 1 booking by ID."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}"
+        params = {"id": f"eq.{did}", "limit": "1"}
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return self._map_one(rows[0]) if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.get_by_id error: %s", e)
+        return {}
+
+    def query_valid_for_card(self, owner: str, perangkat: str) -> list:
+        """Query booking 'dikonfirmasi' untuk kartu tertentu, belum sesiDimulai."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "status": f"eq.dikonfirmasi",
+            "perangkat": f"eq.{perangkat}",
+            "sesiDimulai": "eq.false",
+            "order": "jam.asc",
+            "limit": "50",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=15)
+            if resp.status_code == 200:
+                return self._map_id(resp.json())
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.query_valid_for_card error: %s", e)
+        return []
+
+    # ── Write ───────────────────────────────────────────────────────────────
+    def update_status(self, did: str, status: str, kasir: str = "",
+                      alasan: str = "") -> bool:
+        """Update status booking (dikonfirmasi / ditolak)."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}?id=eq.{did}"
+        patch = {
+            "status": status,
+            "kasir": kasir,
+            "alasan": alasan,
+            "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            resp = self._session.patch(url, json=patch, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.update_status error: %s", e)
+            return False
+
+    def mark_sesi_dimulai(self, did: str) -> bool:
+        """Tandai booking sudah dimulai sesinya."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}?id=eq.{did}"
+        patch = {
+            "sesiDimulai": True,
+            "sesiDimulaiAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            resp = self._session.patch(url, json=patch, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.mark_sesi_dimulai error: %s", e)
+            return False
+
+    def lunas_sisa(self, did: str, total: int, sisa: int, kasir: str = "") -> bool:
+        """Tandai sisa DP sebagai LUNAS."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}?id=eq.{did}"
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        patch = {
+            "statusBayar": "lunas_transfer",
+            "nominalTransfer": total,
+            "pelunasanSisa": sisa,
+            "lunasAt": now,
+            "updatedAt": now,
+            "kasir": kasir,
+        }
+        try:
+            resp = self._session.patch(url, json=patch, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.lunas_sisa error: %s", e)
+            return False
+
+    def insert(self, data: dict) -> dict:
+        """Insert booking baru, return row dengan _id."""
+        url = f"{SUPABASE_URL}/rest/v1/{BOOKINGS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=15)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return self._map_one(rows[0]) if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseBooking.insert error: %s", e)
+        return {}
+
+
+# ── call_meta helper ──────────────────────────────────────────────────────
+class SupabaseCallMeta:
+    """Push device status, no_hp, paket_grup ke call_meta Supabase."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        })
+
+    def upsert(self, owner: str, data: dict) -> bool:
+        """Upsert call_meta/{owner}."""
+        url = f"{SUPABASE_URL}/rest/v1/{CALL_META_TABLE}"
+        row = {"id": owner, "owner": owner}
+        row.update(data)
+        try:
+            resp = self._session.post(url, json=[row], timeout=15)
+            return resp.status_code in (200, 201, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseCallMeta.upsert error: %s", e)
+            return False
+
+    def get(self, owner: str) -> dict:
+        """Ambil call_meta/{owner}."""
+        url = f"{SUPABASE_URL}/rest/v1/{CALL_META_TABLE}"
+        params = {"id": f"eq.{owner}", "limit": "1"}
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCallMeta.get error: %s", e)
+        return {}
+
+
+# ── Singleton instances ───────────────────────────────────────────────────
+_booking_client = None
+_callmeta_client = None
+_calls_client = None
+_qrsession_client = None
+
+
+def get_booking_client() -> SupabaseBooking:
+    global _booking_client
+    if _booking_client is None:
+        _booking_client = SupabaseBooking()
+    return _booking_client
+
+
+def get_callmeta_client() -> SupabaseCallMeta:
+    global _callmeta_client
+    if _callmeta_client is None:
+        _callmeta_client = SupabaseCallMeta()
+    return _callmeta_client
+
+
+def get_calls_client() -> SupabaseCalls:
+    global _calls_client
+    if _calls_client is None:
+        _calls_client = SupabaseCalls()
+    return _calls_client
+
+
+def get_qrsession_client() -> SupabaseQrSession:
+    global _qrsession_client
+    if _qrsession_client is None:
+        _qrsession_client = SupabaseQrSession()
+    return _qrsession_client
+
+
 # ── Legacy Compatibility ───────────────────────────────────────────────────
-# Alias agar kode lama yang import dari firestore_sync tetap jalan
 def get_supabase_client() -> SupabaseClient:
     return SupabaseClient()

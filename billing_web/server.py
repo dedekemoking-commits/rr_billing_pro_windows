@@ -44,7 +44,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 import main as M  # noqa: E402  (ConfigManager, fmt_rp, hitung_tarif_per_menit, verify_password, ...)
 from rr_license import LicenseManager  # noqa: E402
-WEB_APP_VERSION = "2.4.16"   # versi aplikasi Web Kasir (billing_web)
+WEB_APP_VERSION = "2.4.19"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
@@ -713,6 +713,7 @@ class Store:
     def __init__(self):
         self._lock = threading.RLock()
         self.user = None
+        self._user_email = ""
         self.role = None
         self.sesi_tv = {}      # nomor -> Sesi
         self.sesi_warnet = {}  # key -> Sesi
@@ -1161,9 +1162,10 @@ class Store:
                 "paket": str(meta.get("paket_raw") or ""),
                 "total": total,
                 "pesanan": pesanan,
-                "paketHarga": paket_harga,
-                "pesananHarga": pesananHarga,
-                "tvJenisPs": "TV" if meta.get("source") == "tv" else "PC",
+                "paketharga": paket_harga,
+                "pesananharga": pesananHarga,
+                "tvjenisps": "TV" if meta.get("source") == "tv" else "PC",
+                "email": getattr(self, "_user_email", "") or "",
             }
         except Exception:
             return None
@@ -1513,6 +1515,7 @@ class Store:
                           "Aktivasi akun dulu lewat aplikasi Android / hubungi admin.")
         self._fail_attempts.pop(uname, None)
         self.user = uname
+        self._user_email = email
         self.role = "admin"
         self._sync_timer_state()
         self.load_kartu()
@@ -2550,8 +2553,8 @@ def _qr_panggilan_masuk(doc):
         }
         _qr_log_append(order)
         try:
-            from firestore_sync import get_firestore_client
-            get_firestore_client().delete_document(f"calls/{did}")
+            from supabase_sync import get_calls_client
+            get_calls_client().delete(did)
         except Exception as e:
             _qr_log(f"gagal hapus panggilan {did}: {e}")
         if not rate_ok:
@@ -2567,22 +2570,18 @@ def _qr_panggilan_masuk(doc):
 
 
 def _booking_poll_loop():
-    """Polling Firestore 'bookings' — booking status BARU (belum dikonfirmasi)
+    """Polling Supabase 'bookings' — booking status BARU (belum dikonfirmasi)
     diberitahukan ke kasir via event 'booking_baru' (toast + beep di UI)."""
     seen = set()
     while True:
         try:
             owner = (STORE._resolve_license_user() or "").strip().lower()
             if owner:
-                docs = FirestoreClient().query_all("bookings", limit=50,
-                                                   order_field="createdAt") or []
+                from supabase_sync import get_booking_client
+                docs = get_booking_client().query_all(owner=owner, status="baru", limit=50)
                 ids_baru = set()
                 for d in docs:
-                    if str(d.get("owner", "")).strip().lower() != owner:
-                        continue
                     did = str(d.get("_id", ""))
-                    if str(d.get("status", "")) != "baru":
-                        continue
                     ids_baru.add(did)
                     if did in seen:
                         continue
@@ -2623,36 +2622,60 @@ def _start_booking_poller():
 
 
 def _start_call_poller():
-    try:
-        from firestore_sync import CallPoller
-        p = CallPoller(interval=6.0, limit=5, order_field="ts")
-        p.start(_qr_panggilan_masuk)
-        STORE._call_poller = p
-        _qr_log("CallPoller dimulai (calls, order ts DESC)")
-    except Exception as e:
-        _qr_log(f"CallPoller gagal start: {e}")
+    threading.Thread(target=_call_poll_supabase, name="CallPollerSupabase", daemon=True).start()
+    _qr_log("CallPoller dimulai (Supabase calls, order ts DESC)")
     _start_pin_poller()
 
 
+def _call_poll_supabase():
+    """Poll Supabase calls setiap 6 detik — callback _qr_panggilan_masuk."""
+    seen = set()
+    while True:
+        try:
+            from supabase_sync import get_calls_client
+            rows = get_calls_client().query_all()
+            for r in rows:
+                did = str(r.get("id", ""))
+                if did in seen:
+                    continue
+                seen.add(did)
+                try:
+                    _qr_panggilan_masuk(r)
+                except Exception:
+                    pass
+            if len(seen) > 5000:
+                seen = set(list(seen)[-2500:])
+        except Exception as e:
+            _qr_log(f"call poll supabase error: {e}")
+        time.sleep(6)
+
+
 def _start_pin_poller():
-    """PIN sesi QR (qr_sessions) — verifikasi kehadiran pelanggan di depan TV.
-    Port _qr_pin_proses (main.py): tanpanya PIN panggil operator tidak pernah
-    dikirim ke TV (SHOW_PIN) padahal hub WS (tv_ws_hub) sudah siap."""
-    try:
-        from firestore_sync import CallPoller
-        _PIN_ACTIF.clear()
-        _PIN_HIDE_LAST.clear()
-        _PIN_LOOP_STOP.clear()
-        p = CallPoller(collection="qr_sessions", interval=4.0, limit=10,
-                       order_field="created")
-        p.start(_qr_pin_proses)
-        STORE._pin_poller = p
-        t = threading.Thread(target=_qr_pin_loop, daemon=True)
-        t.start()
-        STORE._pin_loop_thread = t
-        _qr_log("PinPoller dimulai (qr_sessions, order created DESC)")
-    except Exception as e:
-        _qr_log(f"PinPoller gagal start: {e}")
+    """PIN sesi QR (qr_sessions) — verifikasi kehadiran pelanggan di depan TV."""
+    _PIN_ACTIF.clear()
+    _PIN_HIDE_LAST.clear()
+    _PIN_LOOP_STOP.clear()
+    threading.Thread(target=_pin_poll_supabase, name="PinPollerSupabase", daemon=True).start()
+    t = threading.Thread(target=_qr_pin_loop, daemon=True)
+    t.start()
+    STORE._pin_loop_thread = t
+    _qr_log("PinPoller dimulai (Supabase qr_sessions, order created DESC)")
+
+
+def _pin_poll_supabase():
+    """Poll Supabase qr_sessions setiap 4 detik — callback _qr_pin_proses."""
+    while True:
+        try:
+            from supabase_sync import get_qrsession_client
+            rows = get_qrsession_client().query_all()
+            for r in rows:
+                try:
+                    _qr_pin_proses(r)
+                except Exception:
+                    pass
+        except Exception as e:
+            _qr_log(f"pin poll supabase error: {e}")
+        time.sleep(4)
 
 
 # ── PIN Sesi QR (panggil operator) — port main.py ───────────────────────────
@@ -2675,8 +2698,8 @@ def _qr_pin_baru() -> str:
 
 def _set_pin_doc(did: str, data: dict):
     try:
-        from firestore_sync import get_firestore_client
-        get_firestore_client().set_document(f"qr_sessions/{did}", data, merge=True)
+        from supabase_sync import get_qrsession_client
+        get_qrsession_client().update(did, data)
     except Exception as e:
         _qr_log(f"update sesi {did} gagal: {e}")
 
@@ -2725,8 +2748,8 @@ def _qr_pin_selesai(tv: str, sid: str, reason: str = "", hapus_doc: bool = True)
         _qr_pin_clear_tv("", tv)
     if hapus_doc and sid:
         try:
-            from firestore_sync import get_firestore_client
-            get_firestore_client().delete_document(f"qr_sessions/{sid}")
+            from supabase_sync import get_qrsession_client
+            get_qrsession_client().delete(sid)
         except Exception as e:
             _qr_log(f"hapus sesi {sid} gagal: {e}")
 
@@ -2810,8 +2833,8 @@ def _qr_pin_proses(doc: dict):
             created_ms = float(doc.get("created", 0) or 0)
             if created_ms and now - created_ms / 1000.0 > 300:
                 try:
-                    from firestore_sync import get_firestore_client
-                    get_firestore_client().delete_document(f"qr_sessions/{did}")
+                    from supabase_sync import get_qrsession_client
+                    get_qrsession_client().delete(did)
                 except Exception:
                     pass
     except Exception as e:
@@ -2832,9 +2855,9 @@ def _qr_pin_loop():
                 # dibatalkan) → 2 kali berturut-turut hilang = hangus.
                 if sid and (akt.get("doc_none") or 0) < 2:
                     try:
-                        from firestore_sync import get_firestore_client
-                        d = get_firestore_client().get_document(f"qr_sessions/{sid}")
-                        if d is None:
+                        from supabase_sync import get_qrsession_client
+                        d = get_qrsession_client().get_by_id(sid)
+                        if not d:
                             akt["doc_none"] = (akt.get("doc_none") or 0) + 1
                             if akt["doc_none"] >= 2:
                                 _qr_pin_selesai(tv, sid, reason="hilang", hapus_doc=False)
@@ -3436,7 +3459,8 @@ def api_sesi(kind, key):
             if not did:
                 return jsonify({"error": "id booking wajib diisi"}), 400
             try:
-                b = FirestoreClient().get_document(f"bookings/{did}") or {}
+                from supabase_sync import get_booking_client
+                b = get_booking_client().get_by_id(did) or {}
             except Exception as e:
                 return jsonify({"error": f"Gagal ambil booking: {e}"}), 500
             if not b or not str(b.get("status", "")):
@@ -3489,14 +3513,10 @@ def api_sesi(kind, key):
                                      args=(idx,), daemon=True).start()
                 except Exception as e:
                     _LOGGER.warning("Tandai booking di riwayat gagal: %s", e)
-            # Tandai booking sudah dimulai (Firestore)
+            # Tandai booking sudah dimulai (Supabase)
             try:
-                FirestoreClient().set_document(
-                    f"bookings/{did}",
-                    {"sesiDimulai": True, "sesiLabel": s.label,
-                     "kasir": STORE.user or "",
-                     "updatedAt": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-                    merge=True)
+                from supabase_sync import get_booking_client
+                get_booking_client().mark_sesi_dimulai(did)
             except Exception as e:
                 _LOGGER.warning("Tandai sesiDimulai gagal: %s", e)
             applog(f"[SESI BOOKING MULAI] {s.label} | {b.get('namaPelanggan', '')} | "
@@ -5839,11 +5859,12 @@ def api_profil_save():
 
 
 def _push_call_meta():
-    """Port _qr_push_menu_bg (main.py): push menu/nama rental ke Firestore
-    call_meta/<owner> — dipakai halaman web pelanggan (rrcctv.online/b/<user>)."""
+    """Push menu/nama rental ke Supabase call_meta/<owner> —
+    dipakai halaman web pelanggan (rrcctv.online/b/<user>)."""
 
     def worker():
         try:
+            from supabase_sync import get_callmeta_client
             owner = STORE._resolve_license_user()
             if not owner:
                 return
@@ -5893,7 +5914,14 @@ def _push_call_meta():
                     "mode": str(overlay_setting.get("mode", "always")),
                     "remaining_minutes": int(overlay_setting.get("remaining_minutes", 5)),
                 }
-            FirestoreClient().set_document(f"call_meta/{owner}", data, merge=True)
+            # Serialize dict values to JSON strings for Supabase JSONB columns
+            for k in ("paket_grup", "makanan", "minuman", "stok", "stok_min",
+                       "daftar_tv", "tv_status", "devices", "booking_ops", "overlay_setting"):
+                if k in data and isinstance(data[k], dict):
+                    data[k] = json.dumps(data[k])
+                elif k in data and isinstance(data[k], list):
+                    data[k] = json.dumps(data[k])
+            get_callmeta_client().upsert(owner, data)
         except Exception as e:
             _LOGGER.warning("Push call_meta gagal: %s", e)
 
@@ -5943,16 +5971,25 @@ def _booking_ops():
 
 
 def _booking_ops_push():
-    """Push status operasional ke Firestore (rental_status/{owner}) supaya
+    """Push status operasional ke Supabase (rental_status/{owner}) supaya
     situs booking pelanggan bisa menampilkan pemberitahuan libur/tutup/jam buka."""
     try:
+        from supabase_sync import SUPABASE_URL, SUPABASE_KEY
+        import requests as _req
         owner = (STORE._resolve_license_user() or "").strip().lower()
         if not owner:
             return
         data = dict(_booking_ops())
+        data["id"] = owner
         data["owner"] = owner
         data["updatedAt"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        FirestoreClient().set_document(f"rental_status/{owner}", data, merge=True)
+        url = f"{SUPABASE_URL}/rest/v1/rental_status"
+        resp = _req.post(url, json=[data], headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }, timeout=10)
         applog(f"[BOOKING OPS] push rental_status/{owner} mode={data.get('mode')}")
     except Exception as e:
         _LOGGER.warning("Push rental_status gagal: %s", e)
@@ -6063,19 +6100,18 @@ def api_booking_ops_local_close():
 @app.route("/api/booking")
 @require_auth
 def api_booking_list():
-    """Daftar booking milik owner (admin atau admin_utama kasir) dari Firestore."""
+    """Daftar booking milik owner (admin atau admin_utama kasir) dari Supabase."""
     owner = (STORE._resolve_license_user() or "").strip().lower()
     if not owner:
         return jsonify({"rows": [], "owner": ""})
     try:
-        docs = FirestoreClient().query_all("bookings", limit=100, order_field="createdAt") or []
+        from supabase_sync import get_booking_client
+        docs = get_booking_client().query_all(owner=owner, limit=100)
     except Exception as e:
         _LOGGER.warning("Booking list error: %s", e)
         docs = []
     rows = []
     for d in docs:
-        if str(d.get("owner", "")).strip().lower() != owner:
-            continue
         bukti = str(d.get("bukti", "") or "")
         rows.append({
             "_id": str(d.get("_id", "")),
@@ -6104,7 +6140,7 @@ def api_booking_list():
 @require_auth
 def api_booking_aktif():
     """Booking valid untuk satu label TV: status dikonfirmasi, belum
-    sesiDimulai, jam mulai belum lewat — port _booking_fetch_valid (main.py)."""
+    sesiDimulai, jam mulai belum lewat — dari Supabase."""
     label = str(request.args.get("label", "") or "").strip()
     if not label:
         return jsonify({"rows": [], "label": ""})
@@ -6112,21 +6148,13 @@ def api_booking_aktif():
     rows = []
     if owner:
         try:
-            docs = FirestoreClient().query_all("bookings", limit=100,
-                                               order_field="createdAt") or []
+            from supabase_sync import get_booking_client
+            docs = get_booking_client().query_valid_for_card(owner, label)
         except Exception as e:
             _LOGGER.warning("Booking aktif error: %s", e)
             docs = []
         now = datetime.datetime.now()
         for d in docs:
-            if str(d.get("owner", "")).strip().lower() != owner:
-                continue
-            if str(d.get("status", "")) != "dikonfirmasi":
-                continue
-            if str(d.get("perangkat", "") or "").strip() != label:
-                continue
-            if d.get("sesiDimulai"):
-                continue
             tgl = str(d.get("tanggal", "") or "").strip()
             jam = str(d.get("jam", "") or "").strip()[:5]
             try:
@@ -6178,18 +6206,17 @@ def _booking_range(b):
     return mulai, mulai + datetime.timedelta(minutes=_booking_menit(b.get("grup"), b.get("paket")))
 
 
-def _booking_overlaps(fc, owner, perangkat, tanggal, mulai, akhir, exclude_id=""):
+def _booking_overlaps(owner, perangkat, tanggal, mulai, akhir, exclude_id=""):
     """Daftar booking aktif lain (baru/dikonfirmasi) yang bentrok waktu pada TV sama."""
     out = []
     try:
-        docs = fc.query_all("bookings", limit=100, order_field="createdAt") or []
+        from supabase_sync import get_booking_client
+        docs = get_booking_client().query_all(owner=owner, limit=100)
     except Exception as e:
         _LOGGER.warning("Booking overlap query error: %s", e)
         return out
     for d in docs:
         if str(d.get("_id", "")) == exclude_id:
-            continue
-        if str(d.get("owner", "")).strip().lower() != owner:
             continue
         if str(d.get("perangkat", "") or "").strip() != perangkat:
             continue
@@ -6203,10 +6230,11 @@ def _booking_overlaps(fc, owner, perangkat, tanggal, mulai, akhir, exclude_id=""
     return out
 
 
-def _booking_bentrok_msg(fc, did):
+def _booking_bentrok_msg(did):
     """Pesan bentrok untuk konfirmasi booking did, atau None jika aman."""
     try:
-        b = fc.get_document(f"bookings/{did}") or {}
+        from supabase_sync import get_booking_client
+        b = get_booking_client().get_by_id(did) or {}
     except Exception as e:
         _LOGGER.warning("Booking bentrok fetch error: %s", e)
         return None
@@ -6219,7 +6247,7 @@ def _booking_bentrok_msg(fc, did):
     mulai, akhir = r
     perangkat = str(b.get("perangkat", "") or "").strip()
     tanggal = str(b.get("tanggal", "") or "").strip()
-    ov = _booking_overlaps(fc, owner, perangkat, tanggal, mulai, akhir, exclude_id=did)
+    ov = _booking_overlaps(owner, perangkat, tanggal, mulai, akhir, exclude_id=did)
     if not ov:
         return None
     d, (dm, da) = ov[0]
@@ -6263,7 +6291,7 @@ def api_booking_cek():
                         "durasi_menit": int((akhir - mulai).total_seconds() // 60),
                         "bentrok": []})
     owner = (STORE._resolve_license_user() or "").strip().lower()
-    ov = _booking_overlaps(FirestoreClient(), owner, perangkat, tanggal,
+    ov = _booking_overlaps(owner, perangkat, tanggal,
                            mulai, akhir) if owner else []
     return jsonify({
         "tersedia": not ov,
@@ -6286,29 +6314,26 @@ def api_booking_aksi(did):
     act = str(data.get("action", "") or "").strip()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        fc = FirestoreClient()
+        from supabase_sync import get_booking_client
         if act == "status":
             status = str(data.get("status", "") or "").strip()
             if status not in ("dikonfirmasi", "ditolak"):
                 return jsonify({"error": "status harus dikonfirmasi/ditolak"}), 400
             if status == "dikonfirmasi":
-                bentrok = _booking_bentrok_msg(fc, did)
+                bentrok = _booking_bentrok_msg(did)
                 if bentrok:
                     return jsonify({"error": bentrok}), 409
-            fc.set_document(f"bookings/{did}", {
-                "status": status,
-                "kasir": STORE.user or "",
-                "alasan": str(data.get("alasan", "") or "").strip(),
-                "updatedAt": now,
-            }, merge=True)
+            get_booking_client().update_status(
+                did, status,
+                kasir=STORE.user or "",
+                alasan=str(data.get("alasan", "") or "").strip())
             return jsonify({"ok": True, "status": status})
         if act == "lunas":
-            fc.set_document(f"bookings/{did}", {
-                "statusBayar": "lunas_transfer",
-                "sisaBayar": 0,
-                "kasir": STORE.user or "",
-                "updatedAt": now,
-            }, merge=True)
+            b = get_booking_client().get_by_id(did) or {}
+            total = int(b.get("totalHarga", 0) or 0)
+            sisa = int(b.get("sisaBayar", 0) or 0)
+            get_booking_client().lunas_sisa(
+                did, total, sisa, kasir=STORE.user or "")
             return jsonify({"ok": True, "statusBayar": "lunas_transfer"})
         return jsonify({"error": "action harus status/lunas"}), 400
     except Exception as e:

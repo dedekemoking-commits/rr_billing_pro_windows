@@ -1282,7 +1282,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.17"
+APP_VERSION = "2.4.19"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -5966,8 +5966,32 @@ class DialogPaket(ctk.CTkToplevel):
 
     def _handle_mulai_sesi(self):
         """Actual handler - called via button command."""
+        # Main Bebas: langsung mulai tanpa konfirmasi
+        if self.paket_var.get() == "Main Bebas":
+            self._confirm_bebas()
+            return
         if messagebox.askyesno("Konfirmasi", "Mulai sesi sekarang?", parent=self):
             self._confirm()
+
+    def _confirm_bebas(self):
+        """Langsung mulai Main Bebas tanpa DialogKonfirmasiBayar."""
+        try:
+            paket_nm    = self.paket_var.get()
+            info        = self.paket_data.get(paket_nm, {})
+            paket_harga = info.get("harga", 0)
+            paket_menit = info.get("menit", 0)
+            all_menu    = {**self.makanan_data, **self.minuman_data}
+            pesanan     = {nm: v.get() for nm, v in self.pesanan_qty.items() if v.get() > 0}
+            total_pesanan = sum(all_menu.get(nm, 0) * qty for nm, qty in pesanan.items())
+            try:
+                diskoni = int(self.diskon_var.get())
+            except ValueError:
+                diskoni = 0
+            diskoni_mode = self.diskon_mode_var.get()
+            self._lanjutkan_konfirmasi(paket_nm, paket_harga, paket_menit, pesanan,
+                                       total_pesanan, diskoni, diskoni_mode, True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Terjadi kesalahan: {str(e)}")
 
     def _confirm(self):
         """Confirm with payment status popup."""
@@ -6025,6 +6049,138 @@ def hitung_tarif_per_menit(paket_data):
         if info.get("menit", 0) > 0:
             return info["harga"] / info["menit"]
     return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DIALOG TAMBAH PESANAN (makanan/minuman saat sesi TV berjalan)
+# ═══════════════════════════════════════════════════════════════════════════════
+class DialogTambahPesanan(ctk.CTkToplevel):
+    """Dialog untuk tambah pesanan makanan/minuman saat sesi TV sedang berjalan."""
+    def __init__(self, master, tv_label, on_confirm, makanan_data, minuman_data, pesanan_aktif=None,
+                 paket_harga=0, paket_label=""):
+        super().__init__(master)
+        self.title(f"Tambah Pesanan — {tv_label}")
+        self.geometry("380x460")
+        self.configure(fg_color=C_BG)
+        self.transient(master)
+
+        self.tv_label = tv_label
+        self.on_confirm = on_confirm
+        self.makanan_data = makanan_data or {}
+        self.minuman_data = minuman_data or {}
+        self.pesanan_aktif = pesanan_aktif or {}
+        self.paket_harga = paket_harga or 0
+        self.paket_label = paket_label or ""
+        self.order_qty = {}
+
+        self._build()
+        center_window(self, master, width=380, height=460)
+        self.after(50, self.grab_set)
+
+    def _build(self):
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=12, pady=(12, 8))
+        ctk.CTkLabel(hdr, text=f"🛒 Pesanan Tambahan — {self.tv_label}",
+                     font=("Russo One", 13, "bold"), text_color=C_ACCENT).pack(anchor="w")
+        ctk.CTkLabel(hdr, text="Pilih item untuk ditambahkan atau perbarui jumlah",
+                     font=FONT_BODY, text_color=C_MUTED).pack(anchor="w")
+
+        self.lbl_total = ctk.CTkLabel(self, text="Total Pesanan: Rp 0",
+                                       font=("Russo One", 12, "bold"), text_color=C_YELLOW)
+        self.lbl_total.pack(pady=(0, 2))
+        self.lbl_paket_info = ctk.CTkLabel(self, text="",
+                                            font=FONT_SMALL, text_color=C_MUTED)
+        self.lbl_paket_info.pack(pady=(0, 8))
+
+        scroll = ctk.CTkScrollableFrame(self, fg_color=C_BG)
+        scroll.pack(fill="both", expand=True, padx=12, pady=0)
+
+        if self.makanan_data:
+            self._build_menu_section(scroll, "🍔  MAKANAN", self.makanan_data)
+        if self.minuman_data:
+            self._build_menu_section(scroll, "🥤  MINUMAN", self.minuman_data)
+        if not self.makanan_data and not self.minuman_data:
+            ctk.CTkLabel(scroll, text="Tidak ada item tersedia",
+                        font=FONT_BODY, text_color=C_MUTED).pack(pady=20)
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(8, 12))
+
+        ctk.CTkButton(btn_frame, text="✅  TAMBAHKAN PESANAN",
+                     fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                     font=("Russo One", 11, "bold"), height=44,
+                     command=self._confirm).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(btn_frame, text="✖  BATAL",
+                     fg_color=C_RED, hover_color="#CC0033",
+                     font=("Russo One", 10, "bold"), height=38,
+                     command=self.destroy).pack(fill="x")
+
+        self._update_total()
+
+    def _build_menu_section(self, parent, title, menu_dict):
+        section = ctk.CTkFrame(parent, fg_color="transparent")
+        section.pack(fill="x", pady=6)
+
+        header = ctk.CTkFrame(section, fg_color=C_PANEL, corner_radius=8)
+        header.pack(fill="x")
+        ctk.CTkLabel(header, text=title,
+                    font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(anchor="w", padx=10, pady=8)
+
+        content = ctk.CTkFrame(section, fg_color=C_CARD, corner_radius=6)
+        content.pack(fill="x", padx=4, pady=(0, 4))
+
+        for nama, harga in menu_dict.items():
+            row = ctk.CTkFrame(content, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=4)
+
+            ctk.CTkLabel(row, text=f"{nama}  •  {fmt_rp(harga)}",
+                        font=FONT_LABEL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
+
+            var = ctk.IntVar(value=self.pesanan_aktif.get(nama, 0))
+            self.order_qty[nama] = var
+
+            ctk.CTkButton(row, text="−", width=24, height=24, fg_color=C_BTN, hover_color=C_RED,
+                         font=("Consolas", 11, "bold"),
+                         command=lambda v=var: (v.set(max(0, v.get()-1)), self._update_total())
+                         ).pack(side="left", padx=2)
+            ctk.CTkLabel(row, textvariable=var, width=24,
+                        font=FONT_LABEL, text_color=C_ACCENT).pack(side="left")
+            ctk.CTkButton(row, text="+", width=24, height=24, fg_color=C_BTN, hover_color=C_GREEN,
+                         font=("Consolas", 11, "bold"),
+                         command=lambda v=var: (v.set(v.get()+1), self._update_total())
+                         ).pack(side="left", padx=2)
+
+    def _update_total(self):
+        all_menu = {**self.makanan_data, **self.minuman_data}
+        total = sum(all_menu.get(nm, 0) * v.get() for nm, v in self.order_qty.items())
+        if self.paket_harga > 0 or self.paket_label:
+            total_sesi = self.paket_harga + total
+            self.lbl_total.configure(text=f"Total Sesi: {fmt_rp(total_sesi)}")
+            self.lbl_paket_info.configure(
+                text=f"Paket: {self.paket_label} ({fmt_rp(self.paket_harga)}) + Pesanan {fmt_rp(total)}")
+        else:
+            self.lbl_total.configure(text=f"Total Pesanan: {fmt_rp(total)}")
+            self.lbl_paket_info.configure(text="")
+
+    def _confirm(self):
+        pesanan_baru = {nm: v.get() for nm, v in self.order_qty.items() if v.get() > 0}
+        if not pesanan_baru:
+            messagebox.showwarning("Pesanan Kosong", "Pilih minimal satu item pesanan.", parent=self)
+            return
+        all_menu = {**self.makanan_data, **self.minuman_data}
+        total = sum(all_menu.get(nm, 0) * q for nm, q in pesanan_baru.items())
+        DialogKonfirmasiBayar(
+            self,
+            lambda paid, p=pesanan_baru: self._finish(p, paid),
+            judul="Tambah Pesanan — Status",
+            rincian=f"{', '.join(f'{q}x {n}' for n, q in pesanan_baru.items())}\n{fmt_rp(total)}",
+        ).lift()
+
+    def _finish(self, pesanan_baru, paid):
+        try:
+            self.on_confirm(pesanan_baru, paid)
+        finally:
+            self.destroy()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6985,11 +7141,20 @@ class KartuTV(tk.Canvas):
         self.bind("<Configure>", self._on_card_resize)
 
     def _build(self):
+        old_states = dict(self._btn_states) if self._ids else {}
         if self._ids:
             self.delete("all")
             self._ids = {}
         self._card_bg_color = C_CARD
         self._build_inner()
+        if old_states:
+            for k, st in old_states.items():
+                if st == "normal" and self._btn_states.get(k) != "normal":
+                    bg_cfg = "black" if k in self._BLACK_BTNS else C_BTN
+                    fg_cfg = "white" if k in self._BLACK_BTNS else C_ACCENT2
+                    if k == "selesai":
+                        fg_cfg = C_RED
+                    self._enable_btn(k, bg_cfg, fg_cfg)
 
     def _on_card_resize(self, event):
         if event.width > 50 and abs(event.width - self._card_w) > 5:
@@ -7387,9 +7552,12 @@ class KartuTV(tk.Canvas):
     def _ws_send_total(self, total):
         hub = self._hub()
         if not hub:
+            print(f"[TV WS] _ws_send_total {self.label_tv}: HUB=None, total={total}")
             return
         try:
             lunas, tagihan = self._split_payment()
+            print(f"[TV WS] _ws_send_total {self.label_tv}: total={total} "
+                  f"fmt='{fmt_rp(total)}' lunas={lunas} tagihan={tagihan}")
             hub.send_update_total(self.label_tv, total,
                                   lunas_total=lunas, tagihan_total=tagihan)
         except Exception as e:
@@ -8572,16 +8740,12 @@ class KartuTV(tk.Canvas):
         # Tandai booking online selesai dipakai (tidak muncul lagi di daftar)
         if booking is not None:
             try:
-                bid_m = str(booking.get("_id", "") or "")
+                bid_m = str(booking.get("_id", "") or booking.get("id", "") or "")
                 if bid_m:
                     def _tandai_dimulai():
                         try:
-                            from firestore_sync import get_firestore_client
-                            get_firestore_client().set_document(
-                                f"bookings/{bid_m}",
-                                {"sesiDimulai": True,
-                                 "sesiDimulaiAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-                                merge=True)
+                            from supabase_sync import get_booking_client
+                            get_booking_client().mark_sesi_dimulai(bid_m)
                         except Exception:
                             pass
                     threading.Thread(target=_tandai_dimulai, daemon=True).start()
@@ -8589,7 +8753,8 @@ class KartuTV(tk.Canvas):
                 pass
 
         # Popup cetak struk setelah sesi baru dimulai (konfirmasi pembayaran)
-        if not previous_session:
+        # SKIP untuk Main Bebas — langsung mulai tanpa popup
+        if not previous_session and not self.is_bebas:
             try:
                 self._buka_print_struk(self._trans_struk())
             except Exception:
@@ -8620,6 +8785,9 @@ class KartuTV(tk.Canvas):
             text=f"Total berjalan: {fmt_rp(total_berjalan)}",
             fill="black"
         )
+        print(f"[TICK BEBAS] {self.label_tv}: detik={total_detik} tarif_m={tarif_menit} "
+              f"biaya_waktu={biaya_waktu_berjalan:.0f} pesanan={self.biaya_pesanan} "
+              f"total={total_berjalan}")
         self._ws_send_total(total_berjalan)
 
         if not self._timer_paused:
@@ -8816,11 +8984,18 @@ class KartuTV(tk.Canvas):
             menit = self._total_menit_terpakai() or 0
         except Exception:
             menit = self.menit_dipakai_awal
+        # Untuk Main Bebas, hitung total = waktu berjalan + pesanan
+        if self.is_bebas:
+            tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
+            biaya_waktu = tarif_menit * menit
+            harga = int(self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan) or 0)
+        else:
+            harga = int(self._total_setelah_diskon() or 0)
         return {
             "pc": getattr(self, "label_tv", None) or "-",
             "paket": self.paket_aktif or "Main Bebas",
             "menit": int(menit or 0),
-            "harga": int(self._total_setelah_diskon() or 0),
+            "harga": harga,
         }
 
     def _buka_print_struk(self, trans):
@@ -8877,13 +9052,27 @@ class KartuTV(tk.Canvas):
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             biaya_waktu = tarif_menit * menit_total
             total_akhir = self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan)
+            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
+            if not messagebox.askyesno(
+                    "⏹ Selesai — Main Bebas",
+                    f"TV: {self.label_tv}\n"
+                    f"Paket: Main Bebas ({menit_total} menit)\n"
+                    f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
+                    f"Waktu: {fmt_rp(biaya_waktu)}\n"
+                    f"TOTAL: {fmt_rp(total_akhir)}\n\n"
+                    f"Akhiri sesi ini?"):
+                return
             self._last_transaction_item = self.on_transaksi(
                 self.label_tv, "Main Bebas", self.pesanan_aktif, total_akhir,
                 diskoni=self.diskoni, diskoni_mode=self.diskoni_mode, paid=False)
             self._bind_last_transaction()
-            DialogPelangganAkhir(
+            DialogKonfirmasiBayar(
                 self.winfo_toplevel(),
-                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+                lambda paid: self._klik_selesai_tutup_sesi(paid),
+                judul="Selesaikan Tagihan",
+                rincian=f"Main Bebas: {menit_total} menit — {fmt_rp(biaya_waktu)}\n"
+                        f"Pesanan: {fmt_rp(self.biaya_pesanan)}\n"
+                        f"TOTAL: {fmt_rp(total_akhir)}",
             ).lift()
             return
         else:
@@ -9138,11 +9327,20 @@ class KartuWarnet(tk.Canvas):
         self.after(2000, self._periodic_pc_status)
 
     def _build(self):
+        old_states = dict(self._btn_states) if self._ids else {}
         if self._ids:
             self.delete("all")
             self._ids = {}
         self._card_bg_color = C_CARD
         self._build_inner()
+        if old_states:
+            for k, st in old_states.items():
+                if st == "normal" and self._btn_states.get(k) != "normal":
+                    bg_cfg = "black" if k in self._BLACK_BTNS else C_BTN
+                    fg_cfg = "white" if k in self._BLACK_BTNS else C_ACCENT2
+                    if k == "selesai":
+                        fg_cfg = C_RED
+                    self._enable_btn(k, bg_cfg, fg_cfg)
 
     def _on_card_resize(self, event):
         if event.width > 50 and abs(event.width - self._card_w) > 5:
@@ -9951,7 +10149,8 @@ class KartuWarnet(tk.Canvas):
             pass
 
         # Popup cetak struk setelah sesi baru dimulai (konfirmasi pembayaran)
-        if not previous_session:
+        # SKIP untuk Main Bebas — langsung mulai tanpa popup
+        if not previous_session and not self.is_bebas:
             try:
                 self._buka_print_struk(self._trans_struk())
             except Exception:
@@ -10111,11 +10310,18 @@ class KartuWarnet(tk.Canvas):
 
     def _trans_struk(self):
         """Data transaksi untuk popup cetak struk (panggil SEBELUM sesi direset)."""
+        menit = int(getattr(self, "menit_dipakai_awal", 0) or 0)
+        if self.is_bebas:
+            tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
+            biaya_waktu = tarif_menit * menit
+            harga = int(self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan) or 0)
+        else:
+            harga = int(self._total_setelah_diskon() or 0)
         return {
             "pc": getattr(self, "label_kursi", None) or "-",
             "paket": self.paket_aktif or "Main Bebas",
-            "menit": int(getattr(self, "menit_dipakai_awal", 0) or 0),
-            "harga": int(self._total_setelah_diskon() or 0),
+            "menit": menit,
+            "harga": harga,
         }
 
     def _buka_print_struk(self, trans):
@@ -10194,13 +10400,27 @@ class KartuWarnet(tk.Canvas):
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             biaya_waktu = tarif_menit * menit_total
             total_akhir = self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan)
+            pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
+            if not messagebox.askyesno(
+                    "⏹ Selesai — Main Bebas",
+                    f"Kursi: {self.label_kursi}\n"
+                    f"Paket: Main Bebas ({menit_total} menit)\n"
+                    f"Pesanan: {pesanan_txt} ({fmt_rp(self.biaya_pesanan)})\n"
+                    f"Waktu: {fmt_rp(biaya_waktu)}\n"
+                    f"TOTAL: {fmt_rp(total_akhir)}\n\n"
+                    f"Akhiri sesi ini?"):
+                return
             self._last_transaction_item = self.on_transaksi(
                 self.label_kursi, "Main Bebas", self.pesanan_aktif, total_akhir, source='warnet',
                 diskoni=self.diskoni, diskoni_mode=self.diskoni_mode, paid=False)
             self._bind_last_transaction()
-            DialogPelangganAkhir(
+            DialogKonfirmasiBayar(
                 self.winfo_toplevel(),
-                lambda nama, hp: self._simpan_pelanggan_tagihan(nama, hp),
+                lambda paid: self._warnet_selesai_tutup_sesi(paid),
+                judul="Selesaikan Tagihan",
+                rincian=f"Main Bebas: {menit_total} menit — {fmt_rp(biaya_waktu)}\n"
+                        f"Pesanan: {fmt_rp(self.biaya_pesanan)}\n"
+                        f"TOTAL: {fmt_rp(total_akhir)}",
             ).lift()
             return
         else:
@@ -11160,54 +11380,38 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
         try:
-            from firestore_sync import CallPoller
-            self._call_poller = CallPoller(interval=6.0, limit=5, order_field="ts")
-            self._call_poller.start(self._qr_panggilan_masuk)
-            self._qr_log("CallPoller dimulai (calls, order ts DESC)")
+            self._qr_seen = set()
+            self._call_poller_supabase = True
+            self._call_poll_supabase()
+            self._qr_log("CallPoller dimulai (Supabase calls, order ts DESC)")
         except Exception as e:
             self._qr_log(f"CallPoller gagal start: {e}")
-        # PIN sesi QR (qr_sessions) — verifikasi kehadiran pelanggan di depan TV
+        # PIN sesi QR (Supabase) — verifikasi kehadiran pelanggan di depan TV
         try:
-            from firestore_sync import CallPoller
             self._pin_actif = {}          # tv -> {'sid','pin','t0','owner'}
             self._pin_hide_last = {}      # tv -> ts HIDE_PIN terakhir (kooldown)
             self._pin_loop_stop = threading.Event()
-            self._pin_poller = CallPoller(collection="qr_sessions", interval=4.0, limit=10,
-                                          order_field="created")
-            self._pin_poller.start(self._qr_pin_proses)
+            self._pin_poller_supabase = True
+            self._pin_poll_supabase()
             t = threading.Thread(target=self._qr_pin_loop, daemon=True)
             t.start()
             self._pin_loop_thread = t
-            self._qr_log("PinPoller dimulai (qr_sessions, order created DESC)")
+            self._qr_log("PinPoller dimulai (Supabase qr_sessions, order created DESC)")
         except Exception as e:
             self._qr_log(f"PinPoller gagal start: {e}")
         # Booking Online (website /b/<user>) — booking baru milik user ini ->
         # popup kasir + bukti DP; status diubah lewat tombol Konfirmasi/Tolak.
         try:
-            from firestore_sync import CallPoller
             self._booking_seen = set()
-            self._booking_poller = CallPoller(collection="bookings", interval=8.0,
-                                              limit=15, order_field="createdAt")
-            self._booking_poller.start(self._qr_booking_masuk)
-            self._qr_log("BookingPoller dimulai (bookings, order createdAt DESC)")
+            self._booking_poller_supabase = True
+            self._booking_poll_supabase()
+            self._qr_log("BookingPoller dimulai (Supabase, order createdAt DESC)")
         except Exception as e:
             self._qr_log(f"BookingPoller gagal start: {e}")
 
     def _stop_call_poller(self):
-        p = getattr(self, "_call_poller", None)
-        if p:
-            try:
-                p.stop()
-            except Exception:
-                pass
-        self._call_poller = None
-        p = getattr(self, "_pin_poller", None)
-        if p:
-            try:
-                p.stop()
-            except Exception:
-                pass
-        self._pin_poller = None
+        self._call_poller_supabase = False
+        self._pin_poller_supabase = False
         ev = getattr(self, "_pin_loop_stop", None)
         if ev:
             ev.set()
@@ -11218,12 +11422,11 @@ class AutoRentApp(ctk.CTk):
             pass
         self._pin_actif = {}
         self._pin_hide_last = {}
-        p = getattr(self, "_booking_poller", None)
-        if p:
-            try:
-                p.stop()
-            except Exception:
-                pass
+        try:
+            self._booking_poller_supabase = False
+        except Exception:
+            pass
+        self._booking_poller_supabase = False
         self._booking_poller = None
 
     # ── PIN Sesi QR ──────────────────────────────────────────────────────────
@@ -11331,8 +11534,8 @@ class AutoRentApp(ctk.CTk):
                 created_ms = float(doc.get("created", 0) or 0)
                 if created_ms and now - created_ms / 1000.0 > 300:
                     try:
-                        from firestore_sync import get_firestore_client
-                        get_firestore_client().delete_document(f"qr_sessions/{did}")
+                        from supabase_sync import get_qrsession_client
+                        get_qrsession_client().delete(did)
                     except Exception:
                         pass
         except Exception as e:
@@ -11340,8 +11543,8 @@ class AutoRentApp(ctk.CTk):
 
     def _set_pin_doc(self, did: str, data: dict):
         try:
-            from firestore_sync import get_firestore_client
-            get_firestore_client().set_document(f"qr_sessions/{did}", data, merge=True)
+            from supabase_sync import get_qrsession_client
+            get_qrsession_client().update(did, data)
         except Exception as e:
             self._qr_log(f"update sesi {did} gagal: {e}")
 
@@ -11389,8 +11592,8 @@ class AutoRentApp(ctk.CTk):
             self._qr_pin_clear_tv("", tv)
         if hapus_doc and sid:
             try:
-                from firestore_sync import get_firestore_client
-                get_firestore_client().delete_document(f"qr_sessions/{sid}")
+                from supabase_sync import get_qrsession_client
+                get_qrsession_client().delete(sid)
             except Exception as e:
                 self._qr_log(f"hapus sesi {sid} gagal: {e}")
 
@@ -11412,9 +11615,9 @@ class AutoRentApp(ctk.CTk):
                     # tiap tayang — 2 kali berturut-turut hilang = hangus.
                     if sid and (akt.get("doc_none") or 0) < 2:
                         try:
-                            from firestore_sync import get_firestore_client
-                            d = get_firestore_client().get_document(f"qr_sessions/{sid}")
-                            if d is None:
+                            from supabase_sync import get_qrsession_client
+                            d = get_qrsession_client().get_by_id(sid)
+                            if not d:
                                 akt["doc_none"] = (akt.get("doc_none") or 0) + 1
                                 if akt["doc_none"] >= 2:
                                     self._qr_pin_selesai(tv, sid, reason="hilang", hapus_doc=False)
@@ -11586,7 +11789,7 @@ class AutoRentApp(ctk.CTk):
         web menampilkan kartu perangkat dengan status realtime."""
         def worker():
             try:
-                from firestore_sync import FirestoreClient
+                from supabase_sync import get_callmeta_client
                 owner = self._resolve_license_user()
                 if not owner:
                     return
@@ -11645,14 +11848,13 @@ class AutoRentApp(ctk.CTk):
                 pus = (ConfigManager.load().get("profil_rental", {}) or {}).get(owner, {}) or {}
                 if not isinstance(pus, dict):
                     pus = {}
-                FirestoreClient().set_document(
-                    f"call_meta/{owner}",
-                    {"tv_status": tv_status,
-                     "devices": devices,
-                     "daftar_tv": self._get_daftar_tv_nama(),
-                     "no_hp": str(pus.get("no_hp") or pus.get("hp") or "").strip(),
-                     "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-                    merge=True)
+                get_callmeta_client().upsert(owner, {
+                    "tv_status": json.dumps(tv_status) if not isinstance(tv_status, str) else tv_status,
+                    "devices": json.dumps(devices) if not isinstance(devices, str) else devices,
+                    "daftar_tv": json.dumps(self._get_daftar_tv_nama()) if not isinstance(self._get_daftar_tv_nama(), str) else json.dumps(self._get_daftar_tv_nama()),
+                    "no_hp": str(pus.get("no_hp") or pus.get("hp") or "").strip(),
+                    "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
             except Exception as e:
                 print(f"[BOOKING] push tv_status gagal: {e}")
         try:
@@ -11663,6 +11865,46 @@ class AutoRentApp(ctk.CTk):
             self.after(8000, self._booking_push_tv_status)
         except Exception:
             pass
+
+    def _call_poll_supabase(self):
+        """Poll Supabase calls setiap 6 detik — callback _qr_panggilan_masuk."""
+        def worker():
+            try:
+                from supabase_sync import get_calls_client
+                rows = get_calls_client().query_all()
+                for r in rows:
+                    try:
+                        self._qr_panggilan_masuk(r)
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._qr_log(f"call poll supabase error: {e}")
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+        if getattr(self, "_call_poller_supabase", False):
+            self.after(6000, self._call_poll_supabase)
+
+    def _pin_poll_supabase(self):
+        """Poll Supabase qr_sessions setiap 4 detik — callback _qr_pin_proses."""
+        def worker():
+            try:
+                from supabase_sync import get_qrsession_client
+                rows = get_qrsession_client().query_all()
+                for r in rows:
+                    try:
+                        self._qr_pin_proses(r)
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._qr_log(f"pin poll supabase error: {e}")
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+        if getattr(self, "_pin_poller_supabase", False):
+            self.after(4000, self._pin_poll_supabase)
 
     def _qr_panggilan_masuk(self, doc: dict):
         """Dipanggil thread CallPoller — validasi, simpan ke riwayat lokal
@@ -11712,8 +11954,8 @@ class AutoRentApp(ctk.CTk):
             self._qr_pesan_log_append(order)
             self.after(0, self._qr_riwayat_refresh)
             try:
-                from firestore_sync import get_firestore_client
-                get_firestore_client().delete_document(f"calls/{did}")
+                from supabase_sync import get_calls_client
+                get_calls_client().delete(did)
             except Exception as e:
                 self._qr_log(f"gagal hapus panggilan {did}: {e}")
             if not rate_ok:
@@ -11725,6 +11967,32 @@ class AutoRentApp(ctk.CTk):
             self.after(0, lambda p=payload: self._qr_tampil_panggilan(p))
         except Exception as e:
             self._qr_log(f"panggilan masuk error: {e}")
+
+    def _booking_poll_supabase(self):
+        """Poll Supabase bookings setiap 8 detik — callback _qr_booking_masuk."""
+        def worker():
+            try:
+                from supabase_sync import get_booking_client
+                uname = (getattr(self, "current_user", None) or "").strip().lower()
+                if not uname:
+                    return
+                rows = get_booking_client().query_all(owner=uname, status="baru", limit=15)
+                for r in rows:
+                    try:
+                        self._qr_booking_masuk(r)
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._qr_log(f"booking poll supabase error: {e}")
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_booking_poller_supabase", False):
+                self.after(8000, self._booking_poll_supabase)
+        except Exception:
+            pass
 
     def _qr_booking_masuk(self, doc: dict):
         """Dipanggil thread BookingPoller — validasi milik user ini & status
@@ -11872,8 +12140,30 @@ class AutoRentApp(ctk.CTk):
             def worker():
                 ok = False
                 try:
-                    from firestore_sync import get_firestore_client
-                    ok = get_firestore_client().set_document(f"bookings/{did}", patch, merge=True)
+                    from supabase_sync import get_booking_client
+                    client = get_booking_client()
+                    status_val = patch.get("status", "")
+                    if status_val in ("dikonfirmasi", "ditolak"):
+                        ok = client.update_status(
+                            did, status_val,
+                            kasir=patch.get("kasir", ""),
+                            alasan=patch.get("alasan", ""))
+                    elif patch.get("statusBayar") == "lunas_transfer":
+                        ok = client.lunas_sisa(
+                            did,
+                            int(patch.get("nominalTransfer", 0) or 0),
+                            int(patch.get("pelunasanSisa", 0) or 0),
+                            kasir=patch.get("kasir", ""))
+                    else:
+                        # Generic update fallback
+                        url = f"https://nqaucjpbnewckedqcezb.supabase.co/rest/v1/bookings?id=eq.{did}"
+                        import requests as _req
+                        resp = _req.patch(url, json=patch,
+                                          headers={"apikey": get_booking_client()._session.headers["apikey"],
+                                                   "Authorization": get_booking_client()._session.headers["Authorization"],
+                                                   "Content-Type": "application/json"},
+                                          timeout=10)
+                        ok = resp.status_code in (200, 204)
                 except Exception as e:
                     self._qr_log(f"booking {did} update gagal: {e}")
 
@@ -12529,11 +12819,12 @@ class AutoRentApp(ctk.CTk):
             win.after(3000, self._qr_riwayat_refresh)
 
     def _qr_push_menu_bg(self):
-        """Push menu/nama rental ke Firestore call_meta/<owner> — dipakai halaman
+        """Push menu/nama rental ke Supabase call_meta/<owner> — dipakai halaman
         web pelanggan. Dijalankan berkala (menu jarang berubah)."""
         def worker():
             try:
-                from firestore_sync import FirestoreClient
+                from supabase_sync import get_callmeta_client
+                import json as _json
                 owner = self._resolve_license_user()
                 if not owner:
                     return
@@ -12553,12 +12844,12 @@ class AutoRentApp(ctk.CTk):
                 data = {
                     "nama_rental": nama_rental,
                     "logo": self._logo_rental_b64(),
-                    "daftar_tv": self._get_daftar_tv_nama(),
-                    "paket_grup": paket_grup,
-                    "makanan": dict(getattr(self, "menu_makanan", {}) or {}),
-                    "minuman": dict(getattr(self, "menu_minuman", {}) or {}),
-                    "stok": getattr(self, "stok", {}) or {},
-                    "stok_min": getattr(self, "stok_min", {}) or {},
+                    "daftar_tv": _json.dumps(self._get_daftar_tv_nama()),
+                    "paket_grup": _json.dumps(paket_grup),
+                    "makanan": _json.dumps(dict(getattr(self, "menu_makanan", {}) or {})),
+                    "minuman": _json.dumps(dict(getattr(self, "menu_minuman", {}) or {})),
+                    "stok": _json.dumps(getattr(self, "stok", {}) or {}),
+                    "stok_min": _json.dumps(getattr(self, "stok_min", {}) or {}),
                     "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 for k in ("nama_dana", "no_dana", "alamat", "no_hp"):
@@ -12570,7 +12861,8 @@ class AutoRentApp(ctk.CTk):
                         data[k] = v
                 if str(pus.get("qr_pembayaran", "") or "").strip():
                     data["qr_pembayaran"] = str(pus.get("qr_pembayaran", "")).strip()
-                FirestoreClient().set_document(f"call_meta/{owner}", data, merge=True)
+                get_callmeta_client().upsert(owner, data)
+                print(f"[QR] push menu ke Supabase OK ({owner})")
             except Exception as e:
                 print(f"[QR] push menu gagal: {e}")
         try:
@@ -13694,7 +13986,10 @@ class AutoRentApp(ctk.CTk):
 
     # ── Layout ─────────────────────────────────────────────────────────────────
     def _build_layout(self):
-        self.sidebar = ctk.CTkScrollableFrame(self, width=185, fg_color=C_PANEL,
+        cfg = ConfigManager.load()
+        self._sidebar_collapsed = bool(cfg.get("sidebar_collapsed", False))
+        SB_W = 52 if self._sidebar_collapsed else 185
+        self.sidebar = ctk.CTkScrollableFrame(self, width=SB_W, fg_color=C_PANEL,
                                               corner_radius=0, label_text="")
         self.sidebar.pack(side="left", fill="y")
 
@@ -13724,47 +14019,58 @@ class AutoRentApp(ctk.CTk):
         self._show_tab("dashboard")
 
     def _build_sidebar(self):
-        self._sidebar_text_widgets = []
+        # Toggle button (persist across rebuilds)
+        self._sb_toggle_btn = ctk.CTkButton(
+            self.sidebar, text="✕" if self._sidebar_collapsed else "☰",
+            width=36, height=36, font=("Segoe UI Emoji", 18),
+            fg_color="transparent", hover_color="#1E1E4A",
+            text_color=C_ACCENT, corner_radius=8,
+            command=self._toggle_sidebar)
+        self._sb_toggle_btn.pack(pady=(12, 4))
+        # Build sidebar content
+        self._apply_sidebar_collapsed(self._sidebar_collapsed)
 
-        # Toggle button
-        logo_f = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        logo_f.pack(pady=(22, 6))
-
-        # ── LOGO SIDEBAR: coba logo.png, fallback emoji ───────────────────────
-        ico_bg = ctk.CTkFrame(logo_f, fg_color=C_PANEL, corner_radius=10,
-                               width=128, height=54)
-        ico_bg.pack()
-        ico_bg.pack_propagate(False)
-
-        ctk_img_sidebar = load_ctk_image(size=(120, 46))
-        if ctk_img_sidebar:
-            lbl_sb_logo = ctk.CTkLabel(ico_bg, text="", image=ctk_img_sidebar)
-        else:
-            lbl_sb_logo = ctk.CTkLabel(ico_bg, text="🎮", font=("Arial", 24))
-        lbl_sb_logo.place(relx=0.5, rely=0.5, anchor="center")
-
-        ctk.CTkLabel(logo_f, text="RR BILLING",
-                     font=("Russo One", 13, "bold"),
-                     text_color=C_ACCENT, justify="center").pack(pady=(6, 0))
-        ctk.CTkLabel(logo_f, text="PRO",
-                     font=("Russo One", 11, "bold"),
-                     text_color=C_ACCENT2).pack()
-
-        status = LicenseManager.get_status(current_user=self._resolve_license_user())
-        lic_color = C_GREEN if status["status"] == "active" else C_YELLOW if status["status"] == "trial" else C_RED
-        self.lbl_sidebar_license_status = ctk.CTkLabel(self.sidebar, text=status["pesan"],
-                                                       font=("Courier New", 10), text_color=lic_color,
-                                                       wraplength=165)
-        self.lbl_sidebar_license_status.pack(pady=(2, 10))
-
-        ctk.CTkLabel(self.sidebar, text=f"👤 {self.current_user} [{self.current_role}]",
-                     font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 2))
-
-        sep = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
-        sep.pack(fill="x", padx=10, pady=4)
-
-        # Kasir (sub-akun admin): hanya tab yang aman — Dashboard TV, Warnet,
-        # Histori Aktivasi (read-only) & Riwayat. Admin melihat semua menu.
+    def _apply_sidebar_collapsed(self, collapsed: bool):
+        """Rebuild sidebar content untuk toggle collapsed/expanded."""
+        # Hapus semua widget di sidebar kecuali toggle button
+        for child in self.sidebar.winfo_children():
+            if child != self._sb_toggle_btn:
+                child.destroy()
+        # Toggle button text
+        self._sb_toggle_btn.configure(text="✕" if collapsed else "☰")
+        self._sb_toggle_btn.pack(pady=(12, 4))
+        # ── Logo ──
+        if not collapsed:
+            logo_f = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            logo_f.pack(pady=(4, 6))
+            ico_bg = ctk.CTkFrame(logo_f, fg_color=C_PANEL, corner_radius=10,
+                                   width=128, height=54)
+            ico_bg.pack()
+            ico_bg.pack_propagate(False)
+            ctk_img = load_ctk_image(size=(120, 46))
+            if ctk_img:
+                lbl = ctk.CTkLabel(ico_bg, text="", image=ctk_img)
+            else:
+                lbl = ctk.CTkLabel(ico_bg, text="🎮", font=("Arial", 24))
+            lbl.place(relx=0.5, rely=0.5, anchor="center")
+            ctk.CTkLabel(logo_f, text="RR BILLING",
+                         font=("Russo One", 13, "bold"),
+                         text_color=C_ACCENT).pack(pady=(6, 0))
+            ctk.CTkLabel(logo_f, text="PRO",
+                         font=("Russo One", 11, "bold"),
+                         text_color=C_ACCENT2).pack()
+        # ── License ──
+        if not collapsed:
+            status = LicenseManager.get_status(current_user=self._resolve_license_user())
+            lic_color = C_GREEN if status["status"] == "active" else C_YELLOW if status["status"] == "trial" else C_RED
+            self.lbl_sidebar_license_status = ctk.CTkLabel(self.sidebar, text=status["pesan"],
+                                                            font=("Courier New", 10), text_color=lic_color,
+                                                            wraplength=165)
+            self.lbl_sidebar_license_status.pack(pady=(2, 10))
+            ctk.CTkLabel(self.sidebar, text=f"👤 {self.current_user} [{self.current_role}]",
+                         font=("Courier New", 10), text_color=C_MUTED).pack(pady=(0, 2))
+            ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER).pack(fill="x", padx=10, pady=4)
+        # ── Nav buttons ──
         is_admin = (self.current_role or "kasir") == "admin"
         if is_admin:
             nav_items = [
@@ -13791,43 +14097,62 @@ class AutoRentApp(ctk.CTk):
         self.nav_btns = {}
         for ico, label, key in nav_items:
             row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=2)
+            row.pack(fill="x", padx=2 if collapsed else 10, pady=2)
             ctk.CTkLabel(row, text=ico, font=("Segoe UI Emoji", 14),
                          width=28, anchor="center").pack(side="left", padx=(2, 0))
             btn = ctk.CTkButton(
-                row, text=f"  {label}", anchor="w", height=40,
+                row, text="" if collapsed else f"  {label}", anchor="w", height=40,
                 font=("Russo One", 12, "bold"),
                 fg_color="transparent", hover_color="#1E1E4A",
                 text_color=C_TEXT, corner_radius=8,
                 command=lambda k=key: self._show_tab(k))
             btn.pack(side="left", fill="x", expand=True, padx=(0, 2))
             self.nav_btns[key] = btn
-
-        sep2 = ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER)
-        sep2.pack(fill="x", padx=10, pady=(10, 4))
-
+        # ── Separator 2 ──
+        if not collapsed:
+            ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER).pack(fill="x", padx=10, pady=(10, 4))
+        # ── Keluar ──
         row_keluar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        row_keluar.pack(fill="x", padx=10, pady=2)
+        row_keluar.pack(fill="x", padx=2 if collapsed else 10, pady=2)
         ctk.CTkLabel(row_keluar, text="🚪", font=("Segoe UI Emoji", 14),
                      width=28, anchor="center").pack(side="left", padx=(2, 0))
-        ctk.CTkButton(row_keluar, text="  Keluar", anchor="w", height=36,
+        ctk.CTkButton(row_keluar, text="" if collapsed else "  Keluar", anchor="w", height=36,
                       font=("Russo One", 11, "bold"),
                       fg_color="transparent", hover_color="#3A0000",
                       text_color=C_RED, corner_radius=8,
                       command=self._logout).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
-        self._row_update = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self._row_update.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(self._row_update, text="🔄", font=("Segoe UI Emoji", 14),
+        # ── Update ──
+        row_update = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        row_update.pack(fill="x", padx=2 if collapsed else 10, pady=2)
+        ctk.CTkLabel(row_update, text="🔄", font=("Segoe UI Emoji", 14),
                      width=28, anchor="center").pack(side="left", padx=(2, 0))
-        ctk.CTkButton(self._row_update, text="  Download & Install", anchor="w", height=36,
+        ctk.CTkButton(row_update, text="" if collapsed else "  Download & Install",
+                      anchor="w", height=36,
                       font=("Russo One", 10, "bold"),
                       fg_color="transparent", hover_color="#1A3A5A",
                       text_color="#3A8AFF", corner_radius=8,
                       command=self._download_and_install_update).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        # ── Version ──
+        if not collapsed:
+            ctk.CTkLabel(self.sidebar, text=f"v{APP_VERSION} — 2026",
+                         font=("Courier New", 10), text_color=C_MUTED).pack(side="bottom", pady=12)
+        # ── Width ──
+        self.sidebar.configure(width=52 if collapsed else 185)
+        try:
+            self.sidebar.update_idletasks()
+        except Exception:
+            pass
 
-        ctk.CTkLabel(self.sidebar, text=f"v{APP_VERSION} — 2026",
-                     font=("Courier New", 10), text_color=C_MUTED).pack(side="bottom", pady=12)
+    def _toggle_sidebar(self):
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        self._apply_sidebar_collapsed(self._sidebar_collapsed)
+        # Simpan state ke config
+        try:
+            cfg = ConfigManager.load()
+            cfg["sidebar_collapsed"] = self._sidebar_collapsed
+            ConfigManager.save(cfg)
+        except Exception:
+            pass
 
     def _logout(self):
         if messagebox.askyesno("Keluar", "Yakin ingin keluar / ganti akun?"):
@@ -14520,10 +14845,11 @@ class AutoRentApp(ctk.CTk):
                 "paket": str(meta.get("paket_raw") or ""),
                 "total": total,
                 "pesanan": pesanan,
-                "paketHarga": paket_harga,
-                "pesananHarga": pesananHarga,
-                "tvJenisPs": "TV" if meta.get("source") == "tv" else "PC",
+                "paketharga": paket_harga,
+                "pesananharga": pesananHarga,
+                "tvjenisps": "TV" if meta.get("source") == "tv" else "PC",
                 "paid": bool(meta.get("paid", True)),
+                "email": getattr(self, "current_user_email", "") or "",
             }
         except Exception:
             return None
@@ -14554,7 +14880,16 @@ class AutoRentApp(ctk.CTk):
         """Upload batch transaksi ke Supabase.
         Optimasi: gunakan batch_flush() untuk hemat reads/writes."""
         try:
-            from supabase_sync import batch_flush
+            from supabase_sync import batch_add, batch_flush
+            target = self._cloud_upload_target()
+            if not target:
+                return
+            # Masukkan _pending_tx_uploads ke batch queue dulu
+            pending = list(self._pending_tx_uploads or [])
+            if pending:
+                for tx in pending:
+                    batch_add(target, tx)
+                self._pending_tx_uploads.clear()
             flushed = batch_flush()
             if flushed > 0:
                 _LOGGER.info("Supabase: batch upload %d transaksi berhasil", flushed)
@@ -14597,9 +14932,15 @@ class AutoRentApp(ctk.CTk):
 
     def _cloud_retry_tick(self):
         """Retry upload batch transaksi yang gagal.
-        Optimasi: gunakan batch_flush() untuk hemat reads/writes."""
+        Optimasi: gunakan batch_flush() untuk hemat writes."""
         try:
-            from supabase_sync import batch_flush
+            from supabase_sync import batch_add, batch_flush
+            target = self._cloud_upload_target()
+            if target and self._pending_tx_uploads:
+                pending = list(self._pending_tx_uploads)
+                for tx in pending:
+                    batch_add(target, tx)
+                self._pending_tx_uploads.clear()
             flushed = batch_flush()
             if flushed > 0:
                 _LOGGER.info("Supabase batch retry: %d transaksi di-upload", flushed)
@@ -18056,7 +18397,7 @@ class AutoRentApp(ctk.CTk):
         self.after(1000, self._booking_riwayat_refresh)
 
     def _booking_riwayat_refresh(self):
-        """Ambil booking dari Firestore (milik user ini) lalu render daftar."""
+        """Ambil booking dari Supabase (milik user ini) lalu render daftar."""
         if getattr(self, "_booking_riwayat_running", False):
             return
         self._booking_riwayat_running = True
@@ -18075,18 +18416,11 @@ class AutoRentApp(ctk.CTk):
                 pass
 
         def worker():
-            docs = []
             try:
-                from firestore_sync import get_firestore_client
-                docs = get_firestore_client().query_all("bookings", limit=100,
-                                                        order_field="createdAt")
+                from supabase_sync import get_booking_client
+                rows = get_booking_client().query_all(owner=uname, limit=100)
             except Exception:
-                docs = []
-            rows = []
-            for d in docs:
-                if str(d.get("owner", "")).strip().lower() != uname:
-                    continue
-                rows.append(d)
+                rows = []
             rows.sort(key=lambda d: str(d.get("createdAt", "")), reverse=True)
             try:
                 self.after(0, lambda rs=rows: self._booking_riwayat_render(rs))
@@ -18132,12 +18466,16 @@ class AutoRentApp(ctk.CTk):
 
     def _booking_update_status(self, did: str, status: str, alasan: str = ""):
         try:
-            from firestore_sync import get_firestore_client
-            patch = {"status": status, "kasir": str(getattr(self, "current_user", "")),
-                     "alasan": alasan, "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            get_firestore_client().set_document(f"bookings/{did}", patch, merge=True)
-            self._qr_log(f"booking {did} -> {status} (dari tab Booking)")
-            self._booking_riwayat_refresh()
+            from supabase_sync import get_booking_client
+            ok = get_booking_client().update_status(
+                did, status,
+                kasir=str(getattr(self, "current_user", "")),
+                alasan=alasan)
+            if ok:
+                self._qr_log(f"booking {did} -> {status} (dari tab Booking)")
+                self._booking_riwayat_refresh()
+            else:
+                raise Exception("Supabase update gagal")
         except Exception as e:
             self._qr_log(f"booking {did} update gagal: {e}")
             messagebox.showerror("Gagal", f"Gagal update status:\n{e}", parent=self)
@@ -18248,22 +18586,13 @@ class AutoRentApp(ctk.CTk):
         def worker():
             rows = []
             try:
-                from firestore_sync import get_firestore_client
-                docs = get_firestore_client().query_all("bookings", limit=100,
-                                                        order_field="createdAt")
+                from supabase_sync import get_booking_client
+                docs = get_booking_client().query_valid_for_card(uname, tv_s)
             except Exception:
                 docs = []
             now = datetime.now()
             for d in docs:
                 try:
-                    if str(d.get("owner", "")).strip().lower() != uname:
-                        continue
-                    if str(d.get("status", "")) != "dikonfirmasi":
-                        continue
-                    if str(d.get("perangkat", "") or "").strip() != tv_s:
-                        continue
-                    if d.get("sesiDimulai"):
-                        continue
                     tgl = str(d.get("tanggal", "") or "").strip()
                     jam = str(d.get("jam", "") or "").strip()[:5]
                     try:
@@ -18335,14 +18664,10 @@ class AutoRentApp(ctk.CTk):
                 parent=self):
             return
         try:
-            from firestore_sync import get_firestore_client
-            pat = {"statusBayar": "lunas_transfer",
-                   "nominalTransfer": total,
-                   "pelunasanSisa": sisa,
-                   "lunasAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                   "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                   "kasir": str(getattr(self, "current_user", ""))}
-            ok = get_firestore_client().set_document(f"bookings/{did}", pat, merge=True)
+            from supabase_sync import get_booking_client
+            ok = get_booking_client().lunas_sisa(
+                did, total, sisa,
+                kasir=str(getattr(self, "current_user", "")))
         except Exception as e:
             self._qr_log(f"booking {did} lunas sisa gagal: {e}")
             ok = False
