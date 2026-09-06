@@ -40,6 +40,13 @@ from firebase_auth import get_firebase_auth
 from firestore_sync import FirestoreClient
 import tv_mesin
 from lg_tv_controller.tv_controller import TVController
+from tv_controller_system import (
+    TVController as TVControllerBase,
+    AndroidTVController,
+    WebOSTVController,
+    create_tv_controller as _create_tv_ctrl,
+    TVConfig,
+)
 from tv_ws_hub import TvWsHub
 from tv_test_api import TvTestApi
 from tv_media_server import TvMediaServer
@@ -1135,6 +1142,36 @@ def _qris_file() -> str:
             if os.path.isfile(p):
                 return p
     return ""
+
+
+def _webos_manifest_path() -> str:
+    """Path manifest_rrbillingpro.json untuk pairing webOS TV.
+    Cari di APP_BASE_DIR, lalu bundle PyInstaller (_MEIPASS)."""
+    for base in (APP_BASE_DIR, getattr(sys, "_MEIPASS", "")):
+        if base:
+            p = os.path.join(base, "manifest_rrbillingpro.json")
+            if os.path.isfile(p):
+                return p
+    return ""
+
+
+def _get_tv_controller(tv_type, ip, mac="", port=5555, label=""):
+    """Buat TVController instance berdasarkan tv_type.
+
+    tv_type: "android" | "webos"
+    Menggunakan tv_controller_system (OOP hybrid).
+    """
+    os_type = "webos" if tv_type == "webos" else "android"
+    cfg = {
+        "ip_address": ip,
+        "mac_address": mac or "00:00:00:00:00:00",
+        "os_type": os_type,
+        "port": port,
+        "label": label,
+    }
+    return _create_tv_ctrl(label or "tv", cfg,
+                           key_file_path=os.path.join(APP_BASE_DIR, ".aiopylgtv.sqlite"),
+                           manifest_file_path=_webos_manifest_path())
 
 
 CONFIG_FILE   = app_path("rr_billing_config.json")
@@ -7727,11 +7764,13 @@ class KartuTV(tk.Canvas):
             return
         def _run():
             try:
-                ctrl = TVController()
+                ctrl = _get_tv_controller(
+                    self.tv_type, self.ip, getattr(self, "mac", ""),
+                    port=getattr(self, "port", 5555), label=self.label_tv)
                 import asyncio
-                asyncio.run(ctrl.show_toast_message(ip, pesan))
+                asyncio.run(ctrl.safe_show_toast(pesan))
             except Exception as e:
-                print(f"[WEBOS TOAST] {self.label_tv}: gagal — {e}")
+                print(f"[WEBOS TOAST] {self.label_tv}: gagal - {e}")
         threading.Thread(target=_run, daemon=True).start()
 
     def _webos_toast_sisa_waktu(self):
@@ -7768,11 +7807,13 @@ class KartuTV(tk.Canvas):
         def runner():
             hasil, pesan = False, ""
             if getattr(self, "tv_type", "android") == "webos":
-                # webOS: via bscpylgtv WebSocket power_off
+                # webOS: via bscpylgtv WebSocket power_off (dengan screensaver fix)
                 try:
-                    ctrl = TVController()
+                    ctrl = _get_tv_controller(
+                        self.tv_type, self.ip, getattr(self, "mac", ""),
+                        port=getattr(self, "port", 5555), label=self.label_tv)
                     import asyncio
-                    ok = asyncio.run(ctrl.turn_off_tv(self.ip))
+                    ok = asyncio.run(ctrl.safe_turn_off())
                     if ok:
                         hasil, pesan = True, "webOS power_off via WebSocket"
                     else:
@@ -8089,10 +8130,21 @@ class KartuTV(tk.Canvas):
         threading.Thread(target=self._tv_power_check_thread, daemon=True).start()
 
     def _tv_power_check_thread(self):
-        try:
-            state = ADBHelper.tv_power_state(self.ip, self.port)
-        except Exception:
+        if getattr(self, "tv_type", "android") == "webos":
             state = None
+            try:
+                ctrl = _get_tv_controller(
+                    self.tv_type, self.ip, getattr(self, "mac", ""),
+                    port=getattr(self, "port", 5555), label=self.label_tv)
+                import asyncio
+                state = asyncio.run(ctrl.is_powered_on())
+            except Exception:
+                state = None
+        else:
+            try:
+                state = ADBHelper.tv_power_state(self.ip, self.port)
+            except Exception:
+                state = None
         self._power_check_running = False
         try:
             self.after(0, self._apply_tv_power_state, state)
@@ -8139,12 +8191,14 @@ class KartuTV(tk.Canvas):
             self.itemconfig(self._ids['btn_power'], fill=C_BTN)
         if getattr(self, "tv_type", "android") == "webos":
             def runner():
-                ctrl = TVController()
+                ctrl = _get_tv_controller(
+                    self.tv_type, self.ip, getattr(self, "mac", ""),
+                    port=getattr(self, "port", 5555), label=self.label_tv)
+                import asyncio
                 if self.is_on:
-                    ctrl.turn_on_tv(self.mac)
+                    asyncio.run(ctrl.safe_turn_on())
                 else:
-                    import asyncio
-                    asyncio.run(ctrl.turn_off_tv(self.ip))
+                    asyncio.run(ctrl.safe_turn_off())
             threading.Thread(target=runner, daemon=True).start()
         else:
             self._adb_action(lambda: ADBHelper.power_toggle(self.ip, port=self.port))
