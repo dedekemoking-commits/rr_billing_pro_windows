@@ -25,15 +25,16 @@ jobs:
           pip install pyinstaller cryptography
           pip install -r requirements.txt
           pip install bspylgtv wakeonlan supabase sqlitedict
+        continue-on-error: false
 
       - name: Build exe with PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --add-data "logo.png;." --add-data "update_pubkey.pem;." --hidden-import=billing_web --hidden-import=lg_tv_controller --hidden-import=scripts --hidden-import=supabase --hidden-import=bspylgtv --hidden-import=wakeonlan main.py
+          pyinstaller --noconfirm --onefile --icon=logo.ico --add-data "logo.png;." --add-data "update_pubkey.pem;." --add-data "logo.ico;." --hidden-import=billing_web --hidden-import=lg_tv_controller --hidden-import=scripts --hidden-import=supabase --hidden-import=bspylgtv --hidden-import=wakeonlan --name RRBilling main.py
 
       - name: Calculate SHA256
         id: hash
         run: |
-          $path = "dist\\main.exe"
+          $path = "dist\\RRBilling.exe"
           $h = Get-FileHash $path -Algorithm SHA256
           Write-Host "sha256=$($h.Hash)" >> $env:GITHUB_OUTPUT
 
@@ -42,7 +43,7 @@ jobs:
           SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
         run: |
           $sha = ${{ steps.hash.outputs.sha256 }}
-          $asset_url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/main.exe"
+          $asset_url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/RRBilling.exe"
           python scripts\generate_manifest_and_sign.py --version ${{ github.ref_name }} --asset_url $asset_url --sha256 $sha --signing_key "$env:SIGNING_PRIVATE_KEY" --out manifest.json
 
       - name: Create GitHub Release
@@ -57,8 +58,8 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: dist/main.exe
-          file_name: main.exe
+          file: dist/RRBilling.exe
+          file_name: RRBilling.exe
           tag: ${{ github.ref_name }}
 
       - name: Upload manifest
