@@ -78,6 +78,7 @@ var KODE = params.get('k') || '';
 var OWNER = params.get('o') || '';
 var GRUP = params.get('g') || '';
 var SID = params.get('s') || '';
+var TV_TYPE = params.get('type') || '';
 
 var rupiah = function (n) { return 'Rp ' + Number(n || 0).toLocaleString('id-ID'); };
 var data = { nama_rental: '', paket_grup: {}, makanan: {}, minuman: {}, stok: {} };
@@ -134,6 +135,11 @@ function parseJsonField(v) {
 if (!TV || !KODE) {
   document.getElementById('app').innerHTML =
     '<div class="card status err">QR tidak valid atau sudah kedaluwarsa.<br>Silakan hubungi kasir langsung.</div>';
+} else if (TV_TYPE === 'webos') {
+  // webOS: skip PIN, langsung muat menu
+  document.getElementById('pinView').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  mulaiSesiWebOS();
 } else {
   showPin();
   mulaiSesi();
@@ -320,6 +326,24 @@ function mulaiSesi() {
     cekSesi(SID);
   }).catch(function (e) {
     tampilPinStatus('Gagal mulai sesi: ' + e.message, false);
+  });
+}
+
+function mulaiSesiWebOS() {
+  // webOS: buat session langsung verified (skip PIN)
+  if (SID) { muatMenu(); return; }
+  supaInsert('qr_sessions', {
+    tv: TV, kode: KODE, owner: OWNER || '', pin: 'WEBOS_SKIP', pin_user: '',
+    status: 'verified', sid: '', created: Date.now(), updatedAt: ''
+  }).then(function (rows) {
+    if (!rows || !rows.length) throw new Error('Gagal membuat sesi');
+    SID = rows[0].id;
+    var u = new URLSearchParams(location.search);
+    u.set('s', SID);
+    history.replaceState(null, '', '?' + u.toString());
+    muatMenu();
+  }).catch(function (e) {
+    tampilStatus('Gagal mulai sesi: ' + e.message, false);
   });
 }
 

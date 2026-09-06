@@ -638,6 +638,7 @@ function googleBootCheck(){
 }
 googleBootCheck();
 
+var SITE_INFO={};
 function enterApp(j){
   showMain();
   $("userInfo").textContent=j.username+" · "+(j.role==="admin"?"ADMIN":"KASIR");
@@ -647,6 +648,7 @@ function enterApp(j){
   $("tabLog").style.display=isAdmin?"":"none";
   $("tabPanduan").style.display=isAdmin?"":"none";
   loadState();
+  loadProfil();
   boStartupCheck();
 }
 
@@ -3198,26 +3200,28 @@ try{ applyTheme(localStorage.getItem("rr_web_theme")||"cyan",false); }
 catch(e){ applyTheme("cyan",false); }
 function loadProfil(){
   api("/api/profil").then(function(j){
-    var pr=j.profil||{};
-    applyTheme(j.theme||"cyan");
-    $("pfNama").value=pr.nama_rental||"";
-    $("pfPemilik").value=pr.nama_pemilik||"";
-    $("pfHp").value=pr.hp||"";
-    $("pfEmail").value=pr.email||"";
-    $("pfAlamat").value=pr.alamat||"";
-    $("pfPinStatus").textContent=j.has_pin
-      ? ("Status: AKTIF"+(j.pin_updated?" · diperbarui "+j.pin_updated:""))
-      : "Status: BELUM ADA PIN";
     SITE_INFO=j;
-    $("pfInfo").innerHTML=
-      '<div class="row-item">Versi&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:<b>'+esc(j.versi||"-")+'</b></div>'+
-      '<div class="row-item">Developer&nbsp;&nbsp;:<b>'+esc(j.developer||"-")+'</b></div>'+
-      '<div class="row-item">Kontak&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:<b>'+esc(j.kontak||"-")+'</b></div>'+
-      '<div class="row-item">User Aktif&nbsp;:<b>'+esc(j.username||"-")+' ['+esc(j.role||"-")+']</b></div>'+
-      '<div class="row-item">Lisensi&nbsp;&nbsp;&nbsp;&nbsp;:<b>'+esc(j.lisensi||"-")+'</b></div>'+
-      '<div class="row-item">Alamat&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:<b><a href="https://'+esc(j.website||"rrcctv.online")+'" target="_blank" style="color:var(--sky)">'+esc(j.website||"rrcctv.online")+'</a></b></div>';
+    applyTheme(j.theme||"cyan");
     if(j.bg_url){ setBg(j.bg_url); }
-    $("pfBakCard").style.display=j.admin?"":"none";
+    var pr=j.profil||{};
+    try{
+      $("pfNama").value=pr.nama_rental||"";
+      $("pfPemilik").value=pr.nama_pemilik||"";
+      $("pfHp").value=pr.hp||"";
+      $("pfEmail").value=pr.email||"";
+      $("pfAlamat").value=pr.alamat||"";
+      $("pfPinStatus").textContent=j.has_pin
+        ? ("Status: AKTIF"+(j.pin_updated?" · diperbarui "+j.pin_updated:""))
+        : "Status: BELUM ADA PIN";
+      $("pfInfo").innerHTML=
+        '<div class="row-item">Versi&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:<b>'+esc(j.versi||"-")+'</b></div>'+
+        '<div class="row-item">Developer&nbsp;&nbsp;:<b>'+esc(j.developer||"-")+'</b></div>'+
+        '<div class="row-item">Kontak&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:<b>'+esc(j.kontak||"-")+'</b></div>'+
+        '<div class="row-item">User Aktif&nbsp;:<b>'+esc(j.username||"-")+' ['+esc(j.role||"-")+']</b></div>'+
+        '<div class="row-item">Lisensi&nbsp;&nbsp;&nbsp;&nbsp;:<b>'+esc(j.lisensi||"-")+'</b></div>'+
+        '<div class="row-item">Alamat&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:<b><a href="https://'+esc(j.website||"rrcctv.online")+'" target="_blank" style="color:var(--sky)">'+esc(j.website||"rrcctv.online")+'</a></b></div>';
+      $("pfBakCard").style.display=j.admin?"":"none";
+    }catch(e){}
   }).catch(function(e){ setStatus(e.message,true); });
 }
 function setBg(url){

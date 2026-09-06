@@ -39,6 +39,7 @@ from typing import Optional
 from firebase_auth import get_firebase_auth
 from firestore_sync import FirestoreClient
 import tv_mesin
+from lg_tv_controller.tv_controller import TVController
 from tv_ws_hub import TvWsHub
 from tv_test_api import TvTestApi
 from tv_media_server import TvMediaServer
@@ -1282,7 +1283,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.19"
+APP_VERSION = "2.4.20"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -2633,7 +2634,10 @@ class DialogWarnetAdminCode(ctk.CTkToplevel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class DialogOverlaySetting(ctk.CTkToplevel):
-    """Pengaturan tampilan overlay countdown di TV (mode + menit terakhir)."""
+    """Pengaturan tampilan overlay countdown di TV (mode + menit terakhir).
+    Section 1: Android TV (overlay mode)
+    Section 2: LG webOS (toast message intervals)
+    """
 
     MODE_OPTIONS = [
         ("always", "Selalu tampil"),
@@ -2641,29 +2645,34 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         ("hidden", "Sembunyi (tidak tampil)"),
     ]
 
-    def __init__(self, master, mode="always", last_minutes=5, on_save=None):
+    def __init__(self, master, mode="always", last_minutes=5, on_save=None,
+                 webos_toast_enabled=True, webos_toast_minutes=None):
         super().__init__(master)
         self.on_save = on_save
         self.title("Pengaturan Overlay TV")
-        self.geometry("480x300")
+        self.geometry("480x480")
         self.configure(fg_color=C_BG)
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
 
         ctk.CTkLabel(self, text="⚙️  OVERLAY COUNTDOWN TV",
-                     font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(16, 4))
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(12, 4))
+
+        # ── Section: Android TV ──
+        ctk.CTkLabel(self, text="—— Android TV ——", font=FONT_SUB,
+                     text_color=C_MUTED).pack(pady=(4, 2))
         ctk.CTkLabel(self, text="Kapan widget waktu di pojok kanan atas TV ditampilkan?",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 10))
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
 
         self.mode_var = tk.StringVar(value=mode)
         for value, label in self.MODE_OPTIONS:
             ctk.CTkRadioButton(self, text=label, variable=self.mode_var, value=value,
                                font=FONT_BODY, fg_color=C_ACCENT2,
-                               command=self._on_mode_change).pack(anchor="w", padx=30, pady=4)
+                               command=self._on_mode_change).pack(anchor="w", padx=30, pady=3)
 
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=30, pady=(8, 4))
+        row.pack(fill="x", padx=30, pady=(6, 4))
         ctk.CTkLabel(row, text="Tampil sejak sisa waktu (menit):", font=FONT_BODY,
                      text_color=C_TEXT).pack(side="left")
         self.minutes_var = tk.StringVar(value=str(last_minutes))
@@ -2673,6 +2682,37 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         self.entry_minutes.pack(side="left", padx=10)
         self._on_mode_change()
 
+        # ── Separator ──
+        sep = ctk.CTkFrame(self, height=2, fg_color=C_MUTED)
+        sep.pack(fill="x", padx=20, pady=(10, 6))
+
+        # ── Section: LG webOS ──
+        ctk.CTkLabel(self, text="—— LG webOS ——", font=FONT_SUB,
+                     text_color=C_MUTED).pack(pady=(2, 2))
+        ctk.CTkLabel(self, text="Toast message otomatis di layar TV LG",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
+
+        self.webos_toast_var = tk.BooleanVar(value=webos_toast_enabled)
+        ctk.CTkCheckBox(self, text="Aktifkan toast message", variable=self.webos_toast_var,
+                        font=FONT_BODY, fg_color=C_ACCENT2,
+                        command=self._on_webos_toast_toggle).pack(anchor="w", padx=30, pady=4)
+
+        self.webos_minutes_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.webos_minutes_frame.pack(fill="x", padx=30, pady=(2, 4))
+        ctk.CTkLabel(self.webos_minutes_frame, text="Toast muncul saat sisa waktu (menit):",
+                     font=FONT_BODY, text_color=C_TEXT).pack(side="left")
+
+        default_minutes = webos_toast_minutes or [10, 5, 3, 1]
+        self.webos_toast_vars = {}
+        for m in [10, 5, 3, 1]:
+            var = tk.BooleanVar(value=(m in default_minutes))
+            self.webos_toast_vars[m] = var
+            cb = ctk.CTkCheckBox(self.webos_minutes_frame, text=str(m), variable=var,
+                                 font=FONT_BODY, fg_color=C_ACCENT2, width=50)
+            cb.pack(side="left", padx=4)
+        self._on_webos_toast_toggle()
+
+        # ── Buttons ──
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=30, pady=(10, 14))
         ctk.CTkButton(btns, text="✖ Batal", width=110, height=36,
@@ -2686,6 +2726,12 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         state = "normal" if self.mode_var.get() == "last_minutes" else "disabled"
         self.entry_minutes.configure(state=state)
 
+    def _on_webos_toast_toggle(self):
+        state = "normal" if self.webos_toast_var.get() else "disabled"
+        for cb in self.webos_minutes_frame.winfo_children():
+            if isinstance(cb, ctk.CTkCheckBox):
+                cb.configure(state=state)
+
     def _save(self):
         mode = self.mode_var.get()
         try:
@@ -2693,8 +2739,12 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         except ValueError:
             messagebox.showwarning("Input Salah", "Jumlah menit harus angka 1–60.", parent=self)
             return
+        webos_toast_enabled = self.webos_toast_var.get()
+        webos_toast_minutes = [m for m, var in self.webos_toast_vars.items() if var.get()]
+        if not webos_toast_minutes:
+            webos_toast_minutes = [10, 5, 3, 1]
         if callable(self.on_save):
-            self.on_save(mode, minutes)
+            self.on_save(mode, minutes, webos_toast_enabled, webos_toast_minutes)
         self.destroy()
 
 
@@ -3454,7 +3504,7 @@ class DialogConfigClient(ctk.CTkToplevel):
         default_id = self._next_id("WARNET_", used)
         vals = self._ask_fields("➕ Tambah Client", [
             ("client_id", "Client ID", default_id),
-            ("password", "Password", "admin123"),
+            ("password", "Password", ""),
             ("location", "Lokasi", "Warnet Lokasi 1"),
         ])
         if not vals or not vals.get("client_id") or not vals.get("password"):
@@ -5425,11 +5475,11 @@ class DialogPelangganAkhir(ctk.CTkToplevel):
 
 
 class DialogTambahTV(ctk.CTkToplevel):
-    """Form tambah TV: Grup Tarif, Nama, IP → langsung pairing + input PIN."""
+    """Form tambah TV: Tipe, Grup Tarif, Nama, IP → langsung pairing + input PIN."""
     def __init__(self, master, nomor_tv, on_confirm, on_close_cb, daftar_grup=None):
         super().__init__(master)
         self.title(f"Tambah TV #{nomor_tv}")
-        self.geometry("380x420")
+        self.geometry("380x600")
         self.configure(fg_color=C_BG)
         self.transient(master)
         self.resizable(False, False)
@@ -5441,17 +5491,40 @@ class DialogTambahTV(ctk.CTkToplevel):
         self._pairing_ip = ""
         self.daftar_grup = daftar_grup or [NAMA_GRUP_DEFAULT]
         self.grup_var = ctk.StringVar(value=self.daftar_grup[0])
+        self.tv_type_var = ctk.StringVar(value="Android TV")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build()
-        center_window(self, master, width=380, height=420)
+        center_window(self, master, width=380, height=600)
         self.after(50, self.grab_set)
 
     def _build(self):
         ctk.CTkLabel(self, text=f"📺  Tambah TV #{self.nomor_tv}",
                      font=FONT_TITLE, text_color=C_ACCENT).pack(pady=(18, 6))
+        # Tipe TV
+        tipe_f = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
+        tipe_f.pack(fill="x", padx=28)
+        ctk.CTkLabel(tipe_f, text="📱  Tipe TV",
+                     font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(10, 2))
+        self.opt_tipe = ctk.CTkOptionMenu(tipe_f, values=["Android TV", "LG webOS"],
+                                          variable=self.tv_type_var,
+                                          fg_color=C_BTN, button_color=C_ACCENT2,
+                                          text_color=C_TEXT, font=FONT_BODY,
+                                          dropdown_fg_color=C_CARD, dropdown_text_color=C_TEXT,
+                                          command=self._on_tipe_changed)
+        self.opt_tipe.pack(fill="x", padx=14, pady=(0, 10))
+        # MAC Address (untuk webOS)
+        self.mac_frame = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
+        ctk.CTkLabel(self.mac_frame, text="🔗  MAC Address (WOL)",
+                     font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(8, 2))
+        self.entry_mac = ctk.CTkEntry(self.mac_frame, placeholder_text="AA:BB:CC:DD:EE:FF",
+                                      fg_color=C_BTN, text_color=C_ACCENT,
+                                      border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
+        self.entry_mac.pack(fill="x", padx=14, pady=(0, 10))
+        # Sembunyikan MAC frame awalnya (default Android TV)
+        self.mac_frame.pack_forget()
         # Grup
         grup_f = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
-        grup_f.pack(fill="x", padx=28)
+        grup_f.pack(fill="x", padx=28, pady=(8, 0))
         ctk.CTkLabel(grup_f, text="🏷  Grup Tarif",
                      font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(10, 2))
         self.opt_grup = ctk.CTkOptionMenu(grup_f, values=self.daftar_grup, variable=self.grup_var,
@@ -5474,35 +5547,54 @@ class DialogTambahTV(ctk.CTkToplevel):
         ctk.CTkLabel(ip_f, text="🌐  IP Address TV",
                      font=FONT_LABEL, text_color=C_MUTED).pack(anchor="w", padx=14, pady=(8, 2))
         self.entry_ip = ctk.CTkEntry(ip_f, placeholder_text="192.168.1.xxx",
-                                      fg_color=C_BTN, text_color=C_ACCENT,
-                                      border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
+                                     fg_color=C_BTN, text_color=C_ACCENT,
+                                     border_color=C_BORDER, font=("Consolas", 13, "bold"), height=34)
         self.entry_ip.pack(fill="x", padx=14, pady=(0, 10))
-        # Status + Buttons (langsung di bawah IP)
+        # Status + Buttons
         self.lbl_status = ctk.CTkLabel(self, text="", font=FONT_SMALL, text_color=C_MUTED)
         self.lbl_status.pack(pady=(8, 2))
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
         btn_f.pack(pady=(4, 14))
         self.btn_tambah = ctk.CTkButton(btn_f, text="✅  Tambah TV", width=140, height=36,
-                                         fg_color=C_ACCENT2, font=FONT_SUB, text_color="white",
-                                         command=self._tambah_tv)
+                                        fg_color=C_ACCENT2, font=FONT_SUB, text_color="white",
+                                        command=self._tambah_tv)
         self.btn_tambah.pack(side="left", padx=6)
         ctk.CTkButton(btn_f, text="✖  Batal", width=100, height=36,
                       fg_color=C_RED, font=FONT_SUB, text_color="white",
                       command=self._on_close).pack(side="left", padx=6)
 
+    def _on_tipe_changed(self, value):
+        if value == "LG webOS":
+            self.mac_frame.pack(fill="x", padx=28, pady=(8, 0), after=self.opt_tipe.master)
+        else:
+            self.mac_frame.pack_forget()
+
     def _tambah_tv(self):
         ip = self.entry_ip.get().strip()
         nama = self.entry_nama.get().strip()
+        tv_type = "webos" if self.tv_type_var.get() == "LG webOS" else "android"
+        mac = self.entry_mac.get().strip() if tv_type == "webos" else ""
         if not ip:
             self.lbl_status.configure(text="⚠  Isi IP Address TV", text_color=C_YELLOW)
             return
         if not nama:
             self.lbl_status.configure(text="⚠  Isi Nama TV", text_color=C_YELLOW)
             return
+        if tv_type == "webos" and not mac:
+            self.lbl_status.configure(text="⚠  Isi MAC Address untuk webOS WOL", text_color=C_YELLOW)
+            return
         self._pairing_ip = ip
-        self.btn_tambah.configure(state="disabled", text="⏳  Pairing...")
-        self.lbl_status.configure(text="⏳  Memulai pairing...", text_color=C_YELLOW)
-        threading.Thread(target=self._pair_start_thread, args=(ip,), daemon=True).start()
+        self._pairing_tv_type = tv_type
+        self._pairing_mac = mac
+        if tv_type == "webos":
+            self._confirmed = True
+            grup = self.grup_var.get() or NAMA_GRUP_DEFAULT
+            self.on_confirm(ip, nama, 0, grup, tv_type=tv_type, mac=mac)
+            self.destroy()
+        else:
+            self.btn_tambah.configure(state="disabled", text="⏳  Pairing...")
+            self.lbl_status.configure(text="⏳  Memulai pairing...", text_color=C_YELLOW)
+            threading.Thread(target=self._pair_start_thread, args=(ip,), daemon=True).start()
 
     def _pair_start_thread(self, ip):
         try:
@@ -5565,7 +5657,7 @@ class DialogTambahTV(ctk.CTkToplevel):
                 self._confirmed = True
                 nama = self.entry_nama.get().strip() or f"TV {self.nomor_tv}"
                 grup = self.grup_var.get() or NAMA_GRUP_DEFAULT
-                self.on_confirm(ip, nama, 0, grup)
+                self.on_confirm(ip, nama, 0, grup, tv_type="android", mac="")
                 self.destroy()
             else:
                 self._pair_error(conn.get("message", "Gagal connect"))
@@ -7067,7 +7159,7 @@ class KartuTV(tk.Canvas):
                  get_paket_data, get_makanan_data, get_minuman_data,
                  get_semua_kartu, nama_grup="Reguler", is_first=False,
                  get_daftar_grup=None, on_ganti_grup=None, on_hapus=None,
-                 role="admin", plug=None, **kwargs):
+                 role="admin", plug=None, tv_type="android", mac="", **kwargs):
         super().__init__(master, highlightthickness=0, bd=0,
                          bg="white", **kwargs)
         self.role         = role or "admin"
@@ -7076,6 +7168,8 @@ class KartuTV(tk.Canvas):
         self.port         = port
         self.label_tv     = label_tv
         self.plug         = plug  # smart plug (Tuya) per TV: {device_id, ip, local_key, version}
+        self.tv_type      = tv_type  # "android" | "webos"
+        self.mac          = mac      # MAC address (wajib untuk webOS WOL)
         self.on_transaksi = on_transaksi
         self.nama_grup        = nama_grup
         self.get_paket_data   = get_paket_data
@@ -7224,7 +7318,7 @@ class KartuTV(tk.Canvas):
             text="● HIDEN", font=("Courier New", 11, "bold"),
             fill=C_GREEN, anchor="w", tags="lbl_power")
         self._ids['lbl_grup'] = self.create_text(80, y+10,
-            text=f"\u21bb Reguler", font=("Courier New", 11, "bold"),
+            text=f"\u21bb {self.nama_grup}", font=("Courier New", 11, "bold"),
             fill=C_ACCENT2, anchor="w", tags="lbl_grup")
         self.tag_bind("lbl_grup", "<Button-1>", lambda e: self._buka_ganti_grup())
         self._ids['lbl_paket'] = self.create_text(W-8, y+10,
@@ -7624,13 +7718,46 @@ class KartuTV(tk.Canvas):
             self.idle_escalated = True
             self._tv_sleep_now(threshold)
 
+    def _webos_toast(self, pesan):
+        """Kirim toast message ke LG webOS TV via bscpylgtv (async, fire-and-forget)."""
+        if getattr(self, "tv_type", "android") != "webos":
+            return
+        ip = getattr(self, "ip", "")
+        if not ip:
+            return
+        def _run():
+            try:
+                ctrl = TVController()
+                import asyncio
+                asyncio.run(ctrl.show_toast_message(ip, pesan))
+            except Exception as e:
+                print(f"[WEBOS TOAST] {self.label_tv}: gagal — {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _webos_toast_sisa_waktu(self):
+        """Kirim toast sisa waktu ke webOS TV sesuai interval yang diatur operator.
+        Default interval: 10, 5, 3, 1 menit. Cek config tv_overlay_webos_toast_minutes."""
+        app = self.winfo_toplevel()
+        toast_enabled = getattr(app, "tv_overlay_webos_toast_enabled", True)
+        if not toast_enabled:
+            return
+        toast_minutes = getattr(app, "tv_overlay_webos_toast_minutes", [10, 5, 3, 1])
+        if not toast_minutes:
+            return
+        sisa = getattr(self, "sisa_waktu", 0)
+        if sisa <= 0:
+            return
+        sisa_menit = sisa // 60
+        sisa_detik = sisa % 60
+        # Kirim toast saat sisa waktu tepat di menit yang diatur (dan detik == 0 agar tidak duplikat)
+        if sisa_detik == 0 and sisa_menit in toast_minutes:
+            self._webos_toast(f"Sisa Waktu: {sisa_menit} Menit")
+
     def _tv_sleep_now(self, grace_detik, alasan=None):
         """Matikan TV (sleep) dengan upaya berlapis:
-        1) power_toggle atpv2 (auto-reconnect + retry max 3x, selang 2 dtk),
-        2) KEYCODE_SLEEP via atpv2 (beberapa TV hanya merespons SLEEP),
-        3) fallback ADB: adb shell input keyevent KEYCODE_POWER / KEYCODE_SLEEP,
-        4) verifikasi status layar ±9 dtk -> audit jujur (ok hanya jika TV
-           benar-benar mati; gagal dicatat dengan alasan, tidak menipu log).
+        - webOS: via bscpylgtv WebSocket power_off
+        - Android: 1) power_toggle atpv2, 2) KEYCODE_SLEEP, 3) fallback ADB,
+          4) verifikasi status layar.
         """
         app = self.winfo_toplevel()
         user = getattr(app, "current_user", "") or ""
@@ -7640,39 +7767,52 @@ class KartuTV(tk.Canvas):
 
         def runner():
             hasil, pesan = False, ""
-            # 1) atpv2 POWER dengan retry
-            for _ in range(3):
+            if getattr(self, "tv_type", "android") == "webos":
+                # webOS: via bscpylgtv WebSocket power_off
                 try:
-                    ok, out, _ = ADBHelper.power_toggle(self.ip, port=self.port)
+                    ctrl = TVController()
+                    import asyncio
+                    ok = asyncio.run(ctrl.turn_off_tv(self.ip))
                     if ok:
-                        hasil, pesan = True, "atpv2 POWER terkirim"
-                        break
-                    pesan = str(out)[:120]
+                        hasil, pesan = True, "webOS power_off via WebSocket"
+                    else:
+                        pesan = "webOS power_off gagal"
                 except Exception as e:
-                    pesan = str(e)
-                time.sleep(2)
-            # 2) KEYCODE_SLEEP via atpv2
-            if not hasil:
-                try:
-                    rem = ADBHelper._get_remote(self.ip)
-                    res = rem.sleep_blocking()
-                    if res.get("status") == "ok":
-                        hasil, pesan = True, "atpv2 SLEEP terkirim"
-                except Exception as e:
-                    pesan = str(e)[:120]
-            # 3) Fallback ADB (port 5555 / port kartu bila terbuka)
-            if not hasil:
-                for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+                    pesan = f"webOS error: {e}"
+            else:
+                # 1) atpv2 POWER dengan retry
+                for _ in range(3):
                     try:
-                        ok_adb, out_adb = ADBHelper.adb_shell(self.ip, f"input keyevent {kunci}",
-                                                              timeout=8, port=self.port)
-                        if ok_adb:
-                            hasil, pesan = True, f"fallback ADB keyevent {kunci}: {out_adb[:80]}"
+                        ok, out, _ = ADBHelper.power_toggle(self.ip, port=self.port)
+                        if ok:
+                            hasil, pesan = True, "atpv2 POWER terkirim"
                             break
+                        pesan = str(out)[:120]
+                    except Exception as e:
+                        pesan = str(e)
+                    time.sleep(2)
+                # 2) KEYCODE_SLEEP via atpv2
+                if not hasil:
+                    try:
+                        rem = ADBHelper._get_remote(self.ip)
+                        res = rem.sleep_blocking()
+                        if res.get("status") == "ok":
+                            hasil, pesan = True, "atpv2 SLEEP terkirim"
                     except Exception as e:
                         pesan = str(e)[:120]
-            # 4) Verifikasi status layar sungguhan (polls 3x, selang 3 dtk)
-            if hasil:
+                # 3) Fallback ADB (port 5555 / port kartu bila terbuka)
+                if not hasil:
+                    for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+                        try:
+                            ok_adb, out_adb = ADBHelper.adb_shell(self.ip, f"input keyevent {kunci}",
+                                                                  timeout=8, port=self.port)
+                            if ok_adb:
+                                hasil, pesan = True, f"fallback ADB keyevent {kunci}: {out_adb[:80]}"
+                                break
+                        except Exception as e:
+                            pesan = str(e)[:120]
+            # 4) Verifikasi status layar sungguhan (hanya untuk Android)
+            if hasil and getattr(self, "tv_type", "android") != "webos":
                 state = None
                 for _ in range(3):
                     time.sleep(3)
@@ -7997,7 +8137,13 @@ class KartuTV(tk.Canvas):
         else:
             self.itemconfig(self._ids['lbl_power'], text="\U0001f4f5 MATI", fill=C_MUTED)
             self.itemconfig(self._ids['btn_power'], fill=C_BTN)
-        self._adb_action(lambda: ADBHelper.power_toggle(self.ip, port=self.port))
+        if getattr(self, "tv_type", "android") == "webos":
+            def runner():
+                ctrl = TVController()
+                ctrl.turn_on_tv(self.mac)
+            threading.Thread(target=runner, daemon=True).start()
+        else:
+            self._adb_action(lambda: ADBHelper.power_toggle(self.ip, port=self.port))
 
     def _adb_action(self, fn):
         def runner():
@@ -8330,7 +8476,8 @@ class KartuTV(tk.Canvas):
                 "Gagal membuat kode QR untuk TV ini.\nPeriksa file rr_billing_config.json.",
                 parent=app)
             return
-        url = app._qr_url(self.label_tv, kode, self.nama_grup)
+        tv_type = getattr(self, "tv_type", "android")
+        url = app._qr_url(self.label_tv, kode, self.nama_grup, tv_type=tv_type)
         path = app._qr_simpan_png(self.label_tv, url)
         DialogQrKartu(app, self.label_tv, url, path)
 
@@ -8725,6 +8872,10 @@ class KartuTV(tk.Canvas):
         else:
             self._ws_send_start(self.sisa_waktu)
 
+        # Toast untuk webOS TV: "Paket {nama} Dimulai"
+        if getattr(self, "tv_type", "android") == "webos" and not previous_session:
+            self._webos_toast(f"Paket {paket_nm} Dimulai")
+
         # Terapkan perubahan stok (selisih qty lama → baru)
         try:
             if pesanan and hasattr(app, '_stok_terapkan'):
@@ -8827,6 +8978,9 @@ class KartuTV(tk.Canvas):
                 self.itemconfig(self._ids['bg'], fill="white")
                 self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT2)
             self._ws_send_sync()
+            # Toast sisa waktu untuk webOS TV
+            if getattr(self, "tv_type", "android") == "webos":
+                self._webos_toast_sisa_waktu()
 
     # ── Timer habis handler (called from TimerService) ──────────────────────
     def _timer_habis(self):
@@ -8877,6 +9031,14 @@ class KartuTV(tk.Canvas):
         # dengan rincian pesanan lengkap (Sewa / Makanan / Minuman / Total).
         # Dikirim SEGERA saat waktu habis (sebelum dialog blokir) supaya TV
         # langsung menampilkan semua detail pesanan.
+        # ── webOS: skip lock screen, langsung toast + matikan TV ──
+        if getattr(self, "tv_type", "android") == "webos":
+            print(f"[TV TIMER] {self.label_tv}: WAKTU HABIS (webOS) -> toast + auto-off")
+            self._webos_toast("WAKTU SEWA HABIS — TV akan mati")
+            self._ws_send_stop()
+            self._tv_sleep_now(2, alasan="Waktu habis — webOS auto-off")
+            self._reset_sesi()
+            return
         daftar_sewa = " + ".join(self.daftar_paket_sesi) or (self.paket_aktif or "-")
         app_menu = self.winfo_toplevel()
         menu_makanan = getattr(app_menu, 'menu_makanan', {}) or {}
@@ -10678,6 +10840,11 @@ class AutoRentApp(ctk.CTk):
             self.tv_overlay_last_minutes = int(cfg.get("tv_overlay_last_minutes", 5) or 5)
         except Exception:
             self.tv_overlay_last_minutes = 5
+        self.tv_overlay_webos_toast_enabled = bool(cfg.get("tv_overlay_webos_toast_enabled", True))
+        try:
+            self.tv_overlay_webos_toast_minutes = list(cfg.get("tv_overlay_webos_toast_minutes", [10, 5, 3, 1]) or [10, 5, 3, 1])
+        except Exception:
+            self.tv_overlay_webos_toast_minutes = [10, 5, 3, 1]
         self.tv_ws_hub = None
         self.tv_test_api = None
         self.tv_media_server = None
@@ -11223,14 +11390,26 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             return self.QR_PAGE_BASE
 
-    def _qr_url(self, nama_tv: str, kode: str, nama_grup: str = "") -> str:
+    def _qr_url(self, nama_tv: str, kode: str, nama_grup: str = "", tv_type: str = "") -> str:
         from urllib.parse import quote
         owner = self._resolve_license_user() or ""
         url = (f"{self._qr_host_web()}?tv={quote(nama_tv)}&k={kode}"
                f"&o={quote(owner)}")
         if nama_grup:
             url += f"&g={quote(nama_grup)}"
+        if tv_type == "webos":
+            url += "&type=webos"
         return url
+
+    def _qr_type_tv(self, nama_tv: str) -> str:
+        """Tipe TV (android/webos) untuk QR web."""
+        try:
+            for item in (ConfigManager.load().get("daftar_tv", []) or []):
+                if str(item.get("nama", "")) == nama_tv:
+                    return str(item.get("tv_type", "android")).strip() or "android"
+        except Exception:
+            pass
+        return "android"
 
     def _qr_grup_tv(self, nama_tv: str) -> str:
         """Grup tarif kartu TV (untuk QR web: daftar paket sesuai grup)."""
@@ -11280,20 +11459,21 @@ class AutoRentApp(ctk.CTk):
             else:
                 kode_lama, ip_lama = "", ""
             ip_kini = self._qr_ip_tv(nama_tv)
+            tv_type = self._qr_type_tv(nama_tv)
             if kode_lama and (not ip_kini or ip_kini == ip_lama):
                 # QR lama tetap berlaku — namun PNG di-refresh agar URL terkini
                 # (termasuk param grup g= & host server) ikut tercetak ulang.
                 self._qr_simpan_png(nama_tv,
                                     self._qr_url(nama_tv, kode_lama,
-                                                 self._qr_grup_tv(nama_tv)))
+                                                 self._qr_grup_tv(nama_tv), tv_type=tv_type))
                 return kode_lama
             kode = self._qr_token_baru()
             peta[nama_tv] = {"kode": kode, "ip": ip_kini}
             cfg["qr_call"] = peta
             ConfigManager.save(cfg)
             self._qr_simpan_png(nama_tv,
-                                self._qr_url(nama_tv, kode, self._qr_grup_tv(nama_tv)))
-            self._qr_log(f"{nama_tv}: kode baru ({ip_kini})")
+                                self._qr_url(nama_tv, kode, self._qr_grup_tv(nama_tv), tv_type=tv_type))
+            self._qr_log(f"{nama_tv}: kode baru ({ip_kini}) type={tv_type}")
             return kode
         except Exception as e:
             self._qr_log(f"generate gagal: {e}")
@@ -11491,6 +11671,23 @@ class AutoRentApp(ctk.CTk):
             sid_sekarang = (aktif or {}).get("sid")
 
             if status == "awaiting":
+                # ── webOS: skip PIN, langsung verified ──
+                try:
+                    tv_type = self._qr_type_tv(tv)
+                except Exception:
+                    tv_type = "android"
+                self._qr_log(f"PIN: sesi {did} tv={tv!r} tv_type={tv_type!r}")
+                if tv_type == "webos":
+                    self._qr_log(f"PIN: sesi {did} tv={tv!r} webOS -> auto-verify tanpa PIN")
+                    self._set_pin_doc(did, {"status": "verified", "pin_user": ""})
+                    self._qr_pin_selesai(tv, did, reason="ok", hapus_doc=False)
+                    try:
+                        app = self.winfo_toplevel()
+                        if hasattr(app, '_notify_panggilan'):
+                            app._notify_panggilan(tv)
+                    except Exception:
+                        pass
+                    return
                 pin = str(doc.get("pin", "") or "")
                 if not pin:
                     # PIN sudah di memori untuk sesi yang sama (write Firestore
@@ -14595,14 +14792,49 @@ class AutoRentApp(ctk.CTk):
         self._tree_item_to_index = {}
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for idx in reversed(self._riwayat_filter_indices()):
+        indices = self._riwayat_filter_indices()
+        if self._riwayat_sort_col:
+            indices = sorted(indices, key=self._riwayat_sort_key, reverse=self._riwayat_sort_rev)
+        else:
+            indices = list(reversed(indices))
+        for idx in indices:
             row = self.riwayat_transaksi[idx]
             paid = self.riwayat_meta[idx].get('paid', True) if idx < len(self.riwayat_meta) else True
             tag = "paid" if paid else "unpaid"
-            item_id = self.tree.insert("", 0, values=row, tags=(tag,))
+            item_id = self.tree.insert("", "end", values=row, tags=(tag,))
             self._tree_item_to_index[item_id] = idx
         self._refresh_riwayat_summary()
         self._remap_kartu_transaction_items()
+
+    def _on_riwayat_heading_click(self, col):
+        if self._riwayat_sort_col == col:
+            self._riwayat_sort_rev = not self._riwayat_sort_rev
+        else:
+            self._riwayat_sort_col = col
+            self._riwayat_sort_rev = False
+        for c in ("Waktu", "Kasir", "TV/PC", "Paket", "Pesanan", "Diskon", "Total", "Status"):
+            arrow = ""
+            if c == col:
+                arrow = " ▼" if self._riwayat_sort_rev else " ▲"
+            self.tree.heading(c, text=c + arrow)
+        self._render_riwayat_tree()
+
+    def _riwayat_sort_key(self, idx):
+        col = self._riwayat_sort_col
+        row = self.riwayat_transaksi[idx] if idx < len(self.riwayat_transaksi) else ()
+        col_map = {"Waktu": 0, "Kasir": 1, "TV/PC": 2, "Paket": 3, "Pesanan": 4, "Diskon": 5, "Total": 6, "Status": 7}
+        ci = col_map.get(col, 0)
+        val = str(row[ci] if ci < len(row) else "")
+        if col == "Total":
+            try:
+                return int(val.replace("Rp", "").replace(".", "").replace(" ", "").strip() or "0")
+            except Exception:
+                return 0
+        if col == "Status":
+            return 0 if "Lunas" in val or "LUNAS" in val else 1
+        if col == "Waktu":
+            return val
+        return val.lower()
 
     def _set_filter_tanggal(self, mode):
         self._riwayat_filter_range = None
@@ -15347,16 +15579,26 @@ class AutoRentApp(ctk.CTk):
         DialogOverlaySetting(self,
                              mode=getattr(self, "tv_overlay_mode", "always"),
                              last_minutes=getattr(self, "tv_overlay_last_minutes", 5),
-                             on_save=self._save_overlay_setting)
+                             on_save=self._save_overlay_setting,
+                             webos_toast_enabled=getattr(self, "tv_overlay_webos_toast_enabled", True),
+                             webos_toast_minutes=getattr(self, "tv_overlay_webos_toast_minutes", [10, 5, 3, 1]))
 
-    def _save_overlay_setting(self, mode, minutes):
+    def _save_overlay_setting(self, mode, minutes, webos_toast_enabled=True, webos_toast_minutes=None):
         self.tv_overlay_mode = mode
         self.tv_overlay_last_minutes = minutes
+        self.tv_overlay_webos_toast_enabled = webos_toast_enabled
+        self.tv_overlay_webos_toast_minutes = webos_toast_minutes or [10, 5, 3, 1]
         ConfigManager.set("tv_overlay_mode", mode)
         ConfigManager.set("tv_overlay_last_minutes", minutes)
+        ConfigManager.set("tv_overlay_webos_toast_enabled", webos_toast_enabled)
+        ConfigManager.set("tv_overlay_webos_toast_minutes", self.tv_overlay_webos_toast_minutes)
+        toast_info = f"Toast webOS: {'Aktif' if webos_toast_enabled else 'Nonaktif'}"
+        if webos_toast_enabled:
+            toast_info += f" (menit: {', '.join(str(m) for m in self.tv_overlay_webos_toast_minutes)})"
         messagebox.showinfo("✅ Pengaturan Disimpan",
-                            f"Mode overlay: {mode}\n"
-                            f"Tampil sejak sisa waktu {minutes} menit.",
+                            f"Mode overlay Android: {mode}\n"
+                            f"Tampil sejak sisa waktu {minutes} menit.\n\n"
+                            f"{toast_info}",
                             parent=self)
  
     def _open_install_apk_dialog(self):
@@ -15500,12 +15742,12 @@ class AutoRentApp(ctk.CTk):
         period_var.trace_add("write", refresh_charts)
         refresh_charts()
 
-    def _on_tv_confirmed(self, ip, nama, port, nama_grup, plug=None):
+    def _on_tv_confirmed(self, ip, nama, port, nama_grup, plug=None, tv_type="android", mac=""):
         self._unlock_tambah()
-        self._tambah_tv(ip, nama, port, nama_grup, plug=plug)
+        self._tambah_tv(ip, nama, port, nama_grup, plug=plug, tv_type=tv_type, mac=mac)
 
     def _simpan_daftar_tv(self):
-        """Simpan daftar kartu TV (ip/nama/port/grup) ke config (key daftar_tv)
+        """Simpan daftar kartu TV (ip/nama/port/grup/tv_type/mac) ke config (key daftar_tv)
         agar otomatis dimuat ulang saat login berikutnya.
         Sinkronkan juga ke Firestore (cloud wins)."""
         try:
@@ -15517,6 +15759,8 @@ class AutoRentApp(ctk.CTk):
                     "port": getattr(kartu, "port", 0),
                     "nama_grup": getattr(kartu, "nama_grup", NAMA_GRUP_DEFAULT),
                     "plug": getattr(kartu, "plug", None),
+                    "tv_type": getattr(kartu, "tv_type", "android"),
+                    "mac": getattr(kartu, "mac", ""),
                 })
             uname = getattr(self, "current_user", None) or ""
             try:
@@ -15589,13 +15833,16 @@ class AutoRentApp(ctk.CTk):
                     except Exception:
                         port = 0
                     nama_grup = str(item.get("nama_grup", "")).strip() or NAMA_GRUP_DEFAULT
+                    tv_type = str(item.get("tv_type", "android")).strip() or "android"
+                    mac = str(item.get("mac", "")).strip()
                     if not ip:
                         continue
                     if any(k.ip == ip and k.label_tv == nama
                            for k in getattr(self, "_semua_kartu_tv", [])):
                         continue
                     self._tambah_tv(ip, nama, port, nama_grup,
-                                   plug=item.get("plug"), restore=True)
+                                   plug=item.get("plug"), restore=True,
+                                   tv_type=tv_type, mac=mac)
                 except Exception as e:
                     print(f"[TV] Gagal memuat kartu {item}: {e}", flush=True)
         except Exception as e:
@@ -15764,7 +16011,7 @@ class AutoRentApp(ctk.CTk):
         except Exception as e:
             print(f"[WARN] Gagal muat daftar_warnet: {e}", flush=True)
 
-    def _tambah_tv(self, ip, nama, port, nama_grup=None, plug=None, restore=False):
+    def _tambah_tv(self, ip, nama, port, nama_grup=None, plug=None, restore=False, tv_type="android", mac=""):
         if (self.current_role or "kasir") != "admin" and not restore:
             messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat menambah TV.")
             return
@@ -15794,7 +16041,9 @@ class AutoRentApp(ctk.CTk):
                         nama_grup=nama_grup,
                         is_first=(self.jumlah_tv == 1),
                         role=self.current_role,
-                        plug=plug)
+                        plug=plug,
+                        tv_type=tv_type,
+                        mac=mac)
         wid = canvas.create_window(0, 0, window=kartu, anchor="nw", tags=("_dash_card",))
         self._dash_card_windows.append((wid, kartu))
         self._semua_kartu_tv.append(kartu)
@@ -17390,8 +17639,11 @@ class AutoRentApp(ctk.CTk):
         cols = ("Waktu", "Kasir", "TV/PC", "Paket", "Pesanan", "Diskon", "Total", "Status")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", style="Game.Treeview")
         widths = [140, 80, 100, 140, 160, 80, 110, 110]
+        self._riwayat_sort_col = None
+        self._riwayat_sort_rev = False
         for col, w in zip(cols, widths):
-            self.tree.heading(col, text=col)
+            self.tree.heading(col, text=col,
+                              command=lambda c=col: self._on_riwayat_heading_click(c))
             self.tree.column(col, width=w, anchor="center" if w < 150 else "w")
         self.tree.pack(fill="both", expand=True, padx=14, pady=(10, 4))
         # Tag for row coloring

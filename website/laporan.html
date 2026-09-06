@@ -120,6 +120,7 @@
           <div class="card" style="--glow:rgba(56,189,248,.14)"><div class="label">Minuman (Rp)</div><div class="val s" id="cMinum">–</div><div class="sub" id="cMinumSub"></div></div>
           <div class="card" style="--glow:rgba(244,114,182,.13)"><div class="label">Rata² / Transaksi</div><div class="val p" id="cAvg">–</div><div class="sub" id="cAvgSub"></div></div>
           <div class="card r" style="--glow:rgba(248,113,113,.13)"><div class="label">TV vs PC</div><div class="val" id="cTvPc" style="font-size:16px">–</div><div class="sub" id="cTvPcSub"></div></div>
+          <div class="card" style="--glow:rgba(52,211,153,.12)"><div class="label">Lunas vs Tagihan</div><div class="val" id="cPaidStatus" style="font-size:15px">–</div><div class="sub" id="cPaidStatusSub"></div></div>
         </div>
 
         <!-- FILTER -->
@@ -417,6 +418,13 @@ function renderAll() {
   var omzetTv=txs.filter(function(x){return x.tvjenisps!=="PC"}).reduce(function(x,y){return x+(Number(y.total)||0)},0);
   $("cTvPc").innerHTML='TV '+rp(omzetTv)+' · PC '+rp(sum(txs)-omzetTv);
   $("cTvPcSub").textContent="TV · PC (omzet)";
+
+  var lunas=txs.filter(function(x){return x.paid!==false});
+  var tagihan=txs.filter(function(x){return x.paid===false});
+  var totLunas=lunas.reduce(function(a,x){return a+(Number(x.total)||0)},0);
+  var totTagihan=tagihan.reduce(function(a,x){return a+(Number(x.total)||0)},0);
+  $("cPaidStatus").innerHTML='<span style="color:#6ee7b7">'+rp(totLunas)+'</span> <span style="color:var(--muted);font-size:13px">vs</span> <span style="color:#fca5a5">'+rp(totTagihan)+'</span>';
+  $("cPaidStatusSub").textContent=lunas.length+' lunas · '+tagihan.length+' tagihan';
 
   buildCharts(txs);
   renderTable();

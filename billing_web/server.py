@@ -44,7 +44,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 import main as M  # noqa: E402  (ConfigManager, fmt_rp, hitung_tarif_per_menit, verify_password, ...)
 from rr_license import LicenseManager  # noqa: E402
-WEB_APP_VERSION = "2.4.19"   # versi aplikasi Web Kasir (billing_web)
+WEB_APP_VERSION = "2.4.20"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
@@ -1165,6 +1165,7 @@ class Store:
                 "paketharga": paket_harga,
                 "pesananharga": pesananHarga,
                 "tvjenisps": "TV" if meta.get("source") == "tv" else "PC",
+                "paid": bool(meta.get("paid", True)),
                 "email": getattr(self, "_user_email", "") or "",
             }
         except Exception:
@@ -2336,12 +2337,25 @@ def _qr_owner():
         return ""
 
 
-def _qr_url(nama_tv, kode, nama_grup=""):
+def _qr_url(nama_tv, kode, nama_grup="", tv_type=""):
     owner = _qr_owner()
     url = (f"{_qr_host_web()}?tv={quote(nama_tv)}&k={kode}&o={quote(owner)}")
     if nama_grup:
         url += f"&g={quote(nama_grup)}"
+    if tv_type == "webos":
+        url += "&type=webos"
     return url
+
+
+def _qr_type_tv(nama_tv):
+    """Tipe TV (android/webos) dari config."""
+    try:
+        for item in (M.ConfigManager.load().get("daftar_tv", []) or []):
+            if str(item.get("nama", "")) == nama_tv:
+                return str(item.get("tv_type", "android")).strip() or "android"
+    except Exception:
+        pass
+    return "android"
 
 
 def _qr_ip_tv(nama_tv):
@@ -2387,7 +2401,7 @@ def _qr_png_data_uri(nama_tv):
         aman = "".join(c if c.isalnum() or c in " -_" else "_" for c in nama_tv).strip() or "TV"
         path = os.path.join(folder, f"{aman}.png")
         if not os.path.isfile(path):
-            _qr_simpan_png(nama_tv, _qr_url(nama_tv, _qr_generate_untuk(nama_tv), _qr_grup_tv(nama_tv)))
+            _qr_simpan_png(nama_tv, _qr_url(nama_tv, _qr_generate_untuk(nama_tv), _qr_grup_tv(nama_tv), _qr_type_tv(nama_tv)))
             if not os.path.isfile(path):
                 return ""
         import base64
@@ -2414,13 +2428,13 @@ def _qr_generate_untuk(nama_tv):
             kode_lama, ip_lama = "", ""
         ip_kini = _qr_ip_tv(nama_tv)
         if kode_lama and (not ip_kini or ip_kini == ip_lama):
-            _qr_simpan_png(nama_tv, _qr_url(nama_tv, kode_lama, _qr_grup_tv(nama_tv)))
+            _qr_simpan_png(nama_tv, _qr_url(nama_tv, kode_lama, _qr_grup_tv(nama_tv), _qr_type_tv(nama_tv)))
             return kode_lama
         kode = _qr_token_baru()
         peta[nama_tv] = {"kode": kode, "ip": ip_kini}
         cfg["qr_call"] = peta
         M.ConfigManager.save(cfg)
-        _qr_simpan_png(nama_tv, _qr_url(nama_tv, kode, _qr_grup_tv(nama_tv)))
+        _qr_simpan_png(nama_tv, _qr_url(nama_tv, kode, _qr_grup_tv(nama_tv), _qr_type_tv(nama_tv)))
         _qr_log(f"{nama_tv}: kode baru ({ip_kini})")
         return kode
     except Exception as e:
@@ -2786,6 +2800,22 @@ def _qr_pin_proses(doc: dict):
         sid_sekarang = (aktif or {}).get("sid")
 
         if status == "awaiting":
+            # ── webOS: skip PIN, langsung verified ──
+            try:
+                tv_type = _qr_type_tv(tv)
+            except Exception as e:
+                _qr_log(f"PIN: sesi {did} tv={tv!r} _qr_type_tv error: {e}")
+                tv_type = "android"
+            _qr_log(f"PIN: sesi {did} tv={tv!r} tv_type={tv_type!r}")
+            if tv_type == "webos":
+                _qr_log(f"PIN: sesi {did} tv={tv!r} webOS -> auto-verify tanpa PIN")
+                _set_pin_doc(did, {"status": "verified", "pin_user": ""})
+                _qr_pin_selesai(tv, did, reason="ok", hapus_doc=False)
+                try:
+                    STORE.notify("panggilan", {"label": tv, "total": 1, "kehadiran": True})
+                except Exception:
+                    pass
+                return
             pin = str(doc.get("pin", "") or "")
             if not pin:
                 # PIN sudah di memori untuk sesi yang sama (write Firestore
@@ -4744,7 +4774,7 @@ def api_tv_qr():
         return jsonify({"error": "Gagal generate QR — lihat web_app.log"}), 500
     png = _qr_png_data_uri(nama)
     return jsonify({"ok": True, "nama": nama, "kode": kode,
-                    "url": _qr_url(nama, kode, _qr_grup_tv(nama)),
+                    "url": _qr_url(nama, kode, _qr_grup_tv(nama), _qr_type_tv(nama)),
                     "png": png or ("/api/tv/qr/png?tv=" + quote(nama))})
 
 
@@ -4761,7 +4791,7 @@ def api_tv_qr_png():
     aman = "".join(c if c.isalnum() or c in " -_" else "_" for c in tv).strip() or "TV"
     path = os.path.join(folder, f"{aman}.png")
     if not os.path.isfile(path):
-        _qr_simpan_png(tv, _qr_url(tv, kode, _qr_grup_tv(tv)))
+        _qr_simpan_png(tv, _qr_url(tv, kode, _qr_grup_tv(tv), _qr_type_tv(tv)))
     return send_file(path, mimetype="image/png")
 
 

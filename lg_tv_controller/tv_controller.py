@@ -104,6 +104,16 @@ class TVController:
                 )
                 return False
 
+            # Validasi karakter hex (0-9, A-F)
+            if not all(c in "0123456789ABCDEFabcdef" for c in mac_clean):
+                invalid = [c for c in mac_clean if c not in "0123456789ABCDEFabcdef"]
+                self._logger.error(
+                    f"MAC address mengandung karakter tidak valid: {mac_address} "
+                    f"( karakter non-hex: {''.join(set(invalid))}) — "
+                    f"periksa apakah 'O' (huruf) seharusnya '0' (angka nol)"
+                )
+                return False
+
             # Format ulang ke XX:XX:XX:XX:XX:XX untuk wakeonlan
             mac_formatted = ":".join(mac_clean[i:i+2] for i in range(0, 12, 2))
 
