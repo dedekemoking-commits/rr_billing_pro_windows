@@ -48,6 +48,14 @@ WEB_APP_VERSION = "2.4.20"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
+try:
+    from tv_controller_system import (
+        create_tv_controller as _create_tv_ctrl,
+        WebOSTVController,
+    )
+except ImportError:
+    _create_tv_ctrl = None
+    WebOSTVController = None
 from tv_media_server import TvMediaServer  # noqa: E402 — server media promosi (port 8082)
 from warnet_server import WarnetServerWeb  # noqa: E402 — socket server warnet (port 5000)
 import tv_mesin  # noqa: E402 — pairing & remote Android TV (androidtvremote2)
@@ -568,11 +576,14 @@ class Sesi:
         if self.ip:
             try:
                 port = int(getattr(self, "port", 0) or 0)
+                tv_type = _qr_type_tv(self.label)
+                mac = _qr_mac_tv(self.label)
                 alasan = f"Sesi {self.label} selesai - dibayar admin"
                 threading.Thread(
                     target=_tv_sleep_runner,
                     args=(self.ip, port, self.label, self.timer_key()),
-                    kwargs={"alasan": alasan, "delay": 1},
+                    kwargs={"alasan": alasan, "delay": 1,
+                            "tv_type": tv_type, "mac": mac},
                     daemon=True, name=f"SleepOnSelesai-{self.label}").start()
             except Exception as e:
                 applog(f"[ERROR] TV sleep fail {self.label}: {e}")
@@ -1334,10 +1345,13 @@ class Store:
                     applog(f"[AUTO OFF] {s.label} | {alasan}")
                     if s.ip:
                         port = int(getattr(s, "port", 0) or 0)
+                        tv_type = _qr_type_tv(s.label)
+                        mac = _qr_mac_tv(s.label)
                         threading.Thread(
                             target=_tv_sleep_runner,
                             args=(s.ip, port, s.label, s.timer_key()),
-                            kwargs={"alasan": alasan, "delay": 0},
+                            kwargs={"alasan": alasan, "delay": 0,
+                                    "tv_type": tv_type, "mac": mac},
                             daemon=True, name=f"AutoOff-{s.label}").start()
             except Exception as e:
                 _LOGGER.warning("TV idle check %s error: %s", s.label, e)
@@ -2358,6 +2372,45 @@ def _qr_type_tv(nama_tv):
     return "android"
 
 
+def _qr_mac_tv(nama_tv):
+    """MAC address TV dari config."""
+    try:
+        for item in (M.ConfigManager.load().get("daftar_tv", []) or []):
+            if str(item.get("nama", "")) == nama_tv:
+                return str(item.get("mac", "")).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _webos_manifest_path():
+    """Path manifest_rrbillingpro.json untuk pairing webOS TV."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    for d in (base, getattr(sys, "_MEIPASS", "")):
+        if d:
+            p = os.path.join(d, "manifest_rrbillingpro.json")
+            if os.path.isfile(p):
+                return p
+    return ""
+
+
+def _get_tv_controller(tv_type, ip, mac="", port=5555, label=""):
+    """Buat TVController instance berdasarkan tv_type. webOS support."""
+    if _create_tv_ctrl is None:
+        return None
+    os_type = "webos" if tv_type == "webos" else "android"
+    cfg = {
+        "ip_address": ip,
+        "mac_address": mac or "00:00:00:00:00:00",
+        "os_type": os_type,
+        "port": port,
+        "label": label,
+    }
+    return _create_tv_ctrl(label or "tv", cfg,
+                           key_file_path=os.path.join(BASE_DIR, ".aiopylgtv.sqlite"),
+                           manifest_file_path=_webos_manifest_path())
+
+
 def _qr_ip_tv(nama_tv):
     try:
         for item in (M.ConfigManager.load().get("daftar_tv", []) or []):
@@ -3323,13 +3376,10 @@ def api_events():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2):
+def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2, tv_type="android", mac=""):
     """Port desktop _tv_sleep_now (main.py:7425): matikan TV berlapis lalu verifikasi.
-    1) atpv2 POWER retry 3x (selang 2 dtk)  2) atpv2 SLEEP
-    3) fallback ADB keyevent yang tersedia    4) verifikasi layar ±9 dtk.
-    Bug Fix: jika verifikasi pertama masih nyala, retry 1x lagi dengan
-    keyevent SLEEP eksplisit sebelum menyerah (TV kadang butuh 2 percobaan
-    karena wakelock media/notifikasi async androidtvremote2 telat update).
+    Android: atpv2 POWER/SLEEP + ADB keyevent fallback.
+    webOS: WOL senggolan + WebSocket power_off via tv_controller_system.
     Push event tv_sleep + log aplikasi lengkap."""
     if alasan is None:
         alasan = "TV dimatikan"
@@ -3338,6 +3388,45 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2):
             time.sleep(delay)
     except Exception:
         pass
+
+    # ── webOS: delegasi ke TVController ──
+    if tv_type == "webos":
+        hasil, pesan = False, ""
+        try:
+            import asyncio
+            ctrl = _get_tv_controller("webos", ip, mac=mac, port=port or 0, label=label)
+            if ctrl is None:
+                hasil, pesan = False, "tv_controller_system tidak tersedia"
+            else:
+                loop = asyncio.new_event_loop()
+                try:
+                    hasil = loop.run_until_complete(ctrl.safe_turn_off())
+                    pesan = "webOS power_off terkirim" if hasil else "webOS power_off gagal"
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            pesan = f"webOS sleep error: {e}"
+        try:
+            STORE.events.append({"type": "tv_sleep", "label": label, "key": key,
+                                 "kind": "tv", "ok": hasil, "msg": pesan})
+            while len(STORE.events) > 60:
+                STORE.events.pop(0)
+        except Exception:
+            pass
+        applog(f"[TV SLEEP] {label} ({ip}) | alasan={alasan} | "
+               f"{'OK' if hasil else 'GAGAL'} — {pesan}")
+        _LOGGER.warning("[TV SLEEP] %s: %s — %s", label,
+                        "OK" if hasil else "GAGAL", pesan)
+        try:
+            STORE._plug_set(label, False)
+        except Exception as e:
+            _LOGGER.warning("Plug off (sleep) error: %s", e)
+        return
+
+    # ── Android: existing ADB logic ──
     tgt = (port if port else None)
 
     def _kirim_sleep():
@@ -4607,9 +4696,46 @@ def api_tv_remote():
     if not s.ip:
         return jsonify({"error": "TV tidak punya IP"}), 400
     out = {}
+    tv_type = _qr_type_tv(s.label)
+    mac = _qr_mac_tv(s.label)
 
     def _run():
         try:
+            # ── webOS: delegasi ke TVController ──
+            if tv_type == "webos":
+                import asyncio
+                ctrl = _get_tv_controller("webos", s.ip, mac=mac,
+                                          port=getattr(s, "port", 0) or 0,
+                                          label=s.label)
+                if ctrl is None:
+                    out["ok"] = False
+                    out["msg"] = "tv_controller_system tidak tersedia"
+                    return
+                loop = asyncio.new_event_loop()
+                try:
+                    if action == "power":
+                        result = loop.run_until_complete(ctrl.safe_turn_off())
+                        out["ok"] = bool(result)
+                        out["msg"] = "webOS power_off OK" if result else "webOS power_off gagal"
+                    elif action == "vol_up":
+                        out["ok"] = False
+                        out["msg"] = "webOS: volume kontrol belum didukung"
+                    elif action == "vol_dn":
+                        out["ok"] = False
+                        out["msg"] = "webOS: volume kontrol belum didukung"
+                    elif action == "home":
+                        out["ok"] = False
+                        out["msg"] = "webOS: home belum didukung"
+                    else:
+                        out["ok"] = False
+                        out["msg"] = f"webOS: aksi '{action}' belum didukung"
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+                return
+            # ── Android: existing ADB logic ──
             if action == "power":
                 out["ok"], out["msg"] = _adbres(M.ADBHelper.power_toggle(s.ip))
             elif action == "vol_up":
