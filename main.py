@@ -8140,7 +8140,11 @@ class KartuTV(tk.Canvas):
         if getattr(self, "tv_type", "android") == "webos":
             def runner():
                 ctrl = TVController()
-                ctrl.turn_on_tv(self.mac)
+                if self.is_on:
+                    ctrl.turn_on_tv(self.mac)
+                else:
+                    import asyncio
+                    asyncio.run(ctrl.turn_off_tv(self.ip))
             threading.Thread(target=runner, daemon=True).start()
         else:
             self._adb_action(lambda: ADBHelper.power_toggle(self.ip, port=self.port))
