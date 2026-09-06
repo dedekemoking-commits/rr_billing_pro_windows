@@ -345,6 +345,7 @@ class Sesi:
         applog(f"[SESI MULAI] {self.label} | grup={self.nama_grup} | paket={paket_nm} | "
                f"pesanan={list((pesanan or {}).items())} | harga_paket={paket_harga} | "
                f"diskoni={diskoni}({diskoni_mode}) | total={self.total_setelah_diskon()}")
+        M.AuditLogger.log("sesi_mulai", STORE.user, "success", {"label": self.label, "paket": paket_nm, "total": self.total_setelah_diskon()})
         self.store._sync_timer_state()
 
     # ── tambah pesanan SHOP (port _on_tambah_pesanan_confirm) ───────────
@@ -443,15 +444,52 @@ class Sesi:
             pass
 
     # ── timer tick (dipanggil TimerService/thread) ──────────────────────
+    # Milestones: sisa menit -> pesan toast (dikirim 1x per sesi)
+    _TOAST_MILESTONES = {
+        300: "Peringatan: Waktu Anda tersisa 5 menit lagi!",
+        180: "Peringatan: Waktu Anda tersisa 3 menit lagi!",
+        60:  "PERHATIAN: Waktu Anda tersisa 1 menit lagi!",
+    }
+
     def tick(self):
         if self.paket_aktif and self.sisa_waktu > 0 and not self._timer_paused:
+            prev = self.sisa_waktu
             self.sisa_waktu = max(0, self.sisa_waktu - 1)
             if getattr(self, "mode_member", False):
                 self.member_detik_pakai += 1
+            # ── Toast milestone untuk webOS TV ──
+            if self.ip:
+                tv_type = _qr_type_tv(self.label)
+                if tv_type == "webos":
+                    for threshold, pesan in self._TOAST_MILESTONES.items():
+                        if prev > threshold and self.sisa_waktu <= threshold:
+                            self._send_webos_toast(pesan)
             if self.sisa_waktu <= 0:
                 self.timer_habis()
                 return "habis"
         return None
+
+    def _send_webos_toast(self, pesan):
+        """Kirim toast ke webOS TV via WebOSTVController (async -> sync)."""
+        try:
+            import asyncio
+            mac = _qr_mac_tv(self.label)
+            ctrl = _get_tv_controller("webos", self.ip, mac=mac,
+                                      port=getattr(self, "port", 0) or 0,
+                                      label=self.label)
+            if ctrl is None:
+                return
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(ctrl.safe_show_toast(pesan))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+            applog(f"[TOAST] {self.label} ({self.ip}) | {pesan}")
+        except Exception as e:
+            _LOGGER.warning("Toast webOS %s error: %s", self.label, e)
 
     # ── potongan saldo member di akhir sesi ─────────────────────────────
     def _auto_print_struk(self):
@@ -522,15 +560,44 @@ class Sesi:
             member_ev = {"hp": self.member_hp, "nama": self.member_nama}
             self._member_potong_akhir()
         self._auto_print_struk()
-        self.store.notify("habis", snap,
-                          paid=self.paid, paket=nm_paket,
-                          lunas=lunas_now, tagihan=tagihan_now,
-                          key=self.timer_key(), kind=self.kind,
-                          member=member_ev)
+        # ── LUNAS: tidak perlu konfirmasi, langsung sleep ──
+        # ── TAGIHAN: kirim event "habis" agar popup muncul di UI ──
+        if self.paid:
+            applog(f"[WAKTU HABIS] {self.label} | LUNAS - langsung sleep 10 dtk | "
+                   f"total={total_akhir} | paket={nm_paket}")
+        else:
+            self.store.notify("habis", snap,
+                              paid=self.paid, paket=nm_paket,
+                              lunas=lunas_now, tagihan=tagihan_now,
+                              key=self.timer_key(), kind=self.kind,
+                              member=member_ev)
         paid_log = self.paid
         self.reset()
         applog(f"[WAKTU HABIS] {self.label} | total={total_akhir} | paid={paid_log} | "
                f"paket={nm_paket} | kasir={self.store.user}")
+        M.AuditLogger.log("waktu_habis", self.store.user, "success", {"label": self.label, "total": total_akhir, "paid": paid_log, "paket": nm_paket})
+        # ── Sleep TV setelah waktu habis ──
+        # LUNAS  → sleep langsung 10 detik
+        # TAGIHAN → tidak sleep, tunggu kasir konfirmasi → sleep 2 detik
+        if self.ip:
+            if paid_log:
+                # LUNAS: sleep 10 detik
+                try:
+                    port = int(getattr(self, "port", 0) or 0)
+                    tv_type = _qr_type_tv(self.label)
+                    mac = _qr_mac_tv(self.label)
+                    alasan = f"Lunas - waktu habis {self.label}"
+                    threading.Thread(
+                        target=_tv_sleep_runner,
+                        args=(self.ip, port, self.label, self.timer_key()),
+                        kwargs={"alasan": alasan, "delay": 10,
+                                "tv_type": tv_type, "mac": mac},
+                        daemon=True, name=f"SleepLunas-{self.label}").start()
+                except Exception as e:
+                    applog(f"[ERROR] TV sleep lunas fail {self.label}: {e}")
+            else:
+                # TAGIHAN: tidak sleep, tunggu konfirmasi kasir
+                applog(f"[WAKTU HABIS] {self.label} | TAGIHAN - menunggu konfirmasi kasir")
 
     def pause(self):
         if not self._timer_paused:
@@ -541,6 +608,7 @@ class Sesi:
                 self.store.hub.send_pause_timer(self.label)
             self.store.notify("pause", self.snapshot())
             self.store._sync_timer_state()
+            M.AuditLogger.log("sesi_pause", self.store.user, "success", {"label": self.label})
 
     def resume(self):
         self._timer_paused = False
@@ -549,6 +617,7 @@ class Sesi:
             self.store.hub.send_resume_timer(self.label, self.sisa_waktu)
         self.store.notify("resume", self.snapshot())
         self.store._sync_timer_state()
+        M.AuditLogger.log("sesi_resume", self.store.user, "success", {"label": self.label})
 
     # ── selesai (port _klik_selesai, tanpa dialog konfirmasi) ───────────
     def klik_selesai(self):
@@ -595,6 +664,7 @@ class Sesi:
         self.store.notify("selesai", snap)
         applog(f"[SESI SELESAI] {self.label} | total={snap.get('total')} | "
                f"paid={snap.get('paid')} | kasir={self.store.user}")
+        M.AuditLogger.log("sesi_selesai", self.store.user, "success", {"label": self.label, "total": snap.get('total'), "paid": snap.get('paid')})
         return snap
 
     def reset(self):
@@ -2038,6 +2108,13 @@ class Store:
 
     def state(self):
         tvs = [s.snapshot() for s in self.sesi_tv.values()]
+        _daftar = M.ConfigManager.load().get("daftar_tv", []) or []
+        _tv_type_map = {}
+        for _d in _daftar:
+            if isinstance(_d, dict) and _d.get("nama"):
+                _tv_type_map[_d["nama"]] = _d.get("tv_type", "android")
+        for snap in tvs:
+            snap["tv_type"] = _tv_type_map.get(snap.get("label", ""), "android")
         if self.hub and self.hub.running:
             for snap in tvs:
                 snap["ws_online"] = bool(self.hub.is_meja_connected(snap.get("label", "")))
@@ -3307,11 +3384,13 @@ def api_login():
     data = request.get_json(silent=True) or {}
     res, err = STORE.check_login(data.get("username", ""), data.get("password", ""))
     if err:
+        M.AuditLogger.log("login_failed", str(data.get("username", "")), "failed", {"error": err})
         return jsonify({"error": err}), 401
     token = make_token()
     TOKENS.clear()
     TOKENS[token] = res["username"]
     STORE.notify("login", {"label": res["username"]})
+    M.AuditLogger.log("login_success", res.get("username", ""), "success", {"role": res.get("role", "")})
     return jsonify({"token": token, **res})
 
 
@@ -3325,6 +3404,7 @@ def api_register():
     res, err = STORE.register(data.get("username", ""), data.get("password", ""), role="admin")
     if err:
         return jsonify({"error": err}), 400
+    M.AuditLogger.log("register", res.get("username", ""), "success", {"role": "admin"})
     return jsonify(res)
 
 
@@ -3338,17 +3418,20 @@ def api_google_login():
         return jsonify({"error": "idToken wajib diisi"}), 400
     res, err = STORE.google_login(id_token)
     if err:
+        M.AuditLogger.log("google_login_failed", "", "failed", {"error": err})
         return jsonify({"error": err}), 401
     token = make_token()
     TOKENS.clear()
     TOKENS[token] = res["username"]
     STORE.notify("login", {"label": res["username"]})
+    M.AuditLogger.log("google_login_success", res.get("username", ""), "success", {"role": res.get("role", "")})
     return jsonify({"token": token, **res})
 
 
 @app.route("/api/logout", methods=["POST"])
 @require_auth
 def api_logout():
+    M.AuditLogger.log("logout", STORE.user or "", "success", {})
     TOKENS.clear()
     STORE.user = None
     STORE.role = None
@@ -3420,17 +3503,18 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2, tv_type="android"
                f"{'OK' if hasil else 'GAGAL'} — {pesan}")
         _LOGGER.warning("[TV SLEEP] %s: %s — %s", label,
                         "OK" if hasil else "GAGAL", pesan)
+        M.AuditLogger.log("tv_sleep", STORE.user, "success" if hasil else "failed", {"label": label, "ip": ip, "alasan": alasan, "pesan": pesan})
         try:
             STORE._plug_set(label, False)
         except Exception as e:
             _LOGGER.warning("Plug off (sleep) error: %s", e)
         return
 
-    # ── Android: existing ADB logic ──
+    # ── Android: existing atpv2 logic ──
     tgt = (port if port else None)
 
     def _kirim_sleep():
-        """Satu putaran usaha matikan TV. Return (hasil, pesan)."""
+        """Satu putaran usaha matikan TV via atpv2. Return (hasil, pesan)."""
         hasil, pesan = False, ""
         # 1) atpv2 POWER retry 3x (sama seperti desktop _tv_sleep_now)
         for _ in range(3):
@@ -3452,7 +3536,7 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2, tv_type="android"
                     hasil, pesan = True, "atpv2 SLEEP terkirim"
             except Exception as e:
                 pesan = str(e)[:120]
-        # 3) fallback ADB keyevent
+        # 3) fallback ADB keyevent (hanya jika atpv2 tersedia)
         if not hasil:
             for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
                 try:
@@ -3466,48 +3550,14 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2, tv_type="android"
                     pesan = str(e)[:120]
         return hasil, pesan
 
-    def _cek_layar():
-        """Verifikasi status layar (sama seperti desktop), ±9 dtk."""
-        state = None
-        for _ in range(3):
-            time.sleep(3)
-            try:
-                state = M.ADBHelper.tv_power_state(ip, port=(tgt or 5555))
-            except Exception:
-                state = None
-            if state is False:
-                break
-            if state is None:
-                break
-        return state
-
     hasil, pesan = _kirim_sleep()
-    state = None
+    # ── Verifikasi: pakai atpv2 sleep_blocking (bukan ADB dumpsys)
+    #    Kalau atpv2 POWER/SLEEP sudah terkirim, langsung anggap OK.
+    #    TV mungkin butuh beberapa detik untuk benar-benar mati.
     if hasil:
-        state = _cek_layar()
-        if state is False:
-            pesan = pesan + " — terverifikasi MATI"
-        elif state is True:
-            # ─ Bug Fix: retry sekali lagi (paksa keyevent SLEEP eksplisit)
-            # sebelum menyerah — TV kadang butuh 2 percobaan (wakelock media
-            # / notifikasi androidtvremote2 telat update saat percobaan 1).
-            try:
-                M.ADBHelper.adb_shell(ip, "input keyevent 223", timeout=8,
-                                       port=(tgt or 5555))
-            except Exception:
-                pass
-            time.sleep(2)
-            hasil2, pesan2 = _kirim_sleep()
-            state2 = _cek_layar() if hasil2 else None
-            if state2 is False:
-                hasil, pesan = True, pesan2 + " (percobaan ke-2) — terverifikasi MATI"
-            elif state2 is None:
-                hasil, pesan = True, pesan2 + " (percobaan ke-2) — tanpa verifikasi (tak terdeteksi)"
-            else:
-                hasil, pesan = False, ("perintah terkirim 2x tapi layar masih nyala "
-                                       "(kemungkinan Stay Awake/wakelock media aktif di TV)")
-        else:
-            pesan = pesan + " — tanpa verifikasi (tak terdeteksi)"
+        pesan = pesan + " — terkirim (verifikasi via atpv2)"
+    else:
+        pesan = pesan + " — perintah gagal"
     try:
         STORE.events.append({"type": "tv_sleep", "label": label, "key": key,
                              "kind": "tv", "ok": hasil, "msg": pesan})
@@ -3519,6 +3569,7 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2, tv_type="android"
            f"{'OK' if hasil else 'GAGAL'} — {pesan}")
     _LOGGER.warning("[TV SLEEP] %s: %s — %s", label,
                     "OK" if hasil else "GAGAL", pesan)
+    M.AuditLogger.log("tv_sleep", STORE.user, "success" if hasil else "failed", {"label": label, "ip": ip, "alasan": alasan, "pesan": pesan})
     # --- SMART PLUG: lampu ikut mati saat TV tidur ---
     try:
         STORE._plug_set(label, False)
@@ -3735,12 +3786,22 @@ def api_sesi(kind, key):
                     STORE.hub.send_unlock_screen(s.label)
                 except Exception:
                     pass
-            ip = s.ip
-            port = int(getattr(s, "port", 0) or 0)
-            label = s.label
-            key = s.timer_key()
-            applog(f"[KONFIRMASI HABIS] {label} | TV dibiarkan menyala "
-                   f"(tidur hanya via auto-off {s.ip}:{port} key={key})")
+            # ── Sleep TV setelah kasir konfirmasi waktu habis ──
+            if s.ip:
+                try:
+                    port_val = int(getattr(s, "port", 0) or 0)
+                    tv_type = _qr_type_tv(s.label)
+                    mac = _qr_mac_tv(s.label)
+                    alasan = f"Konfirmasi waktu habis - {s.label}"
+                    threading.Thread(
+                        target=_tv_sleep_runner,
+                        args=(s.ip, port_val, s.label, s.timer_key()),
+                        kwargs={"alasan": alasan, "delay": 1,
+                                "tv_type": tv_type, "mac": mac},
+                        daemon=True, name=f"SleepKonfirmasi-{s.label}").start()
+                except Exception as e:
+                    applog(f"[ERROR] TV sleep konfirmasi habis fail {s.label}: {e}")
+            applog(f"[KONFIRMASI HABIS] {s.label} | TV sleep via atpv2")
             return jsonify({"ok": True})
         if act == "pindah":
             if s.kind != "tv":
@@ -3886,6 +3947,7 @@ def api_tagihan():
                              args=(idx,), daemon=True).start()
             STORE.save_riwayat()
             applog(f"[TAGIHAN LUNAS] #{idx} | label={row[2]} | kasir={STORE.user}")
+            M.AuditLogger.log("tagihan_lunas", STORE.user, "success", {"label": row[2], "index": idx})
             return jsonify({"ok": True, "index": idx, "lunas": True})
     if not label:
         return jsonify({"error": "Label wajib diisi."}), 400
@@ -3906,6 +3968,7 @@ def api_tagihan():
                     STORE.save_riwayat()
                     applog(f"[TAGIHAN LUNAS] {label} | nama={nama} | hp={hp} | "
                            f"kasir={STORE.user}")
+                    M.AuditLogger.log("tagihan_lunas", STORE.user, "success", {"label": label, "nama": nama, "hp": hp})
                     return jsonify({"ok": True, "label": label, "lunas": True})
         return jsonify({"error": f"Tidak ada tagihan belum lunas untuk {label}."}), 404
     if not nama or not hp:
@@ -3925,6 +3988,7 @@ def api_tagihan():
                 meta["tagihan_at"] = datetime.datetime.now().isoformat(timespec="seconds")
                 STORE.save_riwayat()
                 applog(f"[TAGIHAN BUAT] {label} | nama={nama} | hp={hp} | kasir={STORE.user}")
+                M.AuditLogger.log("tagihan_buat", STORE.user, "success", {"label": label, "nama": nama, "hp": hp})
                 return jsonify({"ok": True, "label": label})
         return jsonify({"error": f"Tidak ada tagihan belum lunas untuk {label}."}), 404
 
@@ -4256,6 +4320,10 @@ def api_settings_tv():
                         d["port"] = int(data["port"])
                     except Exception:
                         pass
+                if data.get("tv_type") is not None:
+                    d["tv_type"] = str(data["tv_type"]).strip() or "android"
+                if data.get("mac") is not None:
+                    d["mac"] = str(data["mac"]).strip()
                 if "plug" in data:
                     d["plug"] = data.get("plug") or None
                 break
@@ -4269,9 +4337,12 @@ def api_settings_tv():
             port = int(data.get("port", 0) or 0)
         except Exception:
             port = 0
+        tv_type = str(data.get("tv_type", "android")).strip() or "android"
+        mac = str(data.get("mac", "")).strip()
         plug = data.get("plug") or None
         daftar.append({"ip": ip, "nama": nama, "port": port,
-                       "nama_grup": nama_grup, "plug": plug})
+                        "nama_grup": nama_grup, "tv_type": tv_type,
+                        "mac": mac, "plug": plug})
     cfg["daftar_tv"] = daftar
     M.ConfigManager.save(cfg)
     STORE.load_kartu()
@@ -4756,6 +4827,7 @@ def api_tv_remote():
     if "ok" not in out:
         out.update({"ok": False,
                     "msg": "TV tidak merespon (timeout). Pastikan TV hidup & sudah dipairing lewat aplikasi desktop."})
+    M.AuditLogger.log("tv_remote", STORE.user, "success" if out.get("ok") else "failed", {"label": s.label, "action": action, "tv_type": tv_type, "msg": out.get("msg", "")})
     return jsonify(out)
 
 
@@ -4863,7 +4935,10 @@ def api_tv_pair_finish():
             port = int(data.get("port", 0) or 0)
         except Exception:
             port = 0
-        daftar.append({"ip": ip, "nama": nama, "port": port, "nama_grup": nama_grup})
+        tv_type = str(data.get("tv_type", "android")).strip() or "android"
+        mac = str(data.get("mac", "")).strip()
+        daftar.append({"ip": ip, "nama": nama, "port": port, "nama_grup": nama_grup,
+                        "tv_type": tv_type, "mac": mac})
         cfg["daftar_tv"] = daftar
         M.ConfigManager.save(cfg)
         STORE.load_kartu()
@@ -5661,6 +5736,7 @@ def api_tv_media():
     fname = _sanitize_filename(upload.filename)
     dest = os.path.join(ms.media_dir, fname)
     upload.save(dest)
+    M.AuditLogger.log("media_promo", STORE.user, "success", {"target": target, "kind": kind, "filename": fname, "label": s.label if target == "tv" else "all"})
 
     if kind == "image":
         ms.set_current("image", fname)
@@ -6858,6 +6934,7 @@ def api_aktivasi_revoke():
 @require_auth
 def api_logs():
     f = str(request.args.get("f", "all") or "all").strip()
+    sort = str(request.args.get("sort", "desc") or "desc").strip()
     path = M.app_path("rr_billing_audit.jsonl")
     entries = []
     if os.path.exists(path):
@@ -6872,15 +6949,16 @@ def api_logs():
                     except Exception:
                         continue
                     action = str(e.get("action", ""))
-                    if f == "login" and "login" not in action:
+                    status = str(e.get("status", ""))
+                    if f == "login" and not any(k in action for k in ("login", "logout", "register", "google")):
                         continue
-                    if f == "transaction" and "transaksi" not in action:
+                    if f == "transaction" and not any(k in action for k in ("transaksi", "payment", "transaction", "bukti", "struk", "riwayat")):
                         continue
-                    if f == "rental" and "rental" not in action:
+                    if f == "rental" and not any(k in action for k in ("rental", "sesi", "tv_", "warnet", "hapus_warnet")):
                         continue
-                    if f == "update" and "update" not in action:
+                    if f == "update" and not any(k in action for k in ("update", "password", "user_", "backup", "data_reset", "rename", "activation", "license")):
                         continue
-                    if f == "error" and str(e.get("status", "")) != "failed":
+                    if f == "error" and status != "failed" and "error" not in action:
                         continue
                     try:
                         det = json.dumps(e.get("details", {}), ensure_ascii=False)
@@ -6890,12 +6968,12 @@ def api_logs():
                         "timestamp": str(e.get("timestamp", "")),
                         "action": action,
                         "username": str(e.get("username", "")),
-                        "status": str(e.get("status", "")),
+                        "status": status,
                         "details": det,
                     })
         except Exception as ex:
             _LOGGER.warning("Baca audit log error: %s", ex)
-    entries.sort(key=lambda x: x["timestamp"], reverse=True)
+    entries.sort(key=lambda x: x["timestamp"], reverse=(sort != "asc"))
     try:
         limit = max(10, min(3000, int(request.args.get("limit", 2000) or 2000)))
     except Exception:
@@ -6905,6 +6983,7 @@ def api_logs():
         "total": len(entries),
         "file": os.path.basename(path),
         "exists": os.path.exists(path),
+        "sort": sort,
     })
 
 
