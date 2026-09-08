@@ -4,6 +4,7 @@ class Customer {
   final String email;
   final String avatarUrl;
   final int saldoWaktu;
+  final String createdAt;
 
   Customer({
     required this.id,
@@ -11,6 +12,7 @@ class Customer {
     required this.email,
     this.avatarUrl = '',
     this.saldoWaktu = 0,
+    this.createdAt = '',
   });
 
   factory Customer.fromJson(Map<String, dynamic> json) {
@@ -20,6 +22,7 @@ class Customer {
       email: json['email'] ?? '',
       avatarUrl: json['avatar_url'] ?? '',
       saldoWaktu: json['saldo_waktu'] ?? 0,
+      createdAt: json['created_at'] ?? '',
     );
   }
 }

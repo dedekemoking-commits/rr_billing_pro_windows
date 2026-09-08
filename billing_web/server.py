@@ -19,6 +19,7 @@ import json
 import time
 import math
 import random
+import hashlib
 import string
 import shutil
 import socket
@@ -531,6 +532,21 @@ class Sesi:
                    f"({self.member_hp}) -{menit} mnt | sisa saldo={saldo_baru} mnt")
         except Exception as e:
             _LOGGER.warning("Potong saldo member %s gagal: %s", self.member_hp, e)
+        # Sesion yang dimulai dari aplikasi pelanggan → saldo juga dipotong di
+        # Supabase (source of truth) agar konsisten dengan app.
+        mid = getattr(self, "member_supabase_id", None)
+        owner = getattr(self, "member_owner", None)
+        if mid and owner:
+            try:
+                from supabase_sync import get_member_client
+                mc = get_member_client()
+                m = mc.get_by_id(owner, mid)
+                if m:
+                    new_saldo = max(0, int(m.get("saldo_menit", 0) or 0) - menit)
+                    mc.update_saldo(owner, mid, new_saldo)
+                    applog(f"[MEMBER POTONG SUPABASE] {mid} -{menit} mnt | sisa={new_saldo}")
+            except Exception as e:
+                _LOGGER.warning("Potong saldo supabase member %s gagal: %s", mid, e)
 
     # ── waktu habis (port _timer_habis, tanpa dialog & kontrol TV) ──────
     def timer_habis(self):
@@ -1682,7 +1698,7 @@ class Store:
                 for u, x in users.items()] if isinstance(users, dict) else []
 
     # ── member (saldo waktu) ────────────────────────────────────────────
-    _JENIS_MEMBER = ("VIP", "PS3", "PS4")
+    _JENIS_MEMBER = ("VIP", "PS3", "PS4", "PS5")
     _DEFAULT_TOPUP = [
         {"nama": "1 Jam", "menit": 60, "harga": 5000},
         {"nama": "2 Jam", "menit": 120, "harga": 9000},
@@ -3391,7 +3407,9 @@ def api_login():
     TOKENS[token] = res["username"]
     STORE.notify("login", {"label": res["username"]})
     M.AuditLogger.log("login_success", res.get("username", ""), "success", {"role": res.get("role", "")})
+    _push_call_meta()
     return jsonify({"token": token, **res})
+
 
 
 @app.route("/api/register", methods=["POST"])
@@ -3425,6 +3443,7 @@ def api_google_login():
     TOKENS[token] = res["username"]
     STORE.notify("login", {"label": res["username"]})
     M.AuditLogger.log("google_login_success", res.get("username", ""), "success", {"role": res.get("role", "")})
+    _push_call_meta()
     return jsonify({"token": token, **res})
 
 
@@ -4189,6 +4208,7 @@ def api_settings_menu():
     cfg = M.ConfigManager.load()
     cfg[key] = new_menu
     M.ConfigManager.save(cfg)
+    _push_call_meta()
     return jsonify({"ok": True, "menu": new_menu})
 
 
@@ -4236,6 +4256,7 @@ def api_settings_stok():
         return cfg
 
     M.ConfigManager.update(_mut)
+    _push_call_meta()
     return jsonify({"ok": True, "stok": stok_new, "stok_min": min_new})
 
 
@@ -7037,20 +7058,41 @@ def _verify_google_id_token(id_token: str) -> dict:
 # ── 1. Cek Rental ────────────────────────────────────────────────────────
 @app.route("/api/customer/cek-rental")
 def api_customer_cek_rental():
-    """Cek apakah rental dengan kode owner ada di call_meta."""
+    """Cek apakah rental dengan kode owner terdaftar.
+
+    Sumber utama = call_meta/<owner> (dipush otomatis oleh rrbillingpro.exe
+    maupun web kasir saat login/simpan data). Bila call_meta belum ada
+    (kasir belum pernah login web/desktop), fallback ke config lokal:
+    owner dianggap valid bila = username kasir yang terdaftar di mesin ini."""
     owner = (request.args.get("owner") or "").strip().lower()
     if not owner:
         return jsonify({"error": "Parameter 'owner' wajib diisi"}), 400
     meta = _SB.get_callmeta_client().get(owner)
-    if not meta:
+    if meta:
+        return jsonify({
+            "ok": True,
+            "owner": owner,
+            "nama_rental": meta.get("nama_rental", ""),
+            "logo": meta.get("logo", ""),
+            "no_hp": meta.get("no_hp", ""),
+            "alamat": meta.get("alamat", ""),
+        })
+    cfg = M.ConfigManager.load()
+    users = cfg.get("users", {}) or {}
+    profil = (cfg.get("profil_rental", {}) or {}).get(owner, {}) or {}
+    if not isinstance(profil, dict):
+        profil = {}
+    usernames = {str(k).lower() for k in (users if isinstance(users, dict) else {})}
+    if owner not in usernames and not profil:
         return jsonify({"error": "Rental tidak ditemukan"}), 404
+    nama_rental = str(profil.get("nama_rental", "") or "").strip() or f"Rental {owner}"
     return jsonify({
         "ok": True,
         "owner": owner,
-        "nama_rental": meta.get("nama_rental", ""),
-        "logo": meta.get("logo", ""),
-        "no_hp": meta.get("no_hp", ""),
-        "alamat": meta.get("alamat", ""),
+        "nama_rental": nama_rental,
+        "logo": str(profil.get("logo", "") or ""),
+        "no_hp": str(profil.get("no_hp", "") or ""),
+        "alamat": str(profil.get("alamat", "") or ""),
     })
 
 
@@ -7136,6 +7178,71 @@ def api_customer_login():
     })
 
 
+# ── 3b. Login manual (tanpa Google/Firebase) ─────────────────────────────
+@app.route("/api/customer/login-manual", methods=["POST"])
+def api_customer_login_manual():
+    """Login/daftar manual. Body: {owner, nama, email, hp}.
+    Cocok untuk development & rental tanpa Firebase."""
+    data = request.get_json(silent=True) or {}
+    owner = (data.get("owner") or "").strip().lower()
+    nama = (data.get("nama") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    hp = (data.get("hp") or "").strip()
+
+    if not owner:
+        return jsonify({"error": "owner wajib diisi"}), 400
+    if not nama:
+        return jsonify({"error": "nama wajib diisi"}), 400
+    if not email:
+        return jsonify({"error": "email wajib diisi"}), 400
+
+    cust_client = _SB.get_customer_client()
+    cust = cust_client.get_by_email_and_owner(email, owner)
+
+    # Belum terdaftar → buat baru dengan firebase_uid sintetis
+    if not cust:
+        firebase_uid = "manual_" + hashlib.sha256(f"{email}|{owner}".encode()).hexdigest()[:24]
+        row = cust_client.insert({
+            "firebase_uid": firebase_uid,
+            "owner": owner,
+            "nama": nama,
+            "email": email,
+            "avatar_url": "",
+            "no_hp": hp,
+        })
+        if not row:
+            return jsonify({"error": "Gagal mendaftar"}), 500
+        cust = row
+    else:
+        # Update nama/hp bila berubah
+        patch = {}
+        if cust.get("nama") != nama:
+            patch["nama"] = nama
+        if hp and cust.get("no_hp") != hp:
+            patch["no_hp"] = hp
+        if patch and cust.get("id"):
+            cust_client.update_by_id(cust["id"], patch)
+
+    firebase_uid = cust.get("firebase_uid", "")
+    tok = _make_customer_token()
+    CUSTOMER_TOKENS[tok] = {
+        "firebase_uid": firebase_uid,
+        "owner": owner,
+        "customer_id": cust.get("id", ""),
+    }
+    return jsonify({
+        "ok": True,
+        "token": tok,
+        "customer": {
+            "id": cust.get("id", ""),
+            "nama": cust.get("nama", ""),
+            "email": cust.get("email", ""),
+            "avatar_url": cust.get("avatar_url", ""),
+            "saldo_waktu": cust.get("saldo_waktu", 0),
+        },
+    })
+
+
 # ── 4. Profile ──────────────────────────────────────────────────────────
 @app.route("/api/customer/profile")
 @_require_customer_auth
@@ -7193,6 +7300,21 @@ def api_customer_riwayat():
     # Filter: hanya booking milik customer ini (berdasarkan nama atau bisa ditambah field customer_id)
     # Untuk sekarang tampilkan semua booking di rental ini (customer bisa lihat booking sendiri)
     return jsonify({"riwayat": my_bookings})
+
+
+# ── 6b. Transaksi (riwayat pembelian gabungan) ──────────────────────────
+@app.route("/api/customer/transaksi")
+@_require_customer_auth
+def api_customer_transaksi():
+    """Riwayat pembelian customer: booking + order F&B + top-up voucher, digabung & disortir."""
+    c = request._customer
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    if not cust:
+        return jsonify({"error": "Customer tidak ditemukan"}), 404
+    trans = _SB.get_customer_transaction_client().get_by_customer(c["owner"], str(cust.get("id", "")), limit=100)
+    # Normalisasi + jamin sorted by created_at desc
+    trans.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+    return jsonify({"transaksi": trans})
 
 
 # ── 7. Booking ──────────────────────────────────────────────────────────
@@ -7256,6 +7378,16 @@ def api_customer_create_booking():
     row = _SB.get_booking_client().insert(booking_data)
     if not row:
         return jsonify({"error": "Gagal membuat booking"}), 500
+    # Catat ke riwayat pembelian customer
+    _SB.get_customer_transaction_client().insert({
+        "owner": c["owner"],
+        "customer_id": c["customer_id"],
+        "jenis": "booking",
+        "deskripsi": f"Booking {data.get('perangkat','')} • {data.get('paket','')}",
+        "jumlah_menit": 0,
+        "nominal": total_harga,
+        "ref": f"booking-{row.get('_id') or row.get('id','')}",
+    })
     return jsonify({"ok": True, "booking": row})
 
 
@@ -7337,6 +7469,17 @@ def api_customer_redeem_voucher():
     else:
         cust_client.update_saldo(c["firebase_uid"], c["owner"], nilai)
 
+    # Catat ke riwayat pembelian customer (top-up voucher)
+    _SB.get_customer_transaction_client().insert({
+        "owner": c["owner"],
+        "customer_id": c["customer_id"],
+        "jenis": "topup",
+        "deskripsi": f"Voucher {kode} • +{nilai} menit",
+        "jumlah_menit": nilai,
+        "nominal": 0,
+        "ref": f"voucher-{v.get('id','')}-{int(time.time()*1000)}",
+    })
+
     v_client.increment_penggunaan(v["id"])
     return jsonify({"ok": True, "pesan": f"Voucher berhasil diredeem! +{nilai} menit"})
 
@@ -7345,15 +7488,34 @@ def api_customer_redeem_voucher():
 @app.route("/api/customer/menu")
 @_require_customer_auth
 def api_customer_menu():
-    """Ambil menu makanan dan minuman dari call_meta."""
+    """Ambil menu makanan & minuman untuk app customer.
+
+    Sumber utamanya = config rrbilling_config.json (menu_makanan / menu_minuman),
+    file yang sama dengan yang diedit di rrbillingpro.exe & web kasir, jadi
+    selalu sinkron. Bila config kosong, fallback ke call_meta/<owner>."""
     c = request._customer
-    meta = _SB.get_callmeta_client().get(c["owner"])
-    if not meta:
-        return jsonify({"makanan": {}, "minuman": {}})
-    return jsonify({
-        "makanan": meta.get("makanan", {}),
-        "minuman": meta.get("minuman", {}),
-    })
+
+    def _normalize(value):
+        if isinstance(value, dict):
+            return {str(k): int(v) for k, v in value.items()}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                return {str(k): int(v) for k, v in parsed.items()}
+            return {}
+        return {}
+
+    makan = _normalize(STORE.menu_makanan)
+    minum = _normalize(STORE.menu_minuman)
+    if not makan and not minum:
+        meta = _SB.get_callmeta_client().get(c["owner"])
+        if meta:
+            makan = _normalize(meta.get("makanan"))
+            minum = _normalize(meta.get("minuman"))
+    return jsonify({"makanan": makan, "minuman": minum})
 
 
 # ── 11. Order F&B ──────────────────────────────────────────────────────
@@ -7377,6 +7539,17 @@ def api_customer_order():
     })
     if not order:
         return jsonify({"error": "Gagal membuat order"}), 500
+    # Catat ke riwayat pembelian customer
+    ref_id = order.get("id", "")
+    _SB.get_customer_transaction_client().insert({
+        "owner": c["owner"],
+        "customer_id": c["customer_id"],
+        "jenis": "order",
+        "deskripsi": f"Order F&B • {sum(int(it.get('qty',1)) for it in items)} item",
+        "jumlah_menit": 0,
+        "nominal": total,
+        "ref": f"customer_orders-{ref_id}",
+    })
     # Juga insert ke tabel calls supaya kasir bisa lihat
     _SB.get_calls_client().insert({
         "tv": "",
@@ -7404,6 +7577,350 @@ def api_customer_fcm_token():
         return jsonify({"error": "fcm_token wajib diisi"}), 400
     ok = _SB.get_customer_client().update(c["firebase_uid"], c["owner"], {"fcm_token": fcm})
     return jsonify({"ok": ok})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MEMBER SYSTEM — Customer endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 13. Daftar paket member per jenis ────────────────────────────────────────
+@app.route("/api/customer/member/plans")
+@_require_customer_auth
+def api_customer_member_plans():
+    return jsonify({"plans": STORE.topup_semua_jenis(), "jenis": list(STORE._JENIS_MEMBER)})
+
+
+# ── 14. Daftar member baru ───────────────────────────────────────────────────
+@app.route("/api/customer/member/register", methods=["POST"])
+@_require_customer_auth
+def api_customer_register_member():
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    jenis = (data.get("jenis") or "").strip()
+    nama  = (data.get("nama") or "").strip()
+    pin   = (data.get("pin") or "").strip()
+    no_hp = (data.get("no_hp") or "").strip()
+
+    if jenis not in STORE._JENIS_MEMBER:
+        return jsonify({"error": f"Jenis tidak valid. Pilih: {', '.join(STORE._JENIS_MEMBER)}"}), 400
+    if not nama:
+        return jsonify({"error": "Nama wajib diisi"}), 400
+    if not pin or len(pin) < 4 or len(pin) > 6 or not pin.isdigit():
+        return jsonify({"error": "PIN harus 4-6 digit angka"}), 400
+
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    email = cust.get("email", "") if cust else ""
+    if not email:
+        return jsonify({"error": "Akun belum punya email"}), 400
+
+    mem_client = _SB.get_member_client()
+    existing = mem_client.get_by_email_and_jenis(c["owner"], email, jenis)
+    if existing:
+        return jsonify({"error": f"Anda sudah punya member {jenis}"}), 409
+
+    row = mem_client.insert({
+        "owner":       c["owner"],
+        "email":       email,
+        "nama":        nama,
+        "no_hp":       no_hp,
+        "jenis":       jenis,
+        "pin":         M.hash_password(pin),
+        "saldo_menit": 0,
+        "status":      "aktif",
+    })
+    if not row:
+        return jsonify({"error": "Gagal menyimpan member"}), 500
+    return jsonify({"ok": True, "member": {
+        "id": row.get("id"), "jenis": jenis, "nama": nama,
+        "saldo_menit": 0, "status": "aktif",
+    }})
+
+
+# ── 15. Daftar kartu member milik akun ───────────────────────────────────────
+@app.route("/api/customer/member/list")
+@_require_customer_auth
+def api_customer_member_list():
+    c = request._customer
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    email = cust.get("email", "") if cust else ""
+    if not email:
+        return jsonify({"members": []})
+    rows = _SB.get_member_client().list_by_email(c["owner"], email)
+    return jsonify({"members": [{
+        "id": r.get("id"), "jenis": r.get("jenis"), "nama": r.get("nama"),
+        "no_hp": r.get("no_hp", ""),
+        "saldo_menit": int(r.get("saldo_menit", 0) or 0),
+        "status": r.get("status", "aktif"),
+        "created_at": r.get("created_at", ""),
+    } for r in rows]})
+
+
+# ── 16. Isi waktu member (request topup) ─────────────────────────────────────
+@app.route("/api/customer/member/topup", methods=["POST"])
+@_require_customer_auth
+def api_customer_member_topup():
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    member_id  = (data.get("member_id") or "").strip()
+    paket_nama = (data.get("paket_nama") or "").strip()
+    metode     = (data.get("metode") or "").strip()
+    bukti      = (data.get("bukti") or "").strip()
+
+    if not member_id:
+        return jsonify({"error": "member_id wajib diisi"}), 400
+    if metode not in ("qris", "tunai"):
+        return jsonify({"error": "metode harus 'qris' atau 'tunai'"}), 400
+
+    mem_client = _SB.get_member_client()
+    m = mem_client.get_by_id(c["owner"], member_id)
+    if not m:
+        return jsonify({"error": "Member tidak ditemukan"}), 404
+
+    jenis = m.get("jenis", "")
+    plans = STORE.topup_semua_jenis()
+    paket_list = plans.get(jenis, [])
+    paket_info = next((p for p in paket_list if p.get("nama") == paket_nama), None)
+    if not paket_info:
+        return jsonify({"error": f"Paket '{paket_nama}' tidak tersedia untuk {jenis}"}), 400
+
+    menit = int(paket_info.get("menit", 0))
+    harga = int(paket_info.get("harga", 0))
+    if metode == "qris" and not bukti:
+        return jsonify({"error": "QRIS wajib upload bukti pembayaran"}), 400
+
+    row = _SB.get_member_topup_client().insert({
+        "owner":      c["owner"],
+        "member_id":  member_id,
+        "email":      m.get("email", ""),
+        "jenis":      jenis,
+        "paket_nama": paket_nama,
+        "menit":      menit,
+        "harga":      harga,
+        "metode":     metode,
+        "bukti":      bukti,
+        "status":     "menunggu",
+    })
+    if not row:
+        return jsonify({"error": "Gagal menyimpan permintaan"}), 500
+    return jsonify({"ok": True, "topup": {
+        "id": row.get("id"), "jenis": jenis, "paket": paket_nama,
+        "menit": menit, "harga": harga, "metode": metode, "status": "menunggu",
+    }})
+
+
+# ── 17. Status permintaan isi member ─────────────────────────────────────────
+@app.route("/api/customer/member/topup/status")
+@_require_customer_auth
+def api_customer_topup_status():
+    c = request._customer
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    email = cust.get("email", "") if cust else ""
+    if not email:
+        return jsonify({"topups": []})
+    rows = _SB.get_member_topup_client().list_by_email(c["owner"], email)
+    return jsonify({"topups": [{
+        "id": r.get("id"), "jenis": r.get("jenis"), "paket": r.get("paket_nama"),
+        "menit": int(r.get("menit", 0) or 0), "harga": int(r.get("harga", 0) or 0),
+        "metode": r.get("metode", ""), "status": r.get("status", ""),
+        "alasan": r.get("alasan", ""), "created_at": r.get("created_at", ""),
+    } for r in rows]})
+
+
+# ── 18. Daftar TV yang tersedia (idle) per jenis ─────────────────────────────
+@app.route("/api/customer/member/tvs")
+@_require_customer_auth
+def api_customer_member_tvs():
+    if not STORE.sesi_tv:
+        STORE.load_kartu()
+    daftar_tv_cfg = M.ConfigManager.load().get("daftar_tv", []) or []
+    all_sesi = STORE.all_sesi()
+    sesi_by_label = {s.label: s for s in all_sesi}
+
+    result = {}
+    for tv_cfg in daftar_tv_cfg:
+        label = tv_cfg.get("nama", "")
+        grup  = tv_cfg.get("nama_grup", "")
+        if not label or not grup:
+            continue
+        s = sesi_by_label.get(label)
+        idle = (s is None) or s.sesi_kosong()
+        if not idle:
+            continue
+        result.setdefault(grup, []).append({"label": label, "grup": grup})
+    return jsonify({"tvs": result})
+
+
+# ── 19. Mulai sesi member dari app ────────────────────────────────────────────
+@app.route("/api/customer/member/start", methods=["POST"])
+@_require_customer_auth
+def api_customer_member_start():
+    if not STORE.sesi_tv:
+        STORE.load_kartu()
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    member_id = (data.get("member_id") or "").strip()
+    tv_label  = (data.get("tv_label") or "").strip()
+    pin       = (data.get("pin") or "").strip()
+
+    if not member_id or not tv_label or not pin:
+        return jsonify({"error": "member_id, tv_label, dan pin wajib diisi"}), 400
+
+    mem_client = _SB.get_member_client()
+    m = mem_client.get_by_id(c["owner"], member_id)
+    if not m:
+        return jsonify({"error": "Member tidak ditemukan"}), 404
+    if not M.verify_password(pin, m.get("pin") or ""):
+        return jsonify({"error": "PIN salah"}), 401
+
+    # Cari nomor TV dari daftar_tv
+    daftar_tv_cfg = M.ConfigManager.load().get("daftar_tv", []) or []
+    nomor_tv = None
+    tv_grup = ""
+    for i, tv_cfg in enumerate(daftar_tv_cfg, start=1):
+        if tv_cfg.get("nama") == tv_label:
+            nomor_tv = i
+            tv_grup  = str(tv_cfg.get("nama_grup", ""))
+            break
+    if nomor_tv is None:
+        return jsonify({"error": f"TV '{tv_label}' tidak ditemukan"}), 404
+
+    # Validasi jenis member sesuai grup TV (VIP ↔ Room VIP, lainnya harus sama)
+    def _norm(s):
+        return (s or "").replace(" ", "").lower()
+    if _norm(tv_grup) != _norm(m.get("jenis", "")):
+        return jsonify({"error": f"Member {m.get('jenis','')} tidak bisa dipakai di TV grup '{tv_grup}'"}), 409
+
+    sesi = STORE.get_sesi("tv", str(nomor_tv))
+    if not sesi:
+        return jsonify({"error": "Sesi TV tidak aktif"}), 500
+    if not sesi.sesi_kosong():
+        return jsonify({"error": "TV sedang digunakan"}), 409
+
+    hp = m.get("no_hp") or m.get("email", "")
+    for other in STORE.all_sesi():
+        if other is sesi:
+            continue
+        if (getattr(other, "mode_member", False)
+                and getattr(other, "member_hp", None) == hp
+                and not other.sesi_kosong()):
+            return jsonify({"error": f"Sedang aktif di {other.label}"}), 409
+
+    saldo_menit = int(m.get("saldo_menit", 0) or 0)
+    if saldo_menit <= 0:
+        return jsonify({"error": "Saldo habis"}), 400
+
+    # ── Aktifkan sesi ──
+    sesi.mode_member       = True
+    sesi.member_hp         = hp
+    sesi.member_nama       = m.get("nama", "")
+    sesi.member_detik_pakai = 0
+    sesi.member_supabase_id = member_id   # utk potong saldo di Supabase saat sesi habis
+    sesi.member_owner      = c["owner"]
+    sesi.is_bebas          = False
+    sesi.paket_aktif       = f"MEMBER · {m.get('nama','')}"
+    sesi.sisa_waktu        = saldo_menit * 60
+    sesi.waktu_mulai       = datetime.datetime.now()
+    sesi.paket_harga_tetap = 0
+    sesi.daftar_paket_sesi = [sesi.paket_aktif]
+    sesi.harga_paket_sesi  = [0]
+    sesi.lunas_paket       = [True]
+    sesi.pesanan_aktif     = {}
+    sesi.lunas_pesanan     = {}
+    sesi.biaya_pesanan     = 0
+    sesi.diskoni           = 0
+    sesi.diskoni_mode      = "nominal"
+    sesi.paid              = True
+    sesi.menit_dipakai_awal = 0
+    sesi._timer_paused     = False
+    sesi._paused_total     = None
+    sesi._last_transaction_item = None
+    m["terakhir_aktif"]    = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    cfg_members = M.ConfigManager.get("members", {})
+    if not isinstance(cfg_members, dict):
+        cfg_members = {}
+    cfg_members[hp] = {
+        "nama":       m.get("nama", ""),
+        "jenis":      m.get("jenis", ""),
+        "pin_enc":    m.get("pin") or m.get("pin_enc", ""),
+        "saldo_menit": int(m.get("saldo_menit", 0) or 0),
+        "terakhir_aktif": m.get("terakhir_aktif", ""),
+    }
+    M.ConfigManager.update(lambda cfg: {**cfg, "members": cfg_members})
+
+    if sesi._hub_ok():
+        lunas_now, tagihan_now = sesi.split_lunas_tagihan()
+        try:
+            sesi.store.hub.send_start_timer(sesi.label, sesi.sisa_waktu, 0,
+                                            lunas_total=lunas_now, tagihan_total=tagihan_now,
+                                            nama_member=sesi.member_nama)
+        except Exception:
+            pass
+
+    _SB.get_customer_transaction_client().insert({
+        "owner": c["owner"], "customer_id": c.get("customer_id", ""),
+        "jenis": "sesi",
+        "deskripsi": f"Sesi member {m.get('jenis','')} di {tv_label}",
+        "jumlah_menit": saldo_menit, "nominal": 0,
+        "ref": f"member-sesi-{sesi.label}-{int(time.time())}",
+    })
+
+    return jsonify({"ok": True, "label": tv_label, "sisa_menit": saldo_menit,
+                    "nama_member": m.get("nama", "")})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MEMBER SYSTEM — Kasir endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/member/topup/pending")
+@require_auth
+def api_member_topup_pending():
+    owner = (STORE._resolve_license_user() or "").strip().lower()
+    rows = _SB.get_member_topup_client().list_pending(owner)
+    return jsonify({"rows": rows})
+
+
+@app.route("/api/member/topup/<topup_id>/approve", methods=["POST"])
+@require_auth
+def api_member_topup_approve(topup_id):
+    owner = (STORE._resolve_license_user() or "").strip().lower()
+    data = request.get_json(silent=True) or {}
+    kasir = data.get("kasir", STORE.user or "")
+    topup_client = _SB.get_member_topup_client()
+    row = topup_client.get_by_id(owner, topup_id)
+    if not row:
+        return jsonify({"error": "Tidak ditemukan"}), 404
+    if row.get("status") != "menunggu":
+        return jsonify({"error": f"Sudah {row.get('status')}"}), 409
+
+    member_id = row.get("member_id", "")
+    menit     = int(row.get("menit", 0) or 0)
+    mem_client = _SB.get_member_client()
+    m = mem_client.get_by_id(owner, member_id)
+    if not m:
+        return jsonify({"error": "Member tidak ditemukan"}), 404
+    new_saldo = int(m.get("saldo_menit", 0) or 0) + menit
+    ok = mem_client.update_saldo(owner, member_id, new_saldo)
+    topup_client.update_status(owner, topup_id, "disetujui", kasir=kasir)
+    return jsonify({"ok": ok, "new_saldo_menit": new_saldo})
+
+
+@app.route("/api/member/topup/<topup_id>/reject", methods=["POST"])
+@require_auth
+def api_member_topup_reject(topup_id):
+    owner = (STORE._resolve_license_user() or "").strip().lower()
+    data = request.get_json(silent=True) or {}
+    alasan = data.get("alasan", "")
+    kasir  = data.get("kasir", STORE.user or "")
+    topup_client = _SB.get_member_topup_client()
+    row = topup_client.get_by_id(owner, topup_id)
+    if not row:
+        return jsonify({"error": "Tidak ditemukan"}), 404
+    if row.get("status") != "menunggu":
+        return jsonify({"error": f"Sudah {row.get('status')}"}), 409
+    topup_client.update_status(owner, topup_id, "ditolak", kasir=kasir, alasan=alasan)
+    return jsonify({"ok": True})
 
 
 # ─────────────────────────────────────────────────────────────────────────

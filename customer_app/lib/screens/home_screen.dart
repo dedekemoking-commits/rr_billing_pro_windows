@@ -125,6 +125,53 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 20),
 
+                  // ── Member Card ──
+                  GestureDetector(
+                    onTap: () => context.push('/member'),
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF3FB950), Color(0xFF00C853)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.credit_card,
+                              color: Colors.black, size: 32),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: const [
+                                Text(
+                                  'Member Saya',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                                Text(
+                                  'Daftar, isi waktu, & nyalakan TV langsung dari HP',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, color: Colors.black),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
                   // ── Promo ──
                   if (_promo.isNotEmpty) ...[
                     const Text(
@@ -193,6 +240,13 @@ class _HomeScreenState extends State<HomeScreen> {
                         label: 'Riwayat',
                         color: const Color(0xFF58A6FF),
                         onTap: () => context.push('/riwayat'),
+                      ),
+                      const SizedBox(width: 12),
+                      _menuCard(
+                        icon: Icons.history,
+                        label: 'Transaksi',
+                        color: const Color(0xFF00E676),
+                        onTap: () => context.push('/transaksi'),
                       ),
                       const SizedBox(width: 12),
                       _menuCard(

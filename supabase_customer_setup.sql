@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS "customers" (
     "owner" TEXT NOT NULL DEFAULT '',
     "nama" TEXT NOT NULL DEFAULT '',
     "email" TEXT NOT NULL DEFAULT '',
+    "no_hp" TEXT NOT NULL DEFAULT '',
     "avatar_url" TEXT NOT NULL DEFAULT '',
     "saldo_waktu" INTEGER NOT NULL DEFAULT 0,
     "fcm_token" TEXT NOT NULL DEFAULT '',
@@ -74,14 +75,34 @@ CREATE TABLE IF NOT EXISTS "customer_orders" (
 CREATE INDEX IF NOT EXISTS idx_customer_orders_owner ON "customer_orders"("owner");
 CREATE INDEX IF NOT EXISTS idx_customer_orders_customer ON "customer_orders"("customer_id");
 
+-- 4b. customer_transactions (riwayat pembelian: booking, order F&B, top-up voucher)
+CREATE TABLE IF NOT EXISTS "customer_transactions" (
+    "id" UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    "owner" TEXT NOT NULL DEFAULT '',
+    "customer_id" UUID NOT NULL,
+    "jenis" TEXT NOT NULL DEFAULT 'topup',
+    "deskripsi" TEXT NOT NULL DEFAULT '',
+    "jumlah_menit" INTEGER NOT NULL DEFAULT 0,
+    "nominal" INTEGER NOT NULL DEFAULT 0,
+    "ref" TEXT NOT NULL DEFAULT '',
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE ("owner", "ref")
+);
+
+CREATE INDEX IF NOT EXISTS idx_customer_transactions_owner ON "customer_transactions"("owner");
+CREATE INDEX IF NOT EXISTS idx_customer_transactions_customer ON "customer_transactions"("customer_id");
+CREATE INDEX IF NOT EXISTS idx_customer_transactions_created ON "customer_transactions"("created_at");
+
 -- 5. Disable RLS
 ALTER TABLE "customers" DISABLE ROW LEVEL SECURITY;
 ALTER TABLE "vouchers" DISABLE ROW LEVEL SECURITY;
 ALTER TABLE "promo" DISABLE ROW LEVEL SECURITY;
 ALTER TABLE "customer_orders" DISABLE ROW LEVEL SECURITY;
+ALTER TABLE "customer_transactions" DISABLE ROW LEVEL SECURITY;
 
 -- 6. Enable Realtime
 ALTER PUBLICATION supabase_realtime ADD TABLE "customers";
 ALTER PUBLICATION supabase_realtime ADD TABLE "vouchers";
 ALTER PUBLICATION supabase_realtime ADD TABLE "promo";
 ALTER PUBLICATION supabase_realtime ADD TABLE "customer_orders";
+ALTER PUBLICATION supabase_realtime ADD TABLE "customer_transactions";

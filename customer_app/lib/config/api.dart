@@ -2,7 +2,8 @@ class ApiConfig {
   // Ganti dengan IP komputer yang menjalankan server.py
   // Untuk emulator Android: 10.0.2.2
   // Untuk device physical: IP lokal komputer (contoh: 192.168.1.x)
-  static const String baseUrl = 'http://10.0.2.2:8000';
+  // Catatan: jika pakai `adb reverse tcp:8000 tcp:8000`, gunakan localhost
+  static const String baseUrl = 'http://localhost:8000';
 
   // Supabase (untuk realtime booking status)
   static const String supabaseUrl = 'https://nqaucjpbnewckedqcezb.supabase.co';

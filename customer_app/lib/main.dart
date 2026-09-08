@@ -12,6 +12,11 @@ import 'screens/saldo/topup_screen.dart';
 import 'screens/promo/voucher_screen.dart';
 import 'screens/menu/menu_screen.dart';
 import 'screens/profil/profil_screen.dart';
+import 'screens/transaksi_screen.dart';
+import 'screens/member/member_screen.dart';
+import 'screens/member/daftar_member_screen.dart';
+import 'screens/member/isi_member_screen.dart';
+import 'screens/member/mulai_sesi_screen.dart';
 
 final goRouterProvider = Provider<GoRouter>((ref) {
   return GoRouter(
@@ -45,6 +50,10 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const RiwayatScreen(),
       ),
       GoRoute(
+        path: '/transaksi',
+        builder: (context, state) => const TransaksiScreen(),
+      ),
+      GoRoute(
         path: '/topup',
         builder: (context, state) => const TopUpScreen(),
       ),
@@ -59,6 +68,22 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/profil',
         builder: (context, state) => const ProfilScreen(),
+      ),
+      GoRoute(
+        path: '/member',
+        builder: (context, state) => const MemberScreen(),
+      ),
+      GoRoute(
+        path: '/member/daftar',
+        builder: (context, state) => const DaftarMemberScreen(),
+      ),
+      GoRoute(
+        path: '/member/isi',
+        builder: (context, state) => const IsiMemberScreen(),
+      ),
+      GoRoute(
+        path: '/member/mulai',
+        builder: (context, state) => const MulaiSesiScreen(),
       ),
     ],
   );

@@ -224,6 +224,9 @@ CUSTOMERS_TABLE = "customers"
 VOUCHERS_TABLE = "vouchers"
 PROMO_TABLE = "promo"
 CUSTOMER_ORDERS_TABLE = "customer_orders"
+CUSTOMER_TRANSACTIONS_TABLE = "customer_transactions"
+MEMBERS_TABLE = "members"
+MEMBER_TOPUP_TABLE = "member_topup"
 
 
 class SupabaseCalls:
@@ -549,6 +552,23 @@ class SupabaseCustomer:
             _LOGGER.warning("SupabaseCustomer.get_by_firebase_uid_and_owner error: %s", e)
         return {}
 
+    def get_by_email_and_owner(self, email: str, owner: str) -> dict:
+        """Cari customer by email + owner (dipakai login manual, tanpa Firebase)."""
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}"
+        params = {
+            "email": f"eq.{email}",
+            "owner": f"eq.{owner}",
+            "limit": "1",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomer.get_by_email_and_owner error: %s", e)
+        return {}
+
     def get_by_owner(self, owner: str, limit: int = 100) -> list:
         url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}"
         params = {"owner": f"eq.{owner}", "limit": str(limit), "order": "created_at.desc"}
@@ -579,6 +599,17 @@ class SupabaseCustomer:
             return resp.status_code in (200, 204)
         except Exception as e:
             _LOGGER.warning("SupabaseCustomer.update error: %s", e)
+        return False
+
+    def update_by_id(self, customer_id: str, data: dict) -> bool:
+        """Update customer by id (dipakai login manual)."""
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}?id=eq.{customer_id}"
+        data["updated_at"] = "now()"
+        try:
+            resp = self._session.patch(url, json=data, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomer.update_by_id error: %s", e)
         return False
 
     def update_saldo(self, firebase_uid: str, owner: str, saldo_delta: int) -> bool:
@@ -722,6 +753,220 @@ class SupabaseCustomerOrder:
         return []
 
 
+class SupabaseCustomerTransaction:
+    """Catat riwayat pembelian pelanggan (booking, order F&B, top-up voucher).
+    Tabel: customer_transactions."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def insert(self, data: dict) -> dict:
+        """Insert transaksi. Body: {owner, customer_id, jenis, deskripsi,
+        jumlah_menit, nominal, ref}."""
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMER_TRANSACTIONS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomerTransaction.insert error: %s", e)
+        return {}
+
+    def get_by_customer(self, owner: str, customer_id: str, limit: int = 100) -> list:
+        """Ambil riwayat transaksi pelanggan, terbaru dulu."""
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMER_TRANSACTIONS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "customer_id": f"eq.{customer_id}",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomerTransaction.get_by_customer error: %s", e)
+        return []
+
+
+class SupabaseMember:
+    """Kartu member pelanggan. Tabel: members (1 akun, banyak jenis)."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def insert(self, data: dict) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseMember.insert error: %s", e)
+        return {}
+
+    def get_by_email_and_jenis(self, owner: str, email: str, jenis: str) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "email": f"eq.{email}",
+            "jenis": f"eq.{jenis}",
+            "limit": "1",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseMember.get_by_email_and_jenis error: %s", e)
+        return {}
+
+    def get_by_id(self, owner: str, member_id: str) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "id": f"eq.{member_id}",
+            "limit": "1",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseMember.get_by_id error: %s", e)
+        return {}
+
+    def list_by_email(self, owner: str, email: str) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "email": f"eq.{email}",
+            "order": "created_at.asc",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseMember.list_by_email error: %s", e)
+        return []
+
+    def update_saldo(self, owner: str, member_id: str, saldo_baru: int) -> bool:
+        """Set saldo_menit ke nilai baru (caller sudah hitung)."""
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}?id=eq.{member_id}&owner=eq.{owner}"
+        try:
+            resp = self._session.patch(url, json={"saldo_menit": saldo_baru}, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseMember.update_saldo error: %s", e)
+        return False
+
+
+class SupabaseMemberTopup:
+    """Permintaan isi waktu member dari app pelanggan. Tabel: member_topup."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def insert(self, data: dict) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBER_TOPUP_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseMemberTopup.insert error: %s", e)
+        return {}
+
+    def list_pending(self, owner: str, limit: int = 100) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBER_TOPUP_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "status": "eq.menunggu",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseMemberTopup.list_pending error: %s", e)
+        return []
+
+    def get_by_id(self, owner: str, topup_id: str) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBER_TOPUP_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "id": f"eq.{topup_id}",
+            "limit": "1",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseMemberTopup.get_by_id error: %s", e)
+        return {}
+
+    def list_by_email(self, owner: str, email: str, limit: int = 100) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBER_TOPUP_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "email": f"eq.{email}",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseMemberTopup.list_by_email error: %s", e)
+        return []
+
+    def update_status(self, owner: str, topup_id: str, status: str, kasir: str = "",
+                      alasan: str = "") -> bool:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBER_TOPUP_TABLE}?id=eq.{topup_id}&owner=eq.{owner}"
+        data = {
+            "status": status,
+            "kasir": kasir,
+            "alasan": alasan,
+            "updated_at": "now()",
+        }
+        try:
+            resp = self._session.patch(url, json=data, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseMemberTopup.update_status error: %s", e)
+        return False
+
+
 # ── Singleton instances ───────────────────────────────────────────────────
 _booking_client = None
 _callmeta_client = None
@@ -731,6 +976,7 @@ _customer_client = None
 _voucher_client = None
 _promo_client = None
 _customer_order_client = None
+_customer_transaction_client = None
 
 
 def get_booking_client() -> SupabaseBooking:
@@ -787,6 +1033,31 @@ def get_customer_order_client() -> SupabaseCustomerOrder:
     if _customer_order_client is None:
         _customer_order_client = SupabaseCustomerOrder()
     return _customer_order_client
+
+
+def get_customer_transaction_client() -> SupabaseCustomerTransaction:
+    global _customer_transaction_client
+    if _customer_transaction_client is None:
+        _customer_transaction_client = SupabaseCustomerTransaction()
+    return _customer_transaction_client
+
+
+_member_client = None
+_member_topup_client = None
+
+
+def get_member_client() -> SupabaseMember:
+    global _member_client
+    if _member_client is None:
+        _member_client = SupabaseMember()
+    return _member_client
+
+
+def get_member_topup_client() -> SupabaseMemberTopup:
+    global _member_topup_client
+    if _member_topup_client is None:
+        _member_topup_client = SupabaseMemberTopup()
+    return _member_topup_client
 
 
 # ── Legacy Compatibility ───────────────────────────────────────────────────

@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/api.dart';
@@ -78,6 +77,23 @@ class ApiService {
     return resp.data;
   }
 
+  // ── Login manual (tanpa Google/Firebase) ────────────────────────────────
+  Future<Map<String, dynamic>> loginManual({
+    required String owner,
+    required String nama,
+    required String email,
+    String hp = '',
+  }) async {
+    final resp = await _dio.post('/api/customer/login-manual',
+        data: {
+          'owner': owner,
+          'nama': nama,
+          'email': email,
+          'hp': hp,
+        });
+    return resp.data;
+  }
+
   // ── Profile ─────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> getProfile() async {
     final resp = await _dio.get('/api/customer/profile');
@@ -123,6 +139,12 @@ class ApiService {
     return resp.data;
   }
 
+  // ── Riwayat Transaksi (booking + order + top-up) ────────────────────────
+  Future<Map<String, dynamic>> getTransaksi() async {
+    final resp = await _dio.get('/api/customer/transaksi');
+    return resp.data;
+  }
+
   // ── Promo ───────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> getPromo() async {
     final resp = await _dio.get('/api/customer/promo');
@@ -154,5 +176,63 @@ class ApiService {
   Future<void> saveFcmToken(String fcmToken) async {
     await _dio.post('/api/customer/fcm-token',
         data: {'fcm_token': fcmToken});
+  }
+
+  // ── Member ─────────────────────────────────────────────────────────────
+  Future<Map<String, dynamic>> getMemberPlans() async {
+    final resp = await _dio.get('/api/customer/member/plans');
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> registerMember({
+    required String jenis,
+    required String nama,
+    required String pin,
+    String noHp = '',
+  }) async {
+    final resp = await _dio.post('/api/customer/member/register',
+        data: {'jenis': jenis, 'nama': nama, 'pin': pin, 'no_hp': noHp});
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> listMembers() async {
+    final resp = await _dio.get('/api/customer/member/list');
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> requestMemberTopup({
+    required String memberId,
+    required String paketNama,
+    required String metode,
+    String bukti = '',
+  }) async {
+    final resp = await _dio.post('/api/customer/member/topup',
+        data: {
+          'member_id': memberId,
+          'paket_nama': paketNama,
+          'metode': metode,
+          'bukti': bukti,
+        });
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> getMemberTopupStatus() async {
+    final resp = await _dio.get('/api/customer/member/topup/status');
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> getMemberTvs() async {
+    final resp = await _dio.get('/api/customer/member/tvs');
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> startMemberSession({
+    required String memberId,
+    required String tvLabel,
+    required String pin,
+  }) async {
+    final resp = await _dio.post('/api/customer/member/start',
+        data: {'member_id': memberId, 'tv_label': tvLabel, 'pin': pin});
+    return resp.data;
   }
 }
