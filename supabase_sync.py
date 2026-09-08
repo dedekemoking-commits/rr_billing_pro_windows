@@ -220,6 +220,10 @@ BOOKINGS_TABLE = "bookings"
 CALL_META_TABLE = "call_meta"
 CALLS_TABLE = "calls"
 QR_SESSIONS_TABLE = "qr_sessions"
+CUSTOMERS_TABLE = "customers"
+VOUCHERS_TABLE = "vouchers"
+PROMO_TABLE = "promo"
+CUSTOMER_ORDERS_TABLE = "customer_orders"
 
 
 class SupabaseCalls:
@@ -251,6 +255,17 @@ class SupabaseCalls:
         except Exception as e:
             _LOGGER.warning("SupabaseCalls.query_all error: %s", e)
         return []
+
+    def insert(self, data: dict) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{CALLS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCalls.insert error: %s", e)
+        return {}
 
     def delete(self, row_id: str) -> bool:
         url = f"{SUPABASE_URL}/rest/v1/{CALLS_TABLE}?id=eq.{row_id}"
@@ -505,11 +520,217 @@ class SupabaseCallMeta:
         return {}
 
 
+# ── Customer App helpers ──────────────────────────────────────────────────
+class SupabaseCustomer:
+    """Helper untuk operasi customer pelanggan di Supabase."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def get_by_firebase_uid_and_owner(self, firebase_uid: str, owner: str) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}"
+        params = {
+            "firebase_uid": f"eq.{firebase_uid}",
+            "owner": f"eq.{owner}",
+            "limit": "1",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomer.get_by_firebase_uid_and_owner error: %s", e)
+        return {}
+
+    def get_by_owner(self, owner: str, limit: int = 100) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}"
+        params = {"owner": f"eq.{owner}", "limit": str(limit), "order": "created_at.desc"}
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomer.get_by_owner error: %s", e)
+        return []
+
+    def insert(self, data: dict) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomer.insert error: %s", e)
+        return {}
+
+    def update(self, firebase_uid: str, owner: str, data: dict) -> bool:
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMERS_TABLE}?firebase_uid=eq.{firebase_uid}&owner=eq.{owner}"
+        data["updated_at"] = "now()"
+        try:
+            resp = self._session.patch(url, json=data, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomer.update error: %s", e)
+        return False
+
+    def update_saldo(self, firebase_uid: str, owner: str, saldo_delta: int) -> bool:
+        """Tambah/kurangi saldo_waktu. saldo_delta bisa negatif."""
+        existing = self.get_by_firebase_uid_and_owner(firebase_uid, owner)
+        if not existing:
+            return False
+        new_saldo = max(0, int(existing.get("saldo_waktu", 0)) + saldo_delta)
+        return self.update(firebase_uid, owner, {"saldo_waktu": new_saldo})
+
+
+class SupabaseVoucher:
+    """Helper untuk operasi voucher di Supabase."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def get_by_kode(self, owner: str, kode: str) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{VOUCHERS_TABLE}"
+        params = {"owner": f"eq.{owner}", "kode": f"eq.{kode.upper()}", "limit": "1"}
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseVoucher.get_by_kode error: %s", e)
+        return {}
+
+    def increment_penggunaan(self, voucher_id: str) -> bool:
+        v = self.get_by_id(voucher_id)
+        if not v:
+            return False
+        new_count = int(v.get("penggunaan", 0)) + 1
+        url = f"{SUPABASE_URL}/rest/v1/{VOUCHERS_TABLE}?id=eq.{voucher_id}"
+        try:
+            resp = self._session.patch(url, json={"penggunaan": new_count}, timeout=10)
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            _LOGGER.warning("SupabaseVoucher.increment_penggunaan error: %s", e)
+        return False
+
+    def get_by_id(self, vid: str) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{VOUCHERS_TABLE}"
+        params = {"id": f"eq.{vid}", "limit": "1"}
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseVoucher.get_by_id error: %s", e)
+        return {}
+
+    def insert(self, data: dict) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{VOUCHERS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseVoucher.insert error: %s", e)
+        return {}
+
+
+class SupabasePromo:
+    """Helper untuk operasi promo di Supabase."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def get_active(self, owner: str) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{PROMO_TABLE}"
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+        params = {
+            "owner": f"eq.{owner}",
+            "aktif": "eq.true",
+            "berlaku_sampai": f"gte.{now_iso}",
+            "order": "created_at.desc",
+            "limit": "50",
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabasePromo.get_active error: %s", e)
+        return []
+
+
+class SupabaseCustomerOrder:
+    """Helper untuk operasi customer F&B orders di Supabase."""
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        })
+
+    def insert(self, data: dict) -> dict:
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMER_ORDERS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                return rows[0] if rows else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomerOrder.insert error: %s", e)
+        return {}
+
+    def get_by_customer(self, owner: str, customer_id: str, limit: int = 50) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{CUSTOMER_ORDERS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "customer_id": f"eq.{customer_id}",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseCustomerOrder.get_by_customer error: %s", e)
+        return []
+
+
 # ── Singleton instances ───────────────────────────────────────────────────
 _booking_client = None
 _callmeta_client = None
 _calls_client = None
 _qrsession_client = None
+_customer_client = None
+_voucher_client = None
+_promo_client = None
+_customer_order_client = None
 
 
 def get_booking_client() -> SupabaseBooking:
@@ -538,6 +759,34 @@ def get_qrsession_client() -> SupabaseQrSession:
     if _qrsession_client is None:
         _qrsession_client = SupabaseQrSession()
     return _qrsession_client
+
+
+def get_customer_client() -> SupabaseCustomer:
+    global _customer_client
+    if _customer_client is None:
+        _customer_client = SupabaseCustomer()
+    return _customer_client
+
+
+def get_voucher_client() -> SupabaseVoucher:
+    global _voucher_client
+    if _voucher_client is None:
+        _voucher_client = SupabaseVoucher()
+    return _voucher_client
+
+
+def get_promo_client() -> SupabasePromo:
+    global _promo_client
+    if _promo_client is None:
+        _promo_client = SupabasePromo()
+    return _promo_client
+
+
+def get_customer_order_client() -> SupabaseCustomerOrder:
+    global _customer_order_client
+    if _customer_order_client is None:
+        _customer_order_client = SupabaseCustomerOrder()
+    return _customer_order_client
 
 
 # ── Legacy Compatibility ───────────────────────────────────────────────────

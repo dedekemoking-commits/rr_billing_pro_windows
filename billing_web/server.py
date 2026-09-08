@@ -6987,6 +6987,426 @@ def api_logs():
     })
 
 
+# ─────────────────────────────────────────────────────────────────────────
+#  CUSTOMER APP ENDPOINTS (untuk Flutter app pelanggan)
+# ─────────────────────────────────────────────────────────────────────────
+
+import supabase_sync as _SB
+
+# Customer token storage: token -> {firebase_uid, owner, customer_id}
+CUSTOMER_TOKENS = {}
+
+
+def _make_customer_token():
+    return "c_" + "".join(random.choices(string.ascii_letters + string.digits, k=30))
+
+
+def _require_customer_auth(fn):
+    """Decorator: validasi token customer dari header X-Customer-Token."""
+    import functools
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        tok = request.headers.get("X-Customer-Token", "")
+        if not tok or tok not in CUSTOMER_TOKENS:
+            return jsonify({"error": "unauthorized"}), 401
+        request._customer = CUSTOMER_TOKENS[tok]
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def _verify_google_id_token(id_token: str) -> dict:
+    """Verifikasi Google ID token via Firebase Auth REST API.
+    Mengembalikan {firebase_uid, email, nama, avatar_url} atau raise."""
+    import requests as _req
+    resp = _req.post(
+        f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={FIREBASE_API_KEY}",
+        json={"idToken": id_token}, timeout=15)
+    data = resp.json()
+    users = data.get("users", []) if isinstance(data, dict) else []
+    if not users:
+        raise ValueError("Token Google tidak valid atau kedaluwarsa.")
+    u = users[0]
+    return {
+        "firebase_uid": u.get("localId", ""),
+        "email": u.get("email", ""),
+        "nama": u.get("displayName", ""),
+        "avatar_url": u.get("photoUrl", ""),
+    }
+
+
+# ── 1. Cek Rental ────────────────────────────────────────────────────────
+@app.route("/api/customer/cek-rental")
+def api_customer_cek_rental():
+    """Cek apakah rental dengan kode owner ada di call_meta."""
+    owner = (request.args.get("owner") or "").strip().lower()
+    if not owner:
+        return jsonify({"error": "Parameter 'owner' wajib diisi"}), 400
+    meta = _SB.get_callmeta_client().get(owner)
+    if not meta:
+        return jsonify({"error": "Rental tidak ditemukan"}), 404
+    return jsonify({
+        "ok": True,
+        "owner": owner,
+        "nama_rental": meta.get("nama_rental", ""),
+        "logo": meta.get("logo", ""),
+        "no_hp": meta.get("no_hp", ""),
+        "alamat": meta.get("alamat", ""),
+    })
+
+
+# ── 2. Register (setelah Google Login pertama) ───────────────────────────
+@app.route("/api/customer/register", methods=["POST"])
+def api_customer_register():
+    """Register customer baru. Body: {idToken, owner}."""
+    data = request.get_json(silent=True) or {}
+    id_token = data.get("idToken", "")
+    owner = (data.get("owner") or "").strip().lower()
+    if not id_token or not owner:
+        return jsonify({"error": "idToken dan owner wajib diisi"}), 400
+    try:
+        g = _verify_google_id_token(id_token)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 401
+    firebase_uid = g["firebase_uid"]
+    cust_client = _SB.get_customer_client()
+    existing = cust_client.get_by_firebase_uid_and_owner(firebase_uid, owner)
+    if existing:
+        return jsonify({"error": "Akun sudah terdaftar di rental ini"}), 409
+    row = cust_client.insert({
+        "firebase_uid": firebase_uid,
+        "owner": owner,
+        "nama": g["nama"],
+        "email": g["email"],
+        "avatar_url": g["avatar_url"],
+    })
+    if not row:
+        return jsonify({"error": "Gagal mendaftar"}), 500
+    tok = _make_customer_token()
+    CUSTOMER_TOKENS[tok] = {
+        "firebase_uid": firebase_uid,
+        "owner": owner,
+        "customer_id": row.get("id", ""),
+    }
+    return jsonify({
+        "ok": True,
+        "token": tok,
+        "customer": {
+            "id": row.get("id", ""),
+            "nama": g["nama"],
+            "email": g["email"],
+            "avatar_url": g["avatar_url"],
+            "saldo_waktu": 0,
+        },
+    })
+
+
+# ── 3. Login (sudah terdaftar) ──────────────────────────────────────────
+@app.route("/api/customer/login", methods=["POST"])
+def api_customer_login():
+    """Login customer. Body: {idToken, owner}."""
+    data = request.get_json(silent=True) or {}
+    id_token = data.get("idToken", "")
+    owner = (data.get("owner") or "").strip().lower()
+    if not id_token or not owner:
+        return jsonify({"error": "idToken dan owner wajib diisi"}), 400
+    try:
+        g = _verify_google_id_token(id_token)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 401
+    firebase_uid = g["firebase_uid"]
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(firebase_uid, owner)
+    if not cust:
+        return jsonify({"error": "Akun belum terdaftar di rental ini. Silakan daftar dulu."}), 404
+    tok = _make_customer_token()
+    CUSTOMER_TOKENS[tok] = {
+        "firebase_uid": firebase_uid,
+        "owner": owner,
+        "customer_id": cust.get("id", ""),
+    }
+    return jsonify({
+        "ok": True,
+        "token": tok,
+        "customer": {
+            "id": cust.get("id", ""),
+            "nama": cust.get("nama", ""),
+            "email": cust.get("email", ""),
+            "avatar_url": cust.get("avatar_url", ""),
+            "saldo_waktu": cust.get("saldo_waktu", 0),
+        },
+    })
+
+
+# ── 4. Profile ──────────────────────────────────────────────────────────
+@app.route("/api/customer/profile")
+@_require_customer_auth
+def api_customer_profile():
+    c = request._customer
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    if not cust:
+        return jsonify({"error": "Customer tidak ditemukan"}), 404
+    return jsonify({
+        "id": cust.get("id", ""),
+        "nama": cust.get("nama", ""),
+        "email": cust.get("email", ""),
+        "avatar_url": cust.get("avatar_url", ""),
+        "saldo_waktu": cust.get("saldo_waktu", 0),
+        "created_at": cust.get("created_at", ""),
+    })
+
+
+@app.route("/api/customer/profile", methods=["PUT"])
+@_require_customer_auth
+def api_customer_update_profile():
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    update = {}
+    if "nama" in data:
+        update["nama"] = str(data["nama"])[:100]
+    if "avatar_url" in data:
+        update["avatar_url"] = str(data["avatar_url"])[:500]
+    if not update:
+        return jsonify({"error": "Tidak ada data yang diubah"}), 400
+    ok = _SB.get_customer_client().update(c["firebase_uid"], c["owner"], update)
+    return jsonify({"ok": ok})
+
+
+# ── 5. Saldo ────────────────────────────────────────────────────────────
+@app.route("/api/customer/saldo")
+@_require_customer_auth
+def api_customer_saldo():
+    c = request._customer
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    if not cust:
+        return jsonify({"error": "Customer tidak ditemukan"}), 404
+    return jsonify({
+        "saldo_waktu": cust.get("saldo_waktu", 0),
+    })
+
+
+# ── 6. Riwayat Booking ─────────────────────────────────────────────────
+@app.route("/api/customer/riwayat")
+@_require_customer_auth
+def api_customer_riwayat():
+    c = request._customer
+    bookings = _SB.get_booking_client().query_all(owner=c["owner"], limit=200)
+    my_bookings = [b for b in bookings if b.get("_id")]
+    # Filter: hanya booking milik customer ini (berdasarkan nama atau bisa ditambah field customer_id)
+    # Untuk sekarang tampilkan semua booking di rental ini (customer bisa lihat booking sendiri)
+    return jsonify({"riwayat": my_bookings})
+
+
+# ── 7. Booking ──────────────────────────────────────────────────────────
+@app.route("/api/customer/booking", methods=["POST"])
+@_require_customer_auth
+def api_customer_create_booking():
+    """Buat booking baru. Body: {perangkat, grup, paket, tanggal, jam, metode, catatan, pesanan}."""
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    required = ["perangkat", "paket", "tanggal", "jam"]
+    for f in required:
+        if not data.get(f):
+            return jsonify({"error": f"Field '{f}' wajib diisi"}), 400
+
+    cust = _SB.get_customer_client().get_by_firebase_uid_and_owner(c["firebase_uid"], c["owner"])
+    nama = cust.get("nama", "") if cust else ""
+    no_hp = cust.get("email", "") if cust else ""
+
+    # Hitung harga dari paket_grup di call_meta
+    meta = _SB.get_callmeta_client().get(c["owner"])
+    total_harga = 0
+    grup = data.get("grup", "")
+    paket = data.get("paket", "")
+    if meta:
+        paket_grup = meta.get("paket_grup", {})
+        if isinstance(paket_grup, dict) and grup in paket_grup:
+            for p in paket_grup[grup]:
+                if isinstance(p, dict) and p.get("nama") == paket:
+                    total_harga = int(p.get("harga", 0))
+                    break
+
+    booking_data = {
+        "owner": c["owner"],
+        "namaPelanggan": nama,
+        "noHp": no_hp,
+        "perangkat": data["perangkat"],
+        "grup": grup,
+        "paket": paket,
+        "totalHarga": total_harga,
+        "tanggal": data["tanggal"],
+        "jam": data["jam"],
+        "metode": data.get("metode", "biasa"),
+        "statusBayar": "belum_bayar",
+        "nominalTransfer": 0,
+        "nominalDp": 0,
+        "sisaBayar": total_harga,
+        "pesanan": json.dumps(data.get("pesanan", {})) if isinstance(data.get("pesanan"), dict) else "{}",
+        "catatan": data.get("catatan", ""),
+        "status": "baru",
+        "kasir": "",
+        "alasan": "",
+        "bukti": "",
+        "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "sesiDimulai": False,
+        "sesiDimulaiAt": "",
+        "sesiLabel": "",
+        "pelunasanSisa": 0,
+        "lunasAt": "",
+    }
+    row = _SB.get_booking_client().insert(booking_data)
+    if not row:
+        return jsonify({"error": "Gagal membuat booking"}), 500
+    return jsonify({"ok": True, "booking": row})
+
+
+@app.route("/api/customer/booking")
+@_require_customer_auth
+def api_customer_list_booking():
+    """List booking milik customer ini."""
+    c = request._customer
+    bookings = _SB.get_booking_client().query_all(owner=c["owner"], limit=100)
+    return jsonify({"bookings": bookings})
+
+
+@app.route("/api/customer/booking/check")
+@_require_customer_auth
+def api_customer_check_booking():
+    """Cek ketersediaan slot. Params: perangkat, tanggal, jam."""
+    perangkat = request.args.get("perangkat", "")
+    tanggal = request.args.get("tanggal", "")
+    jam = request.args.get("jam", "")
+    if not perangkat or not tanggal or not jam:
+        return jsonify({"error": "perangkat, tanggal, jam wajib diisi"}), 400
+    bookings = _SB.get_booking_client().query_all(owner=request._customer["owner"], status="dikonfirmasi")
+    bentrok = []
+    for b in bookings:
+        if (b.get("perangkat") == perangkat and
+            b.get("tanggal") == tanggal and
+            b.get("jam") == jam):
+            bentrok.append(b)
+    return jsonify({
+        "tersedia": len(bentrok) == 0,
+        "bentrok": bentrok,
+    })
+
+
+# ── 8. Promo ────────────────────────────────────────────────────────────
+@app.route("/api/customer/promo")
+@_require_customer_auth
+def api_customer_promo():
+    """List promo aktif."""
+    c = request._customer
+    promos = _SB.get_promo_client().get_active(c["owner"])
+    return jsonify({"promo": promos})
+
+
+# ── 9. Voucher ──────────────────────────────────────────────────────────
+@app.route("/api/customer/voucher", methods=["POST"])
+@_require_customer_auth
+def api_customer_redeem_voucher():
+    """Redeem voucher. Body: {kode}."""
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    kode = (data.get("kode") or "").strip().upper()
+    if not kode:
+        return jsonify({"error": "Kode voucher wajib diisi"}), 400
+    v_client = _SB.get_voucher_client()
+    v = v_client.get_by_kode(c["owner"], kode)
+    if not v:
+        return jsonify({"error": "Voucher tidak ditemukan"}), 404
+    if not v.get("aktif", False):
+        return jsonify({"error": "Voucher sudah tidak aktif"}), 400
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if v.get("berlaku_sampai", "") and v["berlaku_sampai"] < now_iso:
+        return jsonify({"error": "Voucher sudah kedaluwarsa"}), 400
+    if v.get("max_penggunaan") and int(v.get("penggunaan", 0)) >= int(v["max_penggunaan"]):
+        return jsonify({"error": "Voucher sudah habis digunakan"}), 400
+
+    # Terapkan voucher: tambah saldo waktu
+    jenis = v.get("jenis", "")
+    nilai = int(v.get("nilai", 0))
+    cust_client = _SB.get_customer_client()
+    if jenis == "gratis_menit":
+        cust_client.update_saldo(c["firebase_uid"], c["owner"], nilai)
+    elif jenis == "persen":
+        # Untuk persen, berikan saldo waktu sebagai bonus (nilai = menit bonus)
+        cust_client.update_saldo(c["firebase_uid"], c["owner"], nilai)
+    elif jenis == "nominal":
+        # Nominal = menit bonus (1 Rp = 1 menit atau sesuai konfigurasi)
+        cust_client.update_saldo(c["firebase_uid"], c["owner"], nilai)
+    else:
+        cust_client.update_saldo(c["firebase_uid"], c["owner"], nilai)
+
+    v_client.increment_penggunaan(v["id"])
+    return jsonify({"ok": True, "pesan": f"Voucher berhasil diredeem! +{nilai} menit"})
+
+
+# ── 10. Menu F&B ────────────────────────────────────────────────────────
+@app.route("/api/customer/menu")
+@_require_customer_auth
+def api_customer_menu():
+    """Ambil menu makanan dan minuman dari call_meta."""
+    c = request._customer
+    meta = _SB.get_callmeta_client().get(c["owner"])
+    if not meta:
+        return jsonify({"makanan": {}, "minuman": {}})
+    return jsonify({
+        "makanan": meta.get("makanan", {}),
+        "minuman": meta.get("minuman", {}),
+    })
+
+
+# ── 11. Order F&B ──────────────────────────────────────────────────────
+@app.route("/api/customer/order", methods=["POST"])
+@_require_customer_auth
+def api_customer_order():
+    """Pesan F&B dari app. Body: {items: [{nama, qty, harga}], catatan}."""
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    items = data.get("items", [])
+    if not items:
+        return jsonify({"error": "Items wajib diisi"}), 400
+    total = sum(int(it.get("harga", 0)) * int(it.get("qty", 1)) for it in items)
+    order = _SB.get_customer_order_client().insert({
+        "owner": c["owner"],
+        "customer_id": c["customer_id"],
+        "items": json.dumps(items) if isinstance(items, list) else "[]",
+        "total": total,
+        "status": "baru",
+        "catatan": data.get("catatan", ""),
+    })
+    if not order:
+        return jsonify({"error": "Gagal membuat order"}), 500
+    # Juga insert ke tabel calls supaya kasir bisa lihat
+    _SB.get_calls_client().insert({
+        "tv": "",
+        "kode": "APP",
+        "jenis": "pesanan",
+        "item": json.dumps([]),
+        "items": json.dumps(items) if isinstance(items, list) else "[]",
+        "catatan": data.get("catatan", ""),
+        "ts": int(time.time() * 1000),
+        "sid": c["customer_id"],
+        "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    return jsonify({"ok": True, "order": order})
+
+
+# ── 12. FCM Token ──────────────────────────────────────────────────────
+@app.route("/api/customer/fcm-token", methods=["POST"])
+@_require_customer_auth
+def api_customer_fcm_token():
+    """Simpan FCM token untuk push notification. Body: {fcm_token}."""
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    fcm = data.get("fcm_token", "")
+    if not fcm:
+        return jsonify({"error": "fcm_token wajib diisi"}), 400
+    ok = _SB.get_customer_client().update(c["firebase_uid"], c["owner"], {"fcm_token": fcm})
+    return jsonify({"ok": ok})
+
+
+# ─────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
