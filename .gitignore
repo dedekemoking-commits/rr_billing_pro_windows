@@ -115,9 +115,10 @@ Thumbs.db
 
 # Data lokal user (lisensi, auth, backup, riwayat — JANGAN commit)
 rr_billing_auth_supabase.json
-rr_billing_license*.json*
-**/rr_billing_license.json
-**/rr_billing_config.json
+rr_billing_license*
+**/rr_billing_license*
+rr_billing_config*
+**/rr_billing_config*
 .rr_salt
 .rr_salt*
 .aiopylgtv.sqlite
