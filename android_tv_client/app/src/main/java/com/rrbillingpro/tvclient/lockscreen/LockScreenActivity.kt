@@ -21,6 +21,7 @@ import com.rrbillingpro.tvclient.model.BillLine
 import com.rrbillingpro.tvclient.model.LockDetail
 import com.rrbillingpro.tvclient.overlay.OverlayWidget
 import com.rrbillingpro.tvclient.service.TvOverlayService
+import com.rrbillingpro.tvclient.util.Prefs
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -49,11 +50,18 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             svc.addListener(this)
             render(svc.currentLockDetail)
         }
+        // Tabrak state layar mati-dan-nyala: jika service belum siap, pakai Prefs.
+        if (!locked && Prefs.isLocked(this)) {
+            locked = true
+            render(Prefs.lockDetail(this))
+        }
 
         if (!locked) {
             // Tidak ada sesi terkunci -> kembali ke aplikasi di bawah (game).
             moveTaskToBack(true)
             finish()
+        } else {
+            enterLockTaskMode()
         }
     }
 
@@ -67,12 +75,22 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             if (!locked) {
                 moveTaskToBack(true)
                 finish()
+                return
             }
+        } else if (Prefs.isLocked(this)) {
+            locked = true
+            render(Prefs.lockDetail(this))
+        } else {
+            moveTaskToBack(true)
+            finish()
+            return
         }
+        if (locked) enterLockTaskMode()
     }
 
     override fun onDestroy() {
         TvOverlayService.instance?.removeListener(this)
+        exitLockTaskMode()
         super.onDestroy()
     }
 
@@ -228,17 +246,33 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
     private fun dp(v: Int): Int =
         (v * resources.displayMetrics.density).toInt()
 
-    // ── Blokir tombol sistem selama terkunci ────────────────────────────────
+    // Blokir SEMUA input dari remote (IR, Bluetooth, remote voice) selama
+    // terkunci. Remote Bluetooth & voice sama-sama mengirim key event, jadi
+    // menelan semua key event otomatis membungkam ketiganya — termasuk tombol
+    // mic (KEYCODE_ASSIST) yang membuka asisten suara.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (locked) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_BACK,
-                KeyEvent.KEYCODE_HOME,
-                KeyEvent.KEYCODE_APP_SWITCH,
-                KeyEvent.KEYCODE_MENU -> return true
-            }
-        }
+        if (locked) return true
         return super.dispatchKeyEvent(event)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (locked) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (locked) return true
+        return super.onKeyUp(keyCode, event)
+    }
+
+    // Lock Task mode: menonaktifkan tombol HOME/recent/notifikasi/global
+    // actions selama layar lock. Butuh device owner (lihat README).
+    private fun enterLockTaskMode() {
+        try { startLockTask() } catch (_: Exception) {}
+    }
+
+    private fun exitLockTaskMode() {
+        try { stopLockTask() } catch (_: Exception) {}
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

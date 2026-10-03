@@ -2,8 +2,11 @@ package com.rrbillingpro.tvclient.net
 
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
+
+private const val TAG = "RRTimer"
 
 /**
  * Mesin countdown sederhana (berjalan di main thread via Handler).
@@ -28,13 +31,24 @@ class TimerEngine(
 
     private val handler = Handler(Looper.getMainLooper())
     private val counter = AtomicInteger(0)
+    private var lastSyncRemaining = -1
+    private var waitingForServerZero = false
 
-    fun start(totalSeconds: Int) {
+    fun start(totalSeconds: Int, forceStart: Boolean = false) {
+        if (!forceStart && state == State.RUNNING && totalSeconds >= 0 && totalSeconds > remainingSeconds) {
+            Log.d(TAG, "start diabaikan: incoming=${totalSeconds}s current=${remainingSeconds}s")
+            scheduleTick()
+            return
+        }
         counter.incrementAndGet()
+        lastSyncRemaining = -1
+        waitingForServerZero = false
         remainingSeconds = max(0, totalSeconds)
-        state = if (totalSeconds < 0) State.BEBAS else State.RUNNING
+        state = if (totalSeconds < 0) State.BEBAS else if (totalSeconds == 0) State.STOPPED else State.RUNNING
+        Log.d(TAG, "start total=${totalSeconds}s state=$state remaining=${remainingSeconds}s")
         onTick(remainingSeconds)
         if (state == State.RUNNING) scheduleTick()
+        if (state == State.STOPPED && totalSeconds == 0) onFinished()
     }
 
     fun pause() {
@@ -44,15 +58,21 @@ class TimerEngine(
 
     fun resume(totalSeconds: Int) {
         counter.incrementAndGet()
+        lastSyncRemaining = -1
+        waitingForServerZero = false
         if (state == State.PAUSED || state == State.RUNNING) {
-            if (totalSeconds > 0) remainingSeconds = totalSeconds
-            state = State.RUNNING
-            scheduleTick()
+            if (totalSeconds >= 0) remainingSeconds = totalSeconds
+            state = if (totalSeconds == 0) State.STOPPED else State.RUNNING
+            Log.d(TAG, "resume total=${totalSeconds}s state=$state")
+            onTick(remainingSeconds)
+            if (state == State.RUNNING) scheduleTick()
+            else if (totalSeconds == 0) onFinished()
         }
     }
 
     fun stop() {
         counter.incrementAndGet()
+        waitingForServerZero = false
         state = State.STOPPED
         remainingSeconds = 0
     }
@@ -61,9 +81,33 @@ class TimerEngine(
      * Sinkronisasi dari kasir: set ulang sisa waktu tanpa mengganggu state,
      * counter, atau jadwal tick (anti-drift saat sesi berjalan).
      */
-    fun sync(totalSeconds: Int) {
-        if (state == State.RUNNING && totalSeconds >= 0) {
-            remainingSeconds = max(0, totalSeconds)
+    fun sync(totalSeconds: Int, startIfStopped: Boolean = false) {
+        if (totalSeconds < 0) return
+        if (startIfStopped) lastSyncRemaining = -1
+        if (state == State.STOPPED) {
+            if (startIfStopped) {
+                Log.d(TAG, "sync reconnect memulai timer total=${totalSeconds}s")
+                start(totalSeconds, true)
+            }
+            return
+        }
+        if (state != State.RUNNING) return
+        if (lastSyncRemaining >= 0 && totalSeconds >= lastSyncRemaining) {
+            Log.d(TAG, "sync stale diabaikan incoming=${totalSeconds}s last=${lastSyncRemaining}s")
+            return
+        }
+        val previous = remainingSeconds
+        val wasWaiting = waitingForServerZero
+        remainingSeconds = totalSeconds
+        lastSyncRemaining = totalSeconds
+        waitingForServerZero = false
+        Log.d(TAG, "sync authoritative incoming=${totalSeconds}s previous=${previous}s")
+        onTick(remainingSeconds)
+        if (remainingSeconds == 0) {
+            state = State.STOPPED
+            onFinished()
+        } else if (wasWaiting) {
+            scheduleTick()
         }
     }
 
@@ -79,8 +123,8 @@ class TimerEngine(
                 remainingSeconds -= 1
                 onTick(remainingSeconds)
                 if (remainingSeconds <= 0) {
-                    state = State.STOPPED
-                    onFinished()
+                    waitingForServerZero = true
+                    Log.d(TAG, "timer lokal 0; menunggu SYNC_TIMER 0 dari server")
                 } else {
                     scheduleTick()
                 }

@@ -67,13 +67,16 @@ CONFIG_FILE  = os.path.join(APP_BASE_DIR, "rr_billing_config.json")
 KEYGEN_LOG   = os.path.join(APP_BASE_DIR, "rr_keygen_log.json")
 
 # --- PAKET LISENSI -------------------------------------------------
-# Durasi "hari" harus sama dengan EDITION_HARI di rr_license.py
-# (31/92/365/36500) — keygen & preview memakai angka itu, bukan 30/90/360.
+# Model PER-TV: BULANAN Rp 10.000/TV/bulan (30 hari),
+#               LIFETIME  Rp 75.000/TV (sekali bayar).
+# Durasi "hari" harus sama dengan EDITION_HARI di rr_license.py (30/36500).
+HARGA_PER_TV = {
+    "BULANAN":  10_000,
+    "LIFETIME": 75_000,
+}
 PAKET_INFO = {
-    "BULANAN":  {"hari": 31,  "maxTv": 5,      "harga": 99_000,  "char": "B", "color": C_ACCENT},
-    "3BULAN":   {"hari": 92,  "maxTv": 10,     "harga": 299_000, "char": "T", "color": C_GREEN},
-    "TAHUNAN":  {"hari": 365, "maxTv": 15,     "harga": 999_000, "char": "S", "color": C_YELLOW},
-    "LIFETIME": {"hari": 36500, "maxTv": 999999, "harga": 2_000_000, "char": "L", "color": C_RED},
+    "BULANAN":  {"hari": 30,    "maxTv": 1, "harga": 10_000,  "char": "B", "color": C_ACCENT},
+    "LIFETIME": {"hari": 36500, "maxTv": 1, "harga": 75_000,  "char": "L", "color": C_RED},
 }
 
 # ─── PASSWORD SECURITY HELPERS ────────────────────────────────────────────────
@@ -141,11 +144,13 @@ def fmt_rp(n):
 def generate_for_username(username: str,
                            edition: str = "BULANAN",
                            days: int = None,
-                           start_date: date = None) -> str:
+                           start_date: date = None,
+                           max_tv: int = 0) -> str:
     """
     Generate kode lisensi yang terikat ke USERNAME (bukan machine ID).
     CRC-16 dari username dimasukkan ke field machine_crc.
     User harus memiliki username yang sama saat aktivasi.
+    max_tv: jumlah TV (0=tabel lama, 1-254=jumlah, 255=unlimited).
     """
     from rr_license import (
         EDITION_MAP, EDITION_HARI, _build_payload, _sign,
@@ -166,7 +171,7 @@ def generate_for_username(username: str,
     uname_clean  = username.strip().lower()
     machine_crc  = _crc16(uname_clean)
 
-    payload   = _build_payload(edition_byte, expiry_days, machine_crc)
+    payload   = _build_payload(edition_byte, expiry_days, machine_crc, max_tv)
     signature = _sign(payload)
     encoded   = _to_b64(payload + signature)
     return _format_kode(encoded)
@@ -345,13 +350,11 @@ class KeygenApp(ctk.CTk):
         self.lbl_user_info.pack(anchor="w", padx=14, pady=(0, 8))
 
         # ── 2. Pilih Paket ────────────────────────────────────────────────────
-        sec2 = self._sec(left, "📦  PILIH PAKET LISENSI")
+        sec2 = self._sec(left, "📦  PILIH PAKET LISENSI (PER-TV)")
 
         paket_items = [
-            ("Bulanan",  "0x01", "31 hari",   "Rp 99.000",   C_ACCENT),
-            ("3 Bulan",  "0x03", "92 hari",   "Rp 299.000",  C_GREEN),
-            ("Tahunan",  "0x0C", "365 hari",  "Rp 999.000",  C_YELLOW),
-            ("Lifetime", "0xFF", "36.500 hari","Rp 2.000.000",C_RED),
+            ("Bulanan",  "0x01", "30 hari",    "Rp 10.000/TV/bulan", C_ACCENT),
+            ("Lifetime", "0xFF", "36.500 hari","Rp 75.000/TV",       C_RED),
         ]
 
         self.var_paket = ctk.StringVar(value="BULANAN")
@@ -374,6 +377,21 @@ class KeygenApp(ctk.CTk):
             rb.pack(anchor="w", padx=12, pady=(10, 2))
             ctk.CTkLabel(card, text=f"⏱ {durasi}  ·  {harga}",
                          font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=12, pady=(0, 10))
+
+        # ── Jumlah TV (per paket) ─────────────────────────────────────────────
+        tv_row = ctk.CTkFrame(sec2, fg_color="transparent")
+        tv_row.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(tv_row, text="Jumlah TV:",
+                     font=FONT_LABEL, text_color=C_MUTED, width=220, anchor="w").pack(side="left")
+        self.var_max_tv = ctk.StringVar(value="1")
+        e_tv = ctk.CTkEntry(tv_row, textvariable=self.var_max_tv,
+                            placeholder_text="1",
+                            fg_color=C_BTN, text_color=C_YELLOW,
+                            border_color=C_BORDER, font=FONT_BODY, height=32, width=140)
+        e_tv.pack(side="left", padx=8)
+        e_tv.bind("<KeyRelease>", lambda e: self._update_preview())
+        ctk.CTkLabel(tv_row, text="(kosong/0 = unlimited untuk Lifetime)",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(side="left")
 
         # Override hari (opsional)
         ovr_row = ctk.CTkFrame(sec2, fg_color="transparent")
@@ -598,17 +616,40 @@ class KeygenApp(ctk.CTk):
             self._update_preview()
 
     # ── UPDATE PREVIEW ────────────────────────────────────────────────────────
+    def _parse_max_tv(self) -> int:
+        """Baca jumlah TV dari entry. BULANAN: min 1. Lifetime kosong/0 → 255 (unlimited)."""
+        raw = self.var_max_tv.get().strip()
+        paket = self.var_paket.get()
+        try:
+            n = int(raw) if raw else 0
+        except ValueError:
+            n = 0
+        if paket == "LIFETIME" and n <= 0:
+            return 255
+        if n <= 0:
+            n = 1
+        return max(1, min(n, 254))
+
+    def _harga_total(self, paket: str, max_tv: int) -> int:
+        per = HARGA_PER_TV.get(paket, 10_000)
+        if max_tv >= 255:
+            return per  # unlimited Lifetime tetap hitung 1 unit? tidak — unlimited = harga tetap per kebijakan
+        return per * max_tv
+
     def _update_preview(self):
         uname  = self.var_username.get().strip()
         paket  = self.var_paket.get()
         hari_s = self.var_hari.get().strip()
         binding = self.var_binding.get()
+        max_tv = self._parse_max_tv()
 
         hari_map = {
-            "BULANAN": 31, "3BULAN": 92, "TAHUNAN": 365, "LIFETIME": 36500
+            "BULANAN": 30, "3BULAN": 92, "TAHUNAN": 365, "LIFETIME": 36500
         }
-        hari = int(hari_s) if hari_s.isdigit() and int(hari_s) > 0 else hari_map.get(paket, 31)
+        hari = int(hari_s) if hari_s.isdigit() and int(hari_s) > 0 else hari_map.get(paket, 30)
         expiry = date.today() + timedelta(days=hari)
+        harga = self._harga_total(paket, max_tv)
+        tv_txt = "unlimited" if max_tv >= 255 else str(max_tv)
 
         binding_txt = f"Terikat username '{uname}'" if binding == "username" and uname else "Universal (semua user)"
         user_txt = uname if uname else "⚠ Belum dipilih"
@@ -630,6 +671,8 @@ class KeygenApp(ctk.CTk):
         self.lbl_preview.configure(
             text=f"User      : {user_txt}\n"
                  f"Paket     : {paket}  ({hari} hari)\n"
+                 f"Jumlah TV : {tv_txt}\n"
+                 f"Harga     : {fmt_rp(harga)}\n"
                  f"Berlaku   : {date.today()}  s/d  {expiry}\n"
                  f"Binding   : {binding_txt}{existing_info}",
             text_color=C_TEXT if uname else C_YELLOW)
@@ -665,21 +708,25 @@ class KeygenApp(ctk.CTk):
             print(f"License check error: {e}")
 
         hari_map = {
-            "BULANAN": 31, "3BULAN": 92, "TAHUNAN": 365, "LIFETIME": 36500
+            "BULANAN": 30, "3BULAN": 92, "TAHUNAN": 365, "LIFETIME": 36500
         }
         edition_map_clean = {
             "BULANAN": "BULANAN", "3BULAN": "3BULAN",
             "TAHUNAN": "TAHUNAN", "LIFETIME": "LIFETIME"
         }
-        hari    = int(hari_s) if hari_s.isdigit() and int(hari_s) > 0 else hari_map.get(paket, 31)
+        hari    = int(hari_s) if hari_s.isdigit() and int(hari_s) > 0 else hari_map.get(paket, 30)
         edition = edition_map_clean.get(paket, "BULANAN")
+        max_tv  = self._parse_max_tv()
+        harga   = self._harga_total(edition, max_tv)
+        tv_txt  = "unlimited" if max_tv >= 255 else str(max_tv)
 
         try:
             if binding == "username":
-                kode = generate_for_username(uname, edition=edition, days=hari)
+                kode = generate_for_username(uname, edition=edition, days=hari, max_tv=max_tv)
             else:
                 kode = LicenseGenerator.generate(edition=edition,
-                                                  machine_id="ANY", days=hari)
+                                                  machine_id="ANY", days=hari,
+                                                  max_tv=max_tv)
         except Exception as e:
             messagebox.showerror("✖ Error Generate", str(e))
             return
@@ -695,6 +742,8 @@ class KeygenApp(ctk.CTk):
             "username":     uname,
             "paket":        edition,
             "hari":         hari,
+            "maxTv":        max_tv,
+            "harga":        harga,
             "expiry":       expiry,
             "binding":      binding,
             "kode":         kode,
@@ -706,6 +755,8 @@ class KeygenApp(ctk.CTk):
         messagebox.showinfo("✅ Kode Berhasil Digenerate",
                             f"Kode untuk '{uname}':\n\n{kode}\n\n"
                             f"Paket: {edition} ({hari} hari)\n"
+                            f"Jumlah TV: {tv_txt}\n"
+                            f"Harga: {fmt_rp(harga)}\n"
                             f"Berlaku s/d: {expiry}\n\n"
                             f"Klik 'Copy Kode' atau 'Kirim via WA' untuk mengirim ke user.")
 
@@ -739,6 +790,7 @@ class KeygenApp(ctk.CTk):
             f"Berikut kode aktivasi Anda:\n"
             f"*{self._kode_terkini}*\n\n"
             f"📦 Paket: {paket}\n"
+            f"🖥 Jumlah TV: {self.var_max_tv.get() or '1'}\n"
             f"⏱ Aktif selama: {self.var_hari.get() or '(default)'} hari\n\n"
             f"Cara aktivasi:\n"
             f"1. Buka aplikasi RR Billing Pro\n"

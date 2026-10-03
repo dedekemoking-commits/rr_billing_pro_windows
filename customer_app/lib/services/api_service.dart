@@ -58,8 +58,8 @@ class ApiService {
 
   // ── Cek Rental ──────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> cekRental(String owner) async {
-    final resp = await _dio.get('/api/customer/cek-rental',
-        queryParameters: {'owner': owner});
+    final resp = await _dio
+        .get('/api/customer/cek-rental', queryParameters: {'owner': owner});
     return resp.data;
   }
 
@@ -84,13 +84,12 @@ class ApiService {
     required String email,
     String hp = '',
   }) async {
-    final resp = await _dio.post('/api/customer/login-manual',
-        data: {
-          'owner': owner,
-          'nama': nama,
-          'email': email,
-          'hp': hp,
-        });
+    final resp = await _dio.post('/api/customer/login-manual', data: {
+      'owner': owner,
+      'nama': nama,
+      'email': email,
+      'hp': hp,
+    });
     return resp.data;
   }
 
@@ -124,12 +123,12 @@ class ApiService {
 
   Future<Map<String, dynamic>> checkSlot(
       String perangkat, String tanggal, String jam) async {
-    final resp = await _dio.get('/api/customer/booking/check',
-        queryParameters: {
-          'perangkat': perangkat,
-          'tanggal': tanggal,
-          'jam': jam,
-        });
+    final resp =
+        await _dio.get('/api/customer/booking/check', queryParameters: {
+      'perangkat': perangkat,
+      'tanggal': tanggal,
+      'jam': jam,
+    });
     return resp.data;
   }
 
@@ -153,8 +152,7 @@ class ApiService {
 
   // ── Voucher ─────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> redeemVoucher(String kode) async {
-    final resp = await _dio.post('/api/customer/voucher',
-        data: {'kode': kode});
+    final resp = await _dio.post('/api/customer/voucher', data: {'kode': kode});
     return resp.data;
   }
 
@@ -174,8 +172,7 @@ class ApiService {
 
   // ── FCM Token ──────────────────────────────────────────────────────────
   Future<void> saveFcmToken(String fcmToken) async {
-    await _dio.post('/api/customer/fcm-token',
-        data: {'fcm_token': fcmToken});
+    await _dio.post('/api/customer/fcm-token', data: {'fcm_token': fcmToken});
   }
 
   // ── Member ─────────────────────────────────────────────────────────────
@@ -206,13 +203,12 @@ class ApiService {
     required String metode,
     String bukti = '',
   }) async {
-    final resp = await _dio.post('/api/customer/member/topup',
-        data: {
-          'member_id': memberId,
-          'paket_nama': paketNama,
-          'metode': metode,
-          'bukti': bukti,
-        });
+    final resp = await _dio.post('/api/customer/member/topup', data: {
+      'member_id': memberId,
+      'paket_nama': paketNama,
+      'metode': metode,
+      'bukti': bukti,
+    });
     return resp.data;
   }
 
@@ -233,6 +229,20 @@ class ApiService {
   }) async {
     final resp = await _dio.post('/api/customer/member/start',
         data: {'member_id': memberId, 'tv_label': tvLabel, 'pin': pin});
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> getActiveMemberSessions() async {
+    final resp = await _dio.get('/api/customer/member/active');
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> finishMemberSession({
+    required String memberId,
+    required String pin,
+  }) async {
+    final resp = await _dio.post('/api/customer/member/finish',
+        data: {'member_id': memberId, 'pin': pin});
     return resp.data;
   }
 }

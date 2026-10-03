@@ -769,6 +769,14 @@ class FirestoreClient:
         return False, "Tidak ada username"
 
     def fetch_promo_settings(self) -> Optional[dict]:
+        try:
+            import supabase_license as _sl
+            promo = _sl.get_promo()
+            if promo is not None:
+                return promo
+        except Exception as e:
+            _LOGGER.warning("fetch_promo_settings via Supabase failed: %s", e)
+        # Fallback: Firestore settings/global (legacy)
         doc = self.get_document("settings/global")
         if doc is None:
             return None

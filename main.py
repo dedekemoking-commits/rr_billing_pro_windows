@@ -36,7 +36,7 @@ except ImportError:
     fcntl = None  # Windows tidak support fcntl
 
 from typing import Optional
-from firebase_auth import get_firebase_auth
+from supabase_auth import get_supabase_auth as get_firebase_auth
 from firestore_sync import FirestoreClient
 import tv_mesin
 from lg_tv_controller.tv_controller import TVController
@@ -1320,7 +1320,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.20"
+APP_VERSION = "2.4.21"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -2037,7 +2037,9 @@ class TimerService:
 # Modul lisensi terpisah (rr_license.py). Kalau ada rr_keygen.py (binding per-
 # username) ia akan dipakai otomatis oleh LicenseManager.aktivasi(); kalau
 # tidak ada, LicenseManager sudah punya fallback aman di dalamnya sendiri.
-from rr_license import LicenseManager, LicenseGenerator, get_machine_id, get_edition_limits
+from rr_license import (LicenseManager, LicenseGenerator, get_machine_id,
+                        get_edition_limits, is_premium_features_active,
+                        _max_tv_from_byte)
 
 
 # ─── AES-256 ENCRYPTION FOR SENSITIVE CONFIG DATA ─────────────────────────
@@ -2280,6 +2282,14 @@ class ADBHelper:
                 return False, f"Tidak terhubung (reconnect error: {e})", str(e)
         res = rem.turn_off_blocking()
         ok = res.get("status") == "ok"
+        if ok:
+            return ok, res.get("message", ""), res.get("message", "")
+        # Fallback: ADB keyevent 26 (KEYCODE_POWER) — untuk TV yang atpv2-nya
+        # tidak berfungsi (mis. Changhong), hanya merespons perintah ADB.
+        ok_adb, out_adb = cls.adb_shell(ip, "input keyevent 26",
+                                        timeout=8, port=port or 5555)
+        if ok_adb:
+            return True, f"keyevent 26: {out_adb}", out_adb
         return ok, res.get("message", ""), res.get("message", "")
 
     @classmethod
@@ -6711,14 +6721,15 @@ class VirtualRemoteDialog(ctk.CTkToplevel):
 
         File disimpan sebagai logo_lock.png di folder media_promo; client TV
         mengambilnya via TvMediaServer saat LOCK_SCREEN (waktu sewa habis).
-        Hanya tersedia untuk lisensi LIFETIME."""
+        Tersedia saat trial aktif ATAU lisensi LIFETIME; BULANAN = default."""
         app = self.winfo_toplevel()
-        if not app._lisensi_lifetime():
+        if not app._fitur_premium():
             messagebox.showwarning(
-                "Fitur Lisensi LIFETIME",
-                "Fitur logo lock TV hanya tersedia untuk lisensi LIFETIME.\n\n"
+                "Fitur Premium (Trial / LIFETIME)",
+                "Fitur logo lock TV hanya tersedia saat trial aktif "
+                "atau lisensi LIFETIME.\n\n"
                 "Logo tetap memakai RR BILLING PRO.\n"
-                "Lakukan aktivasi lisensi LIFETIME untuk mengganti logo.",
+                "Aktifkan lisensi LIFETIME untuk mengganti logo.",
                 parent=self)
             return
         ms = getattr(app, 'tv_media_server', None)
@@ -7843,7 +7854,7 @@ class KartuTV(tk.Canvas):
                         pesan = str(e)[:120]
                 # 3) Fallback ADB (port 5555 / port kartu bila terbuka)
                 if not hasil:
-                    for kunci in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+                    for kunci in ("26", "KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
                         try:
                             ok_adb, out_adb = ADBHelper.adb_shell(self.ip, f"input keyevent {kunci}",
                                                                   timeout=8, port=self.port)
@@ -8223,13 +8234,13 @@ class KartuTV(tk.Canvas):
 
     def _pilih_media(self, kategori, filetypes, judul):
         app = self.winfo_toplevel()
-        if not app._lisensi_lifetime():
+        if not app._fitur_premium():
             messagebox.showwarning(
-                "Fitur Lisensi LIFETIME",
+                "Fitur Premium (Trial / LIFETIME)",
                 f"Fitur {('video' if kategori == 'video' else 'gambar')} promosi "
-                "hanya tersedia untuk lisensi LIFETIME.\n\n"
+                "hanya tersedia saat trial aktif atau lisensi LIFETIME.\n\n"
                 "TV tetap memutar video promosi bawaan.\n"
-                "Lakukan aktivasi lisensi LIFETIME untuk mengganti media promosi.",
+                "Aktifkan lisensi LIFETIME untuk mengganti media promosi.",
                 parent=app)
             return
         ms = self._get_media_server()
@@ -8482,14 +8493,15 @@ class KartuTV(tk.Canvas):
         Koneksi sama seperti tombol VIDEO/GAMBAR — tanpa ADB/port 5555: file
         disalin ke media_promo/logo_lock.png via TvMediaServer (HTTP 8082);
         client TV memakainya saat LOCK_SCREEN (waktu sewa habis).
-        Hanya tersedia untuk lisensi LIFETIME."""
+        Tersedia saat trial aktif ATAU lisensi LIFETIME; BULANAN = default."""
         app = self.winfo_toplevel()
-        if not app._lisensi_lifetime():
+        if not app._fitur_premium():
             messagebox.showwarning(
-                "Fitur Lisensi LIFETIME",
-                "Fitur logo kartu TV hanya tersedia untuk lisensi LIFETIME.\n\n"
+                "Fitur Premium (Trial / LIFETIME)",
+                "Fitur logo kartu TV hanya tersedia saat trial aktif "
+                "atau lisensi LIFETIME.\n\n"
                 "Logo tetap memakai RR BILLING PRO.\n"
-                "Lakukan aktivasi lisensi LIFETIME untuk mengganti logo.",
+                "Aktifkan lisensi LIFETIME untuk mengganti logo.",
                 parent=app)
             return
         ms = self._get_media_server()
@@ -10993,10 +11005,10 @@ class AutoRentApp(ctk.CTk):
     def _get_nama_rental_dinamis(self) -> str:
         """Nama rental dari profil user aktif untuk dikirim ke overlay TV.
 
-        User NON-LIFETIME: selalu RR Billing Pro (nama rental baru tampil
-        setelah aktivasi lisensi LIFETIME)."""
+        Premium (trial aktif / LIFETIME): nama rental dari profil.
+        BULANAN: selalu "RR Billing Pro" (default)."""
         try:
-            if not self._lisensi_lifetime():
+            if not self._fitur_premium():
                 return "RR Billing Pro"
             cfg = ConfigManager.load()
             uname = getattr(self, 'current_user', None) or ""
@@ -11013,13 +11025,13 @@ class AutoRentApp(ctk.CTk):
     def _tv_media_urls_now(self):
         """URL logo lock (global) + video promosi aktif untuk detail LOCK_SCREEN.
 
-        User NON-LIFETIME: logo default client (drawable bawaan) + video promosi
+        BULANAN: logo default client (drawable bawaan) + video promosi
         BAWAAN (PROMO_VIDEO_DEFAULT) — media custom tidak pernah terpakai."""
         ms = getattr(self, 'tv_media_server', None)
         if not ms or not ms.running:
             return "", ""
         base = f"http://{self._get_lan_ip()}:{ms.port}/media/"
-        if not self._lisensi_lifetime():
+        if not self._fitur_premium():
             logo_url = ""
             promo_url = ""
             default_path = os.path.join(ms.media_dir, PROMO_VIDEO_DEFAULT)
@@ -11217,9 +11229,9 @@ class AutoRentApp(ctk.CTk):
         """URL logo lock dengan cache-buster (mtime file) — URL berubah setiap
         file diganti supaya client selalu mengunduh versi terbaru.
 
-        User NON-LIFETIME: logo_url kosong -> client TV memakai drawable
-        bawaan (RR BILLING PRO)."""
-        if not self._lisensi_lifetime():
+        User NON-PREMIUM (BULANAN): logo_url kosong -> client TV memakai
+        drawable bawaan (RR BILLING PRO)."""
+        if not self._fitur_premium():
             return ""
         ms = getattr(self, 'tv_media_server', None)
         if not ms or not ms.running:
@@ -11323,13 +11335,13 @@ class AutoRentApp(ctk.CTk):
             print(f"[MEDIA] ensure default promo gagal: {e}")
 
     def _set_media_default_promo(self) -> None:
-        """Sembunyikan video promosi bawaan; user NON-LIFETIME dikunci memakai
-        video default itu (media custom tidak dipakai)."""
+        """Sembunyikan video promosi bawaan; user NON-PREMIUM (BULANAN) dikunci
+        memakai video default itu (media custom tidak dipakai)."""
         try:
             default_path = os.path.join(APP_BASE_DIR, "media_promo", PROMO_VIDEO_DEFAULT)
             if os.path.isfile(default_path):
                 self._sembunyikan_file(default_path)
-            if (not self._lisensi_lifetime()
+            if (not self._fitur_premium()
                     and getattr(self, 'tv_media_server', None) is not None):
                 self.tv_media_server.set_current("video", PROMO_VIDEO_DEFAULT)
         except Exception as e:
@@ -13223,21 +13235,27 @@ class AutoRentApp(ctk.CTk):
                 return
             # 2. Send revocation to Firestore
             try:
-                fc = FirestoreClient()
-                lic = LicenseManager.load()
-                kode = lic.get("kode_aktivasi", "")
-                if kode:
-                    record = fc.find_license_by_code(kode)
-                    if record:
-                        doc_id = record.get("_id", "")
-                        if doc_id:
-                            fc.revoke_license(doc_id, reason=alasan)
-                # Also write licenseStatus to user doc
-                fc.write_license_status(self.current_user if self.current_user else "", {
-                    "status": "revoked",
-                    "pesan": "Lisensi dicabut oleh pengguna.",
-                    "expiresAt": "",
-                })
+                try:
+                    lic = LicenseManager.load()
+                    kode = lic.get("kode_aktivasi", "")
+                    if kode:
+                        import supabase_license as _sl
+                        for r in _sl.get_licenses_by_user(self.current_user or ""):
+                            if r.get("kode") == kode:
+                                _sl.revoke_license(r.get("id", ""), reason=alasan)
+                                break
+                except Exception:
+                    pass
+                # License status dicabut di Supabase
+                try:
+                    import supabase_license as _sl
+                    _sl.upsert_license_status((self.current_user or ""), {
+                        "status": "revoked",
+                        "pesan": "Lisensi dicabut oleh pengguna.",
+                        "expiresAt": "",
+                    })
+                except Exception:
+                    pass
             except Exception as e:
                 _LOGGER.warning("Cloud revoke error: %s", e)
             # Update jumlah member di web (revoked — status lisensi tetap dihitung)
@@ -13270,46 +13288,41 @@ class AutoRentApp(ctk.CTk):
             self.after(0, lambda e=e: messagebox.showerror("Error", f"Gagal revoke: {e}"))
 
     def _sync_aktivasi_ke_cloud(self, kode: str):
-        """Sync aktivasi ke Firestore: update license doc + write licenseStatus ke user doc."""
+        """Sync aktivasi ke Supabase: tulis license_status untuk user."""
         uname = self.current_user or ""
         if not uname:
             return
         try:
-            import datetime as _dt
-            fc = FirestoreClient()
-            # 1. Cari license record by kode (opsional — kode keygen tidak
-            # selalu masuk koleksi licenses/; jangan blokir penulisan status)
-            record = fc.find_license_by_code(kode)
-            doc_id = (record or {}).get("_id", "")
-            if record and record.get("revoked"):
-                _LOGGER.warning("Sync aktivasi dilewati — lisensi %s sudah direvoke", kode)
-                return
-            if not doc_id:
-                _LOGGER.info("License code not in Firestore (keygen code?) — sync tetap lanjut: %s", kode)
-
-            # 2. Dapatkan expiry + maxTv dari license record dan lisensi lokal
+            # 1. Dapatkan expiry + maxTv dari license record dan lisensi lokal
             status = LicenseManager.get_status(current_user=uname)
             expiry_str = status.get("expiry", "")
-
-            # 3. Activate license (update activatedDevices) bila record ada
-            if record and doc_id:
-                fc.activate_license(doc_id, expiry=expiry_str, device_type="desktop")
-
-            # 4. Hitung maxTv dari license record (prioritas), fallback ke promo, lalu ke edition
             lic_local = LicenseManager.load()
-            max_tv = (record or {}).get("maxTv", 0) or 0
+            max_tv = 0
+            try:
+                max_tv = int(lic_local.get("max_tv", 0) or 0)
+            except (ValueError, TypeError):
+                max_tv = 0
+            if max_tv == 255:
+                max_tv = 999999
             if max_tv <= 0:
                 max_tv = lic_local.get("promo_add_tv", 0) or 0
             if max_tv <= 0:
-                ed = lic_local.get("edition", "")
-                max_tv = {"BULANAN": 5, "3BULAN": 10, "TAHUNAN": 15, "LIFETIME": 999999}.get(ed, 0)
-            if max_tv <= 0:
-                pkg_name = ((record or {}).get("package", "BULANAN") or "BULANAN").upper()
-                pkg_max_tv = {"BULANAN": 5, "3BULAN": 10, "TAHUNAN": 15, "LIFETIME": 999999}
-                max_tv = pkg_max_tv.get(pkg_name, 5)
+                ed = str(lic_local.get("edition", "") or "").upper()
+                if ed == "LIFETIME":
+                    max_tv = 999999
             promo_add = lic_local.get("promo_add_tv", 0)
 
-            # 5. Write licenseStatus ke user doc
+            # 2. Augustus Update license row di Supabase bila ada (berdasar kode)
+            try:
+                import supabase_license as _sl
+                for _r in _sl.get_licenses_by_user(uname):
+                    if _r.get("kode") == kode:
+                        _sl.activate_license_row(_r.get("id", ""), expiry=expiry_str)
+                        break
+            except Exception:
+                pass
+
+            # 3. Write licenseStatus ke Supabase (ganti Firestore user-doc)
             ls = {
                 "status": "active",
                 "pesan": f"Lisensi aktif hingga {expiry_str}",
@@ -13319,7 +13332,8 @@ class AutoRentApp(ctk.CTk):
                 "promoAddTv": promo_add,
                 "cloud_restored": True,
             }
-            fc.write_license_status(uname, ls)
+            import supabase_license as _sl
+            _sl.upsert_license_status(uname, ls)
             _LOGGER.info("Cloud activation sync success for %s (maxTv=%d, promo=%d)", uname, max_tv, promo_add)
         except Exception as e:
             _LOGGER.warning("Cloud activation sync error: %s", e)
@@ -13330,22 +13344,25 @@ class AutoRentApp(ctk.CTk):
         if not uname:
             return
         try:
-            from firestore_sync import LicensePoller
-            self._license_poller = LicensePoller(uname, interval=180.0)
-            self._license_poller.start(self._on_cloud_license_update)
-            _LOGGER.info("License poller started for %s", uname)
+            import supabase_license as _sl
+            self._supabase_license_stop = threading.Event()
+            self._license_poller = _sl.start_license_poller(uname, on_change=self._on_cloud_license_update)
+            _LOGGER.info("License poller (Supabase) started for %s", uname)
         except Exception as e:
             _LOGGER.warning("License poller start error: %s", e)
 
     def _stop_license_poller(self):
         """Stop license poller."""
         poller = getattr(self, "_license_poller", None)
-        if poller:
-            try:
+        try:
+            ev = getattr(poller, "stop_ev", None) if poller else None
+            if ev is not None:
+                ev.set()
+            elif poller:
                 poller.stop()
-            except Exception:
-                pass
-            self._license_poller = None
+        except Exception:
+            pass
+        self._license_poller = None
 
     # ── SINGLE SESSION (1 AKUN = 1 PC) ─────────────────────────────────
     @staticmethod
@@ -13665,16 +13682,19 @@ class AutoRentApp(ctk.CTk):
                     existing["binding_mode"] = "username"
                     existing["username"] = resolved_user or self.current_user
                     mtv = ls.get("maxTv") or 0
-                    if mtv <= 0:
-                        _LOGGER.warning(
-                            "Cloud licenseStatus tanpa maxTv (user=%s) — edition dipertahankan",
-                            resolved_user or self.current_user)
-                    if mtv >= 999999:
+                    try:
+                        mtv = int(mtv)
+                    except (ValueError, TypeError):
+                        mtv = 0
+                    # LIFETIME dari expiry (>=2099) atau maxTv unlimited
+                    try:
+                        _cur_exp = str(existing.get("expiry", "") or expires_at or "")
+                        _is_lt = mtv >= 999999 or (
+                            _cur_exp[:4].isdigit() and int(_cur_exp[:4]) >= 2099)
+                    except Exception:
+                        _is_lt = mtv >= 999999
+                    if _is_lt:
                         _new_ed = "LIFETIME"
-                    elif mtv >= 15:
-                        _new_ed = "TAHUNAN"
-                    elif mtv >= 10:
-                        _new_ed = "3BULAN"
                     elif mtv > 0:
                         _new_ed = "BULANAN"
                     else:
@@ -13684,6 +13704,14 @@ class AutoRentApp(ctk.CTk):
                         _old_ed = str(existing.get("edition", "")).strip().upper() if "edition" in existing else ""
                         if not _old_ed or _ed_rank.get(_new_ed, -1) > _ed_rank.get(_old_ed, -1):
                             existing["edition"] = _new_ed
+                    if mtv > 0:
+                        # Simpan jumlah TV dari cloud agar limit TV sesuai pembelian
+                        existing["max_tv"] = 999999 if mtv >= 999999 else mtv
+                        existing["promo_add_tv"] = 999999 if mtv >= 999999 else mtv
+                    else:
+                        _LOGGER.warning(
+                            "Cloud licenseStatus tanpa maxTv (user=%s) - edition/max_tv dipertahankan",
+                            resolved_user or self.current_user)
                     existing.setdefault("promo_add_tv", 0)
                     existing.setdefault("promo_add_warnet", 0)
                     LicenseManager.save(existing)
@@ -13819,6 +13847,35 @@ class AutoRentApp(ctk.CTk):
         # selesai dibuat dengan skala 1.0 (lihat _show_login).
         ctk.set_widget_scaling(UI_SCALE)
         ctk.set_window_scaling(UI_SCALE)
+        # Simpan/Muat lisensi per-akun: jangan sampai lisensi user lama
+        # tetap aktif untuk user baru yang berganti di aplikasi kasir.
+        try:
+            prev_user = getattr(self, 'current_user', None) or ""
+            main_lic = "rr_billing_license.json"
+            if prev_user and os.path.exists(main_lic):
+                # backup file lisensi user yang baru saja logout
+                try:
+                    shutil.copy2(main_lic, f"rr_billing_license.{prev_user}.bk")
+                except Exception:
+                    pass
+            # muat salinan lisensi user yang akan login (jika ada);
+            # jika tidak, kosongkan agar user baru tidak mewarisi lisensi lama
+            user_lic = f"rr_billing_license.{username}.bk"
+            if os.path.exists(user_lic):
+                try:
+                    shutil.copy2(user_lic, main_lic)
+                except Exception:
+                    pass
+            elif prev_user and prev_user != username:
+                # User baru belum pernah punya lisensi → jangan pakai punya user lama
+                for f in (main_lic,):
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         self.current_user = username
         self.current_role = role
         self.current_user_email = ""
@@ -14082,14 +14139,15 @@ class AutoRentApp(ctk.CTk):
         _EDITION_RANK = {"BULANAN": 0, "3BULAN": 1, "TAHUNAN": 2, "LIFETIME": 3}
 
         def _save_edition_from_max_tv(lic: dict, max_tv: int):
-            # maxTv tidak valid/hilang (<=0) → jangan ubah edition:
-            # LIFETIME (expiry 2099+) tetap LIFETIME, jangan downgrade ke BULANAN.
-            if max_tv >= 999999:
+            # LIFETIME ditentukan dari expiry >= 2099 atau maxTv unlimited.
+            # maxTv saja TIDAK menentukan edition (user LIFETIME bisa beli <15 TV).
+            _exp = str(lic.get("expiry", "") or "")
+            try:
+                _is_lifetime = max_tv >= 999999 or _exp[:4].isdigit() and int(_exp[:4]) >= 2099
+            except Exception:
+                _is_lifetime = max_tv >= 999999
+            if _is_lifetime:
                 _new = "LIFETIME"
-            elif max_tv >= 15:
-                _new = "TAHUNAN"
-            elif max_tv >= 10:
-                _new = "3BULAN"
             elif max_tv > 0:
                 _new = "BULANAN"
             else:
@@ -14145,7 +14203,12 @@ class AutoRentApp(ctk.CTk):
             _save_edition_from_max_tv(lic, max_tv)
             if kode_aktivasi:
                 lic["kode_aktivasi"] = kode_aktivasi
-            lic["promo_add_tv"] = promo_add_tv or lic.get("promo_add_tv", 0)
+            if max_tv and max_tv > 0:
+                # maxTv dari cloud adalah jumlah TV yang dibeli → simpan sebagai max_tv
+                lic["max_tv"] = 999999 if max_tv >= 999999 else max_tv
+                lic["promo_add_tv"] = max_tv if max_tv < 999999 else 999999
+            else:
+                lic["promo_add_tv"] = promo_add_tv or lic.get("promo_add_tv", 0)
             lic["promo_add_warnet"] = lic["promo_add_tv"]
             LicenseManager.save(lic)
             try:
@@ -14155,25 +14218,26 @@ class AutoRentApp(ctk.CTk):
                 pass
 
         try:
-            fc = FirestoreClient()
-            ls = fc.fetch_license_status_by_username(self.current_user)
+            import supabase_license as _sl
+            ls = _sl.get_license_status(self.current_user)
             if ls and ls.get("status") == "active" and ls.get("expiresAt"):
                 import datetime as _dt
                 expires = _dt.datetime.fromisoformat(ls["expiresAt"].replace("Z", "+00:00"))
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=_dt.timezone.utc)
                 if expires > _dt.datetime.now(_dt.timezone.utc):
-                    _LOGGER.info("Cloud license restore: found via licenseStatus, maxTv=%s", ls.get("maxTv"))
+                    _LOGGER.info("Cloud license restore: found via license_status, maxTv=%s", ls.get("maxTv"))
                     _write_cloud_license(ls["expiresAt"], max_tv=ls.get("maxTv") or 0, promo_add_tv=ls.get("promoAddTv") or 0)
                     # Re-check lisensi setelah restore agar UI update
                     self.after(1000, self._cek_lisensi_saat_start)
                 return
-            # Fallback: cari langsung di koleksi licenses/
+            # Fallback: cari langsung di tabel licenses
             try:
                 import datetime as _dt
-                ld = fc.get_document(f"licenses/{self.current_user}")
-                if ld:
-                    if ld.get("expiry") and not ld.get("revoked"):
+                for ld in _sl.get_licenses_by_user(self.current_user):
+                    if ld.get("revoked"):
+                        continue
+                    if ld.get("expiry"):
                         expires = _dt.datetime.fromisoformat(ld["expiry"].replace("Z", "+00:00"))
                         if expires.tzinfo is None:
                             expires = expires.replace(tzinfo=_dt.timezone.utc)
@@ -14184,22 +14248,57 @@ class AutoRentApp(ctk.CTk):
                             return
             except Exception:
                 pass
-            # Fallback: cari di invoices/
+            # Fallback: cari di Supabase invoices/
             try:
                 import datetime as _dt
-                invs = fc.query_where_equal("invoices", "username", self.current_user)
+                invs = _sl.get_invoices_confirmed(self.current_user)
                 for iv in invs:
                     if iv.get("revoked"):
                         continue
                     if iv.get("status", "").upper() == "CONFIRMED" and iv.get("kodeLisensi"):
                         kode = iv["kodeLisensi"]
                         import rr_keygen
-                        pkg_name = iv.get("package", "BULANAN").upper()
-                        pkg = rr_keygen.PAKET_INFO.get(pkg_name)
-                        if pkg:
-                            expires_at = _dt.datetime.fromtimestamp(iv.get("expiresAt", 0)).isoformat() if iv.get("expiresAt") else pkg.get("expiresAt", "")
-                            _LOGGER.info("Cloud license restore: found via invoices/")
-                            _write_cloud_license(expires_at, kode, max_tv=pkg.get("maxTv") or 0)
+                        # maxTv dari invoice (kolom jumlah_tv/maxTv) lebih dipercaya
+                        # daripada PAKET_INFO (yang sekarang per-TV: BULANAN=1).
+                        _info = {}
+                        try:
+                            from rr_license import LicenseGenerator as _LG
+                            _info = _LG.decode(kode) or {}
+                        except Exception:
+                            _info = {}
+                        try:
+                            _mt = int(iv.get("maxTv") or iv.get("jumlah_tv") or 0)
+                        except (ValueError, TypeError):
+                            _mt = 0
+                        if _mt <= 0:
+                            # Fallback: baca max_tv (byte[7]) dari kode lisensi
+                            try:
+                                _mt = int(_info.get("max_tv", 0) or 0)
+                                if _mt >= 999999:
+                                    _mt = 999999
+                            except (ValueError, TypeError):
+                                _mt = 0
+                        # Expiry: kolom invoice dulu; lalu dari kode; lalu dari paket
+                        _exp_ts = iv.get("expiresAt", 0) or iv.get("expired_at", 0)
+                        if _exp_ts:
+                            try:
+                                _exp_ts = int(_exp_ts)
+                                _expires_at = _dt.datetime.fromtimestamp(
+                                    _exp_ts / 1000 if _exp_ts > 10**10 else _exp_ts).isoformat()
+                            except (ValueError, TypeError, OSError):
+                                _expires_at = ""
+                        else:
+                            _expires_at = str(_info.get("expiry", "") or "")
+                        if not _expires_at:
+                            _pkg_name = str(iv.get("paket") or iv.get("package") or "BULANAN").upper()
+                            _pkg = rr_keygen.PAKET_INFO.get(
+                                {"1 BULAN": "BULANAN", "1 TAHUN": "TAHUNAN"}.get(_pkg_name, _pkg_name))
+                            if _pkg:
+                                _expires_at = (_dt.datetime.now()
+                                               + _dt.timedelta(days=int(_pkg.get("hari", 30) or 30))).isoformat()
+                        if _expires_at:
+                            _LOGGER.info("Cloud license restore: found via invoices/ (maxTv=%s)", _mt)
+                            _write_cloud_license(_expires_at, kode, max_tv=_mt)
                             self.after(1000, self._cek_lisensi_saat_start)
                             return
             except Exception:
@@ -15081,6 +15180,14 @@ class AutoRentApp(ctk.CTk):
         try:
             lic = LicenseManager.load()
             return LicenseManager._effective_edition(lic) == "LIFETIME"
+        except Exception:
+            return False
+
+    def _fitur_premium(self) -> bool:
+        """True saat trial aktif atau lisensi LIFETIME aktif.
+        Paket BULANAN = False (branding default)."""
+        try:
+            return is_premium_features_active(self._resolve_license_user() or "")
         except Exception:
             return False
 
@@ -19216,7 +19323,7 @@ class AutoRentApp(ctk.CTk):
         diskon_map = promo_data.get("diskonPerPaket", {}) if promo_data else {}
         add_tv_map = promo_data.get("addTvOverride", {}) if promo_data else {}
 
-        PAKET_KEY_MAP = {"Bulanan": "1 Bulan", "3 Bulan": "3 Bulan", "Tahunan": "1 Tahun", "LIFETIME": "LIFETIME"}
+        PAKET_KEY_MAP = {"Bulanan": "1 Bulan", "LIFETIME": "LIFETIME"}
 
         def _harga_after_diskon(nama, base_harga):
             if not promo_aktif:
@@ -19241,10 +19348,8 @@ class AutoRentApp(ctk.CTk):
             return f"Rp {s}"
 
         paket_base = [
-            ("Bulanan",   "Rp 99.000 / bulan",   99_000,  "5 TV + 5 PC Warnet",          C_ACCENT,  "💎"),
-            ("3 Bulan",   "Rp 299.000",           299_000, "10 TV + 10 PC Warnet",        C_GREEN,   "🚀"),
-            ("Tahunan",   "Rp 999.000 / tahun",   999_000, "15 TV + 15 PC Warnet",        C_YELLOW,  "👑"),
-            ("LIFETIME",  "Rp 2.000.000",         2_000_000, "UNLIMITED TV + PC Warnet 🏆", C_RED, "🏆"),
+            ("Bulanan",   "Rp 10.000 / TV / bulan",   10_000,  "Per Kartu TV - 30 hari",     C_ACCENT,  "💎"),
+            ("LIFETIME",  "Rp 75.000 / TV",           75_000,  "Per Kartu TV - Selamanya",   C_RED, "🏆"),
         ]
 
         paket_langganan = []
@@ -19355,6 +19460,42 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkLabel(dlg, text=f"{nama_paket}  —  {harga_str}",
                      font=("Russo One", 14, "bold"), text_color=C_TEXT).pack(pady=(0, 6))
 
+        # ── Kalkulator jumlah TV ──────────────────────────────────────────────
+        tv_state = {"qty": 1}
+        qty_frame = ctk.CTkFrame(dlg, fg_color=C_PANEL, corner_radius=10)
+        qty_frame.pack(fill="x", padx=24, pady=(0, 8))
+        qty_row = ctk.CTkFrame(qty_frame, fg_color="transparent")
+        qty_row.pack(fill="x", padx=12, pady=(8, 2))
+        ctk.CTkLabel(qty_row, text="Jumlah TV:", font=FONT_LABEL,
+                     text_color=C_MUTED, width=110, anchor="w").pack(side="left")
+        var_qty = ctk.StringVar(value="1")
+        e_qty = ctk.CTkEntry(qty_row, textvariable=var_qty, width=80, height=30,
+                             fg_color=C_BTN, text_color=C_YELLOW,
+                             border_color=C_BORDER, font=FONT_BODY)
+        e_qty.pack(side="left", padx=8)
+        lbl_total = ctk.CTkLabel(qty_row, text="", font=("Consolas", 13, "bold"),
+                                 text_color=C_GREEN)
+        lbl_total.pack(side="left", padx=8)
+
+        def _fmt_rp(n):
+            return f"Rp {n:,}".replace(",", ".")
+
+        def _parse_qty():
+            try:
+                n = int(var_qty.get().strip() or "0")
+            except ValueError:
+                n = 0
+            return max(1, min(n, 254)) if n > 0 else 1
+
+        def _update_total(*_):
+            qty = _parse_qty()
+            tv_state["qty"] = qty
+            base = harga_num if isinstance(harga_num, int) and harga_num > 0 else 0
+            lbl_total.configure(text=f"Total: {_fmt_rp(base * qty)}" if base else "")
+
+        e_qty.bind("<KeyRelease>", _update_total)
+        _update_total()
+
         qris_path = _qris_file()
         if qris_path:
             try:
@@ -19389,7 +19530,7 @@ class AutoRentApp(ctk.CTk):
         btn_upload = ctk.CTkButton(frame_btn, text="📤  Upload Bukti Pembayaran", height=38,
                                    fg_color=C_ACCENT2, hover_color="#5A0FCC",
                                    font=("Russo One", 11, "bold"),
-                                   command=lambda hn=harga_num: self._upload_bukti(dlg, nama_paket, harga_str, lbl_status, btn_upload, hn))
+                                   command=lambda hn=harga_num: self._upload_bukti(dlg, nama_paket, harga_str, lbl_status, btn_upload, hn, tv_state))
         btn_upload.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ctk.CTkButton(frame_btn, text="⏳  Bayar Nanti", width=150, height=38,
                       fg_color=C_BTN, hover_color=C_ACCENT2,
@@ -19403,10 +19544,16 @@ class AutoRentApp(ctk.CTk):
 
         dlg.geometry("500x620")
 
-    def _upload_bukti(self, dlg, nama_paket, harga_str, lbl_status, btn_upload, harga_num=None):
+    def _upload_bukti(self, dlg, nama_paket, harga_str, lbl_status, btn_upload, harga_num=None, tv_state=None):
         import base64, string, shutil
         from tkinter import filedialog
         from firestore_sync import FirestoreClient
+        qty_tv = 1
+        try:
+            qty_tv = int((tv_state or {}).get("qty", 1) or 1)
+        except (ValueError, TypeError):
+            qty_tv = 1
+        qty_tv = max(1, min(qty_tv, 254))
         path = filedialog.askopenfilename(
             parent=dlg,
             title="Pilih Bukti Pembayaran",
@@ -19454,7 +19601,9 @@ class AutoRentApp(ctk.CTk):
             "username": uname,
             "email": email,
             "paket": paket_norm,
-            "harga": harga_num,
+            "harga": harga_num * qty_tv,
+            "jumlah_tv": qty_tv,
+            "maxTv": qty_tv,
             "status": "WAITING_CONFIRMATION",
             "dibuat": int(ts.timestamp() * 1000),
             "dibayar": 0,
@@ -19464,11 +19613,27 @@ class AutoRentApp(ctk.CTk):
         }
 
         try:
-            fc = FirestoreClient()
-            ok, err_msg = fc.create_invoice(inv_id, inv_data, username=uname)
+            import supabase_license as _sl
+            ok, err_msg = _sl.create_invoice(inv_id, inv_data)
             if not ok:
                 lbl_status.configure(text=f"✖ Gagal simpan: {err_msg}", text_color=C_RED)
                 return
+            # Notifikasi ke aplikasi RR LICENSE GENERATOR (badge "Request Lisensi Baru")
+            try:
+                _sl.create_notification({
+                    "type": "license_request",
+                    "user": uname,
+                    "paket": paket_norm,
+                    "harga": harga_num * qty_tv,
+                    "jumlah_tv": qty_tv,
+                    "invoiceId": inv_id,
+                    "title": "Permintaan Lisensi Baru",
+                    "body": f"{uname} meminta lisensi {paket_norm} ({qty_tv} TV)",
+                    "sentAt": int(ts.timestamp() * 1000),
+                    "read": False,
+                })
+            except Exception:
+                _LOGGER.warning("Gagal menulis notifikasi lisensi", exc_info=True)
         except Exception as e:
             lbl_status.configure(text=f"✖ Gagal simpan: {e}", text_color=C_RED)
             return

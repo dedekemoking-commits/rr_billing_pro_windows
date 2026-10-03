@@ -14,6 +14,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _api = ApiService();
   Customer? _customer;
   List<Map<String, dynamic>> _promo = [];
+  List<Map<String, dynamic>> _activeSessions = [];
   bool _loading = true;
 
   @override
@@ -27,16 +28,65 @@ class _HomeScreenState extends State<HomeScreen> {
       final results = await Future.wait([
         _api.getProfile(),
         _api.getPromo(),
+        _api.getActiveMemberSessions(),
       ]);
       if (!mounted) return;
       setState(() {
         _customer = Customer.fromJson(results[0]);
         _promo = List<Map<String, dynamic>>.from(results[1]['promo'] ?? []);
+        _activeSessions = (results[2]['sessions'] as List? ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
         _loading = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _finishSession(Map<String, dynamic> session) async {
+    final pinCtrl = TextEditingController();
+    final pin = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF161B22),
+        title: const Text('Akhiri Sesi',
+            style: TextStyle(color: Color(0xFFF0F6FC))),
+        content: TextField(
+          controller: pinCtrl,
+          autofocus: true,
+          obscureText: true,
+          keyboardType: TextInputType.number,
+          maxLength: 6,
+          decoration: const InputDecoration(labelText: 'PIN Member'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, pinCtrl.text.trim()),
+              child: const Text('Akhiri')),
+        ],
+      ),
+    );
+    pinCtrl.dispose();
+    if (pin == null || pin.isEmpty || !mounted) return;
+    try {
+      final result = await _api.finishMemberSession(
+          memberId: session['member_id'] as String, pin: pin);
+      if (!mounted) return;
+      if (result['ok'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Sesi ${session['label']} selesai. Terpakai ${result['dipakai_menit']} menit.')));
+        await _loadData();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Gagal mengakhiri sesi: $e')));
+      }
     }
   }
 
@@ -53,7 +103,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF00E676)))
+          ? const Center(
+              child: CircularProgressIndicator(color: Color(0xFF00E676)))
           : RefreshIndicator(
               onRefresh: _loadData,
               child: ListView(
@@ -110,12 +161,77 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 20),
 
+                  // ── Kontrol sesi member ──
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF161B22),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFF21262D)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Sesi Member',
+                            style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFFF0F6FC))),
+                        const SizedBox(height: 10),
+                        if (_activeSessions.isEmpty)
+                          const Text('Belum ada sesi aktif.',
+                              style: TextStyle(color: Color(0xFF8B949E))),
+                        ..._activeSessions.map((s) => ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(Icons.tv,
+                                  color: Color(0xFF00E676)),
+                              title: Text(
+                                  '${s['nama_member']} · TV ${s['label']}',
+                                  style: const TextStyle(
+                                      color: Color(0xFFF0F6FC))),
+                              subtitle: Text(
+                                  'Sisa ${s['sisa_menit']} menit · terpakai ${s['dipakai_menit']} menit',
+                                  style: const TextStyle(
+                                      color: Color(0xFF8B949E))),
+                              trailing: SizedBox(
+                                width: 88,
+                                child: ElevatedButton(
+                                  onPressed: () => _finishSession(s),
+                                  style: ElevatedButton.styleFrom(
+                                    minimumSize: const Size(0, 40),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8),
+                                  ),
+                                  child: const Text('Akhiri'),
+                                ),
+                              ),
+                            )),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () async {
+                              await context.push('/member/mulai');
+                              _loadData();
+                            },
+                            icon: const Icon(Icons.play_arrow),
+                            label: const Text('Mulai Sesi Member'),
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF00E676),
+                                foregroundColor: Colors.black),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
                   // ── Booking Button ──
                   SizedBox(
                     height: 56,
                     child: ElevatedButton.icon(
                       onPressed: () => context.push('/booking'),
-                      icon: const Icon(Icons.calendar_today, color: Colors.black),
+                      icon:
+                          const Icon(Icons.calendar_today, color: Colors.black),
                       label: const Text('Booking Sekarang',
                           style: TextStyle(color: Colors.black)),
                       style: ElevatedButton.styleFrom(
@@ -287,7 +403,8 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Icon(icon, size: 18, color: Colors.black),
             const SizedBox(width: 6),
-            Text(label, style: const TextStyle(color: Colors.black, fontSize: 13)),
+            Text(label,
+                style: const TextStyle(color: Colors.black, fontSize: 13)),
           ],
         ),
       ),

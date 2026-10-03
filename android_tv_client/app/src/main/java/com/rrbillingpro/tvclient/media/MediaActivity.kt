@@ -331,6 +331,8 @@ class MediaActivity : Activity() {
     private fun switchToLastInput() {
         val inputId = lastTvInputId()
         if (inputId.isNotEmpty()) {
+            // Simpan sebagai port terakhir yang berhasil diakses
+            com.rrbillingpro.tvclient.util.Prefs.saveLastInput(this, inputId)
             try {
                 val uri = Uri.parse("content://android.media.tv/passthrough/" + Uri.encode(inputId))
                 val intent = Intent(Intent.ACTION_VIEW, uri)
@@ -343,8 +345,13 @@ class MediaActivity : Activity() {
         finish()
     }
 
-    /** Input terakhir yang dipakai TV; fallback ke input HDMI pertama. */
+    /** Input terakhir yang dipakai TV; fallback ke Prefs, lalu ke HDMI pertama. */
     private fun lastTvInputId(): String {
+        // 1. Coba ambil dari record internal aplikasi (paling akurat)
+        val savedInput = com.rrbillingpro.tvclient.util.Prefs.getLastInput(this)
+        if (savedInput.isNotBlank()) return savedInput
+
+        // 2. Fallback ke sistem Android
         try {
             Settings.Secure.getString(contentResolver, "tv_last_used_input_id")
                 ?.takeIf { it.isNotBlank() }?.let { return it }

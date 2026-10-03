@@ -136,7 +136,7 @@ def migrate_to_per_username():
                 if username not in trial_users:
                     trial_users[username] = {
                         "trial_start": mulai_str,
-                        "trial_days": 3,  # default
+                        "trial_days": 30,  # default baru (trial 30 hari)
                     }
                     print(f"✓ Migrated trial data for user: {username}")
                     print(f"  Trial started: {mulai_str}")
@@ -157,7 +157,7 @@ def migrate_to_per_username():
                     if mulai_str:
                         trial_users[username] = {
                             "trial_start": mulai_str,
-                            "trial_days": 3,
+                            "trial_days": 30,
                         }
                         print(f"✓ Migrated trial for existing user: {username}")
                         migrated_count += 1

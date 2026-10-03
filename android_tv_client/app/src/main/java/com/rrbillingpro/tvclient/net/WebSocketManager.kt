@@ -57,16 +57,17 @@ class WebSocketManager(
     fun stop() {
         closedByUser = true
         reconnectHandler.removeCallbacksAndMessages(null)
+        val socket = webSocket
+        webSocket = null
         try {
-            webSocket?.close(1000, "bye")
+            socket?.close(1000, "bye")
         } catch (_: Exception) {
         }
-        webSocket = null
         setConnected(false)
     }
 
     private fun connect() {
-        if (closedByUser) return
+        if (closedByUser || webSocket != null) return
         val url = "ws://$host:$port"
         val request = Request.Builder().url(url).build()
         try {
@@ -78,6 +79,10 @@ class WebSocketManager(
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(ws: WebSocket, response: Response) {
+            if (closedByUser || ws !== webSocket) {
+                try { ws.close(1000, "stale") } catch (_: Exception) {}
+                return
+            }
             attempt = 0
             setConnected(true)
             // Registrasi meja ke server kasir
@@ -90,6 +95,7 @@ class WebSocketManager(
         }
 
         override fun onMessage(ws: WebSocket, text: String) {
+            if (closedByUser || ws !== webSocket) return
             val msg = ServerMessage.fromJson(text)
             // Balas PONG utk heartbeat server kasir — tanpa ini server menganggap
             // client mati (last_seen usang) & badge CLI di kasir jadi ✗.
@@ -103,11 +109,15 @@ class WebSocketManager(
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+            if (ws !== webSocket) return
+            webSocket = null
             setConnected(false)
             scheduleReconnect()
         }
 
         override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+            if (ws !== webSocket) return
+            webSocket = null
             setConnected(false)
             scheduleReconnect()
         }
@@ -115,6 +125,7 @@ class WebSocketManager(
 
     private fun scheduleReconnect() {
         if (closedByUser) return
+        reconnectHandler.removeCallbacksAndMessages(null)
         val delayMs = minOf(10_000L, 2_000L * (1L shl minOf(attempt, 3)))
         attempt += 1
         reconnectHandler.postDelayed({ connect() }, delayMs)

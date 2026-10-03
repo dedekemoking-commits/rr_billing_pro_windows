@@ -50,6 +50,7 @@ class OverlayWidget(private val context: Context) {
                         lunasTotal: String, tagihanTotal: String, attempt: Int) {
         if (root != null) return
         val view = inflater.inflate(R.layout.overlay_view, null)
+        view.keepScreenOn = true
         tvTimer = view.findViewById(R.id.tv_timer)
         tvMeja = view.findViewById(R.id.tv_meja)
         tvRental = view.findViewById(R.id.tv_rental)

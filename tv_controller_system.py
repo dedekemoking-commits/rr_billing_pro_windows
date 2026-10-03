@@ -176,6 +176,17 @@ class AndroidTVController(TVController):
         except Exception as e:
             _LOGGER.warning("[%s] Reconnect error: %s", self.label, e)
 
+        # Fallback utama: KEYCODE_POWER (26) via ADB — responsif untuk TV
+        # seperti Changhong yang tidak merespons atpv2.
+        try:
+            ok26, out26 = await loop.run_in_executor(
+                None, lambda: adb.adb_shell(
+                    self.ip, "input keyevent 26",
+                    timeout=8, port=self.config.port))
+            _LOGGER.info("[%s] keyevent 26 (on): %s — %s", self.label, ok26, out26)
+        except Exception as e:
+            _LOGGER.warning("[%s] keyevent 26 on error: %s", self.label, e)
+
         # Kirim KEYCODE_WAKEUP untuk membangunkan layar
         try:
             ok, out = await loop.run_in_executor(
@@ -203,7 +214,7 @@ class AndroidTVController(TVController):
                 return True
 
             # Fallback: KEYCODE_POWER via ADB shell
-            for key in ("KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
+            for key in ("26", "KEYCODE_POWER", "KEYCODE_SLEEP", "223"):
                 ok_adb, out_adb = await loop.run_in_executor(
                     None, lambda k=key: adb.adb_shell(
                         self.ip, f"input keyevent {k}",

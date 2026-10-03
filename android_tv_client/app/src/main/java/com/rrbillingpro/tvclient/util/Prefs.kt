@@ -11,6 +11,19 @@ object Prefs {
     private const val KEY_AUTO_START = "auto_start"
     private const val KEY_PROMO_URL = "promo_url"
     private const val KEY_PROMO_TYPE = "promo_type"
+    private const val KEY_LOCKED = "locked"
+    private const val KEY_LOCK_MEJA = "lock_meja"
+    private const val KEY_LOCK_SEWA = "lock_sewa"
+    private const val KEY_LOCK_FNB = "lock_fnb"
+    private const val KEY_LOCK_TOTAL = "lock_total"
+    private const val KEY_LOCK_SEWA_HARGA = "lock_sewa_harga"
+    private const val KEY_LOCK_SEWA_LUNAS = "lock_sewa_lunas"
+    private const val KEY_LOCK_LUNAS_TOTAL = "lock_lunas_total"
+    private const val KEY_LOCK_TAGIHAN_TOTAL = "lock_tagihan_total"
+    private const val KEY_LOCK_LOGO = "lock_logo"
+    private const val KEY_LOCK_PROMO = "lock_promo"
+    private const val KEY_LAST_INPUT = "last_used_input"
+
 
     private fun sp(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -43,7 +56,54 @@ object Prefs {
             .apply()
     }
 
+    fun isLocked(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_LOCKED, false)
+
+    fun saveLock(ctx: Context, d: com.rrbillingpro.tvclient.model.LockDetail?) {
+        val ed = sp(ctx).edit()
+        ed.putBoolean(KEY_LOCKED, d != null)
+        if (d != null) {
+            ed.putString(KEY_LOCK_MEJA, d.meja)
+            ed.putString(KEY_LOCK_SEWA, d.sewa)
+            ed.putString(KEY_LOCK_FNB, d.fnb)
+            ed.putString(KEY_LOCK_TOTAL, d.total)
+            ed.putString(KEY_LOCK_SEWA_HARGA, d.sewaHarga)
+            ed.putBoolean(KEY_LOCK_SEWA_LUNAS, d.sewaLunas)
+            ed.putString(KEY_LOCK_LUNAS_TOTAL, d.lunasTotal)
+            ed.putString(KEY_LOCK_TAGIHAN_TOTAL, d.tagihanTotal)
+            ed.putString(KEY_LOCK_LOGO, d.logoUrl)
+            ed.putString(KEY_LOCK_PROMO, d.promoUrl)
+        }
+        ed.apply()
+    }
+
+    fun clearLock(ctx: Context) {
+        sp(ctx).edit().putBoolean(KEY_LOCKED, false).apply()
+    }
+
+    fun lockDetail(ctx: Context): com.rrbillingpro.tvclient.model.LockDetail {
+        val s = sp(ctx)
+        return com.rrbillingpro.tvclient.model.LockDetail(
+            meja = s.getString(KEY_LOCK_MEJA, "MEJA") ?: "MEJA",
+            sewa = s.getString(KEY_LOCK_SEWA, "-") ?: "-",
+            fnb = s.getString(KEY_LOCK_FNB, "Rp 0") ?: "Rp 0",
+            total = s.getString(KEY_LOCK_TOTAL, "Rp 0") ?: "Rp 0",
+            sewaHarga = s.getString(KEY_LOCK_SEWA_HARGA, "") ?: "",
+            sewaLunas = s.getBoolean(KEY_LOCK_SEWA_LUNAS, true),
+            lunasTotal = s.getString(KEY_LOCK_LUNAS_TOTAL, "") ?: "",
+            tagihanTotal = s.getString(KEY_LOCK_TAGIHAN_TOTAL, "") ?: "",
+            logoUrl = s.getString(KEY_LOCK_LOGO, "") ?: "",
+            promoUrl = s.getString(KEY_LOCK_PROMO, "") ?: "",
+        )
+    }
+
+    fun getLastInput(ctx: Context): String = sp(ctx).getString(KEY_LAST_INPUT, "") ?: ""
+
+    fun saveLastInput(ctx: Context, inputId: String) {
+        sp(ctx).edit().putString(KEY_LAST_INPUT, inputId).apply()
+    }
+
     fun saveAutoStart(ctx: Context, enabled: Boolean) {
+
         sp(ctx).edit().putBoolean(KEY_AUTO_START, enabled).apply()
     }
 }

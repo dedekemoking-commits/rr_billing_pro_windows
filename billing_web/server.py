@@ -45,7 +45,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 import main as M  # noqa: E402  (ConfigManager, fmt_rp, hitung_tarif_per_menit, verify_password, ...)
 from rr_license import LicenseManager  # noqa: E402
-WEB_APP_VERSION = "2.4.20"   # versi aplikasi Web Kasir (billing_web)
+WEB_APP_VERSION = "2.4.21"   # versi aplikasi Web Kasir (billing_web)
 from firestore_sync import FirestoreClient  # noqa: E402
 from firebase_auth import API_KEY as FIREBASE_API_KEY  # noqa: E402
 from tv_ws_hub import TvWsHub  # noqa: E402 — hub WebSocket untuk Android TV (port 8080)
@@ -81,7 +81,7 @@ except Exception:
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 8000
 
 _APPLOG_PATH = os.path.join(APP_DIR, "web_app.log")
@@ -1851,33 +1851,49 @@ class Store:
                 "saldo_menit": int(m.get("saldo_menit", 0) or 0)}, None
 
     def topup_semua_jenis(self):
-        """Daftar paket isi ulang per jenis member {VIP:[...], PS3:[...], PS4:[...]}.
-        Migrasi otomatis: jenis yang belum diatur mewarisi `member_topup` lama
-        (atau default) supaya tidak ada jenis tanpa harga."""
-        cfg_jenis = M.ConfigManager.get("member_topup_jenis", None)
-        if not isinstance(cfg_jenis, dict):
-            cfg_jenis = {}
-        legacy = M.ConfigManager.get("member_topup", None)
-        base = ([dict(p) for p in legacy]
-                if isinstance(legacy, list) and legacy
-                else [dict(p) for p in self._DEFAULT_TOPUP])
+        """Daftar paket member langsung dari tarif grup kasir."""
+        grup_tarif = M.ConfigManager.load().get("grup_tarif", {}) or {}
         out = {}
         for j in self._JENIS_MEMBER:
-            lst = cfg_jenis.get(j)
-            out[j] = ([dict(p) for p in lst]
-                      if isinstance(lst, list) and lst else [dict(p) for p in base])
+            group = self.member_group(j, grup_tarif)
+            source = grup_tarif.get(group, {}) if group else {}
+            plans = [
+                {"nama": str(nama), "menit": int(data.get("menit", 0) or 0),
+                 "harga": int(data.get("harga", 0) or 0)}
+                for nama, data in source.items()
+                if isinstance(data, dict)
+                and int(data.get("menit", 0) or 0) > 0
+                and str(nama).strip().lower() != "main bebas"
+            ]
+            if plans:
+                out[j] = plans
         return out
+
+    @staticmethod
+    def member_group(jenis, grup_tarif):
+        jenis = str(jenis or "").strip().upper()
+        candidates = ("Room VIP", "VIP") if jenis == "VIP" else (jenis,)
+        groups = {str(name).strip().lower(): name for name in grup_tarif}
+        for candidate in candidates:
+            if candidate.lower() in groups:
+                return groups[candidate.lower()]
+        return None
+
+    def member_group_for_type(self, jenis):
+        return self.member_group(
+            jenis, M.ConfigManager.load().get("grup_tarif", {}) or {})
 
     def topup_paket_list(self, jenis=""):
         jenis = str(jenis or "").strip().upper() or "VIP"
-        if jenis not in self._JENIS_MEMBER:
-            jenis = "VIP"
-        return self.topup_semua_jenis()[jenis]
+        return self.topup_semua_jenis().get(jenis, [])
 
     def save_topup_paket(self, paket_list, jenis="VIP"):
         jenis = str(jenis or "VIP").strip().upper() or "VIP"
         if jenis not in self._JENIS_MEMBER:
             return None, "Jenis harus salah satu dari: " + ", ".join(self._JENIS_MEMBER) + "."
+        group = self.member_group_for_type(jenis)
+        if not group:
+            return None, f"Grup tarif untuk member {jenis} belum tersedia."
         norm = []
         for p in paket_list or []:
             try:
@@ -1891,11 +1907,10 @@ class Store:
             norm.append({"nama": nm, "menit": menit, "harga": harga})
 
         def _mut(cfg):
-            semua = cfg.get("member_topup_jenis")
-            if not isinstance(semua, dict):
-                semua = {}
-                cfg["member_topup_jenis"] = semua
-            semua[jenis] = norm
+            cfg.setdefault("grup_tarif", {})[group] = {
+                paket["nama"]: {"harga": paket["harga"], "menit": paket["menit"]}
+                for paket in norm
+            }
             return cfg
 
         M.ConfigManager.update(_mut)
@@ -3596,6 +3611,67 @@ def _tv_sleep_runner(ip, port, label, key, alasan="", delay=2, tv_type="android"
         _LOGGER.warning("Plug off (sleep) error: %s", e)
 
 
+def _tv_wake_now(sesi):
+    """Bangunkan TV sebelum sesi dimulai dan catat hasil perintahnya."""
+    if not getattr(sesi, "ip", ""):
+        applog(f"[TV WAKE] {sesi.label} | GAGAL — IP TV belum dikonfigurasi")
+        return False
+    tv_type = _qr_type_tv(sesi.label)
+    mac = _qr_mac_tv(sesi.label)
+    try:
+        sesi.store._plug_set(sesi, True)
+    except Exception as e:
+        _LOGGER.warning("Plug on (wake) error: %s", e)
+    try:
+        if tv_type != "webos":
+            result, message = False, ""
+            port = int(getattr(sesi, "port", 0) or 0)
+            for attempt in range(1, 4):
+                try:
+                    ok, output, _ = M.ADBHelper.send_key(
+                        sesi.ip, "WAKEUP", port=port)
+                    if ok:
+                        result = True
+                        message = f"WAKEUP berhasil (percobaan {attempt})"
+                        break
+                    message = str(output)[:160]
+                except Exception as e:
+                    message = str(e)[:160]
+                time.sleep(1)
+            if not result:
+                try:
+                    ok, output, _ = M.ADBHelper.power_toggle(sesi.ip, port=port)
+                    result = bool(ok)
+                    message = ("ADB POWER fallback berhasil"
+                               if ok else f"ADB POWER fallback gagal: {str(output)[:120]}")
+                except Exception as e:
+                    message = f"ADB POWER fallback error: {str(e)[:120]}"
+        else:
+            import asyncio
+            ctrl = _get_tv_controller(
+                tv_type, sesi.ip, mac=mac,
+                port=getattr(sesi, "port", 0) or 0, label=sesi.label)
+            if ctrl is None:
+                result = False
+                message = "tv_controller_system tidak tersedia"
+            else:
+                loop = asyncio.new_event_loop()
+                try:
+                    result = bool(loop.run_until_complete(ctrl.safe_turn_on()))
+                finally:
+                    loop.close()
+                message = "Wake-on-LAN terkirim" if result else "Wake-on-LAN gagal"
+        applog(f"[TV WAKE] {sesi.label} ({sesi.ip}) | "
+               f"{'OK' if result else 'GAGAL'} — {message}")
+        _LOGGER.info("[TV WAKE] %s: %s — %s", sesi.label,
+                     "OK" if result else "GAGAL", message)
+        return result
+    except Exception as e:
+        applog(f"[TV WAKE] {sesi.label} ({sesi.ip}) | GAGAL — {e}")
+        _LOGGER.exception("[TV WAKE] %s error", sesi.label)
+        return False
+
+
 @app.route("/api/sesi/<kind>/<key>", methods=["POST"])
 @require_auth
 def api_sesi(kind, key):
@@ -4089,6 +4165,22 @@ def api_member_edit(hp):
     return jsonify(res)
 
 
+@app.route("/api/member/cloud")
+@require_auth
+def api_member_cloud():
+    owner = (STORE._resolve_license_user() or "").strip().lower()
+    rows = _SB.get_member_client().list_by_owner(owner)
+    return jsonify({"members": [{
+        "id": r.get("id"),
+        "nama": r.get("nama", ""),
+        "jenis": r.get("jenis", ""),
+        "hp": r.get("no_hp", ""),
+        "email": r.get("email", ""),
+        "saldo_menit": int(r.get("saldo_menit", 0) or 0),
+        "terakhir_aktif": r.get("updated_at", "") or r.get("created_at", ""),
+    } for r in rows]})
+
+
 @app.route("/api/member/verify", methods=["POST"])
 @require_auth
 def api_member_verify():
@@ -4281,6 +4373,8 @@ def api_settings_tarif():
         cfg[key] = groups
         M.ConfigManager.save(cfg)
         return jsonify({"ok": True})
+
+
     try:
         harga = int(data.get("harga", 0))
         menit = int(data.get("menit", 0))
@@ -6741,7 +6835,7 @@ def api_backup_reset():
     return jsonify({"ok": True})
 
 
-_PAKET_KEY_MAP = {"Bulanan": "1 Bulan", "3 Bulan": "3 Bulan", "Tahunan": "1 Tahun", "LIFETIME": "LIFETIME"}
+    _PAKET_KEY_MAP = {"Bulanan": "1 Bulan", "LIFETIME": "LIFETIME"}
 
 
 def _fmt_rp(angka):
@@ -6765,10 +6859,8 @@ def _paket_langganan():
     add_tv_map = (promo_data or {}).get("addTvOverride", {}) or {}
 
     paket_base = [
-        ("Bulanan",  "Rp 99.000 / bulan",   99_000,  "5 TV + 5 PC Warnet",          "#8b5cf6", "💎"),
-        ("3 Bulan",  "Rp 299.000",           299_000, "10 TV + 10 PC Warnet",        "#22c55e", "🚀"),
-        ("Tahunan",  "Rp 999.000 / tahun",   999_000, "15 TV + 15 PC Warnet",        "#eab308", "👑"),
-        ("LIFETIME", "Rp 2.000.000",         2_000_000, "UNLIMITED TV + PC Warnet 🏆","#ef4444", "🏆"),
+        ("Bulanan",  "Rp 10.000 / TV / bulan",   10_000,  "Per Kartu TV - 30 hari",          "#8b5cf6", "💎"),
+        ("LIFETIME", "Rp 75.000 / TV",            75_000,  "Per Kartu TV - Selamanya",        "#ef4444", "🏆"),
     ]
     pkgs = []
     for nama, harga_default, base_harga, deskripsi, warna, ico in paket_base:
@@ -7587,7 +7679,8 @@ def api_customer_fcm_token():
 @app.route("/api/customer/member/plans")
 @_require_customer_auth
 def api_customer_member_plans():
-    return jsonify({"plans": STORE.topup_semua_jenis(), "jenis": list(STORE._JENIS_MEMBER)})
+    plans = STORE.topup_semua_jenis()
+    return jsonify({"plans": plans, "jenis": list(plans)})
 
 
 # ── 14. Daftar member baru ───────────────────────────────────────────────────
@@ -7601,8 +7694,8 @@ def api_customer_register_member():
     pin   = (data.get("pin") or "").strip()
     no_hp = (data.get("no_hp") or "").strip()
 
-    if jenis not in STORE._JENIS_MEMBER:
-        return jsonify({"error": f"Jenis tidak valid. Pilih: {', '.join(STORE._JENIS_MEMBER)}"}), 400
+    if jenis not in STORE.topup_semua_jenis():
+        return jsonify({"error": f"Jenis tidak tersedia pada grup tarif kasir: {jenis}"}), 400
     if not nama:
         return jsonify({"error": "Nama wajib diisi"}), 400
     if not pin or len(pin) < 4 or len(pin) > 6 or not pin.isdigit():
@@ -7785,9 +7878,8 @@ def api_customer_member_start():
         return jsonify({"error": f"TV '{tv_label}' tidak ditemukan"}), 404
 
     # Validasi jenis member sesuai grup TV (VIP ↔ Room VIP, lainnya harus sama)
-    def _norm(s):
-        return (s or "").replace(" ", "").lower()
-    if _norm(tv_grup) != _norm(m.get("jenis", "")):
+    expected_group = STORE.member_group_for_type(m.get("jenis", ""))
+    if not expected_group or tv_grup.strip().lower() != expected_group.strip().lower():
         return jsonify({"error": f"Member {m.get('jenis','')} tidak bisa dipakai di TV grup '{tv_grup}'"}), 409
 
     sesi = STORE.get_sesi("tv", str(nomor_tv))
@@ -7836,6 +7928,10 @@ def api_customer_member_start():
     sesi._last_transaction_item = None
     m["terakhir_aktif"]    = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    _tv_wake_now(sesi)
+    applog(f"[SESI MULAI] {sesi.label} | MEMBER {sesi.member_nama} | "
+           f"sisa={sesi.sisa_waktu}s | sumber=aplikasi_member")
+
     cfg_members = M.ConfigManager.get("members", {})
     if not isinstance(cfg_members, dict):
         cfg_members = {}
@@ -7867,6 +7963,53 @@ def api_customer_member_start():
 
     return jsonify({"ok": True, "label": tv_label, "sisa_menit": saldo_menit,
                     "nama_member": m.get("nama", "")})
+
+
+@app.route("/api/customer/member/active")
+@_require_customer_auth
+def api_customer_member_active():
+    c = request._customer
+    sessions = []
+    for sesi in STORE.all_sesi():
+        if (getattr(sesi, "mode_member", False)
+                and not sesi.sesi_kosong()
+                and getattr(sesi, "member_owner", "") == c["owner"]
+                and getattr(sesi, "member_supabase_id", "") ):
+            sessions.append({
+                "member_id": sesi.member_supabase_id,
+                "nama_member": sesi.member_nama or "",
+                "label": sesi.label,
+                "sisa_menit": max(0, int(sesi.sisa_waktu or 0) // 60),
+                "dipakai_menit": int(round((getattr(sesi, "member_detik_pakai", 0) or 0) / 60)),
+            })
+    return jsonify({"sessions": sessions})
+
+
+@app.route("/api/customer/member/finish", methods=["POST"])
+@_require_customer_auth
+def api_customer_member_finish():
+    c = request._customer
+    data = request.get_json(silent=True) or {}
+    member_id = str(data.get("member_id") or "").strip()
+    pin = str(data.get("pin") or "").strip()
+    if not member_id or not pin:
+        return jsonify({"error": "member_id dan pin wajib diisi"}), 400
+    member = _SB.get_member_client().get_by_id(c["owner"], member_id)
+    if not member or not M.verify_password(pin, member.get("pin") or ""):
+        return jsonify({"error": "PIN salah"}), 401
+    sesi = next((s for s in STORE.all_sesi()
+                 if getattr(s, "mode_member", False)
+                 and not s.sesi_kosong()
+                 and getattr(s, "member_owner", "") == c["owner"]
+                 and getattr(s, "member_supabase_id", "") == member_id), None)
+    if not sesi:
+        return jsonify({"error": "Tidak ada sesi aktif untuk member ini"}), 404
+    dipakai = -(-int(getattr(sesi, "member_detik_pakai", 0) or 0) // 60)
+    snap = sesi.klik_selesai()
+    updated = _SB.get_member_client().get_by_id(c["owner"], member_id)
+    return jsonify({"ok": True, "label": sesi.label, "dipakai_menit": dipakai,
+                    "sisa_menit": int(updated.get("saldo_menit", 0) or 0),
+                    "sesi": snap})
 
 
 # ══════════════════════════════════════════════════════════════════════════════

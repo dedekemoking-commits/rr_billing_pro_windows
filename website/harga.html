@@ -37,59 +37,82 @@
     <div class="container">
       <div class="section-head">
         <h2>💎 Paket Lisensi</h2>
-        <p>Pilih sesuai kebutuhan rental Anda. Setiap paket sudah termasuk seluruh fitur.</p>
+        <p>Pilih sesuai kebutuhan rental Anda. Harga kini dihitung per unit TV.</p>
       </div>
 
       <div style="max-width:920px;margin:0 auto 28px;padding:16px 20px;border-radius:14px;background:linear-gradient(90deg,#ff7a18,#ffb347);color:#fff;text-align:center;font-weight:600;box-shadow:0 8px 24px rgba(255,122,24,.35)">
-        🎉 <b>Diskon 40% untuk lisensi LIFETIME!</b> Harga spesial <b>Rp 1.200.000</b> <s style="opacity:.85;font-weight:400">Rp 2.000.000</s> — sekali bayar, selamanya.
+        🎉 <b>Harga per Kartu TV!</b> RR PRO: Bulanan <b>Rp 10rb</b>, Lifetime <b>Rp 75rb</b> | RR LITE: Bulanan <b>Rp 5rb</b>, Lifetime <b>Rp 40rb</b>
       </div>
 
       <div class="plans">
+        <!-- RR BILLING PRO -->
+        <div class="plan hot">
+          <span class="ribbon">RR BILLING PRO</span>
+          <h3 id="pro-edition">LIFETIME</h3>
+          <div class="price" id="pro-price">Rp 75.000 <small>/ TV</small></div>
+          <div style="margin-bottom:15px; text-align:center;">
+            <label style="font-size:12px; display:block; margin-bottom:5px;">Jumlah TV:</label>
+            <input type="number" id="pro-qty" value="1" min="1" style="width:60px; padding:5px; border-radius:5px; border:1px solid #ccc; text-align:center;" oninput="updateTotal('pro')">
+          </div>
+          <ul id="pro-features">
+            <li>Seumur hidup per kartu TV</li>
+            <li>Sekali bayar</li>
+            <li>Semua fitur + update gratis</li>
+            <li>Prioritas bantuan</li>
+          </ul>
+          <a class="btn btn-primary" id="pro-btn" href="#" onclick="buyLicense('pro')" target="_blank">Beli Sekarang</a>
+        </div>
+
         <div class="plan">
+          <span class="ribbon" style="background:#555">BULANAN</span>
           <h3>BULANAN</h3>
-          <div class="price">Rp 99.000 <small>/ bulan</small></div>
+          <div class="price" id="pro-monthly-price">Rp 10.000 <small>/ TV / bln</small></div>
+          <div style="margin-bottom:15px; text-align:center;">
+            <label style="font-size:12px; display:block; margin-bottom:5px;">Jumlah TV:</label>
+            <input type="number" id="pro-monthly-qty" value="1" min="1" style="width:60px; padding:5px; border-radius:5px; border:1px solid #ccc; text-align:center;" oninput="updateTotal('pro-monthly')">
+          </div>
           <ul>
-            <li>Masa aktif 31 hari</li>
-            <li>5 perangkat TV / PC</li>
+            <li>Masa aktif 30 hari per kartu TV</li>
+            <li>1 lisensi = 1 kartu TV</li>
             <li>Semua fitur aplikasi</li>
             <li>Sinkron cloud penuh</li>
           </ul>
-          <a class="btn btn-outline" href="https://wa.me/6282180208414?text=Halo%2C%20saya%20mau%20beli%20lisensi%20RR%20Billing%20Pro%20paket%20BULANAN" target="_blank">Beli</a>
+          <a class="btn btn-outline" id="pro-monthly-btn" href="#" onclick="buyLicense('pro-monthly')" target="_blank">Beli Sekarang</a>
         </div>
-        <div class="plan hot">
-          <span class="ribbon">PALING LARIS</span>
-          <h3>3 BULAN</h3>
-          <div class="price">Rp 299.000 <small>/ 92 hari</small></div>
-          <ul>
-            <li>Masa aktif 92 hari</li>
-            <li>10 perangkat TV / PC</li>
-            <li>Semua fitur aplikasi</li>
-            <li>Prioritas bantuan</li>
-          </ul>
-          <a class="btn btn-primary" href="https://wa.me/6282180208414?text=Halo%2C%20saya%20mau%20beli%20lisensi%20RR%20Billing%20Pro%20paket%203%20BULAN" target="_blank">Beli</a>
-        </div>
+
+        <!-- RR BILLING LITE -->
         <div class="plan">
-          <h3>TAHUNAN</h3>
-          <div class="price">Rp 999.000 <small>/ tahun</small></div>
-          <ul>
-            <li>Masa aktif 365 hari</li>
-            <li>15 perangkat TV / PC</li>
-            <li>Semua fitur aplikasi</li>
-            <li>Hemat vs beli bulanan</li>
-          </ul>
-          <a class="btn btn-outline" href="https://wa.me/6282180208414?text=Halo%2C%20saya%20mau%20beli%20lisensi%20RR%20Billing%20Pro%20paket%20TAHUNAN" target="_blank">Beli</a>
-        </div>
-        <div class="plan hot">
-          <span class="ribbon">DISKON 40%</span>
+          <span class="ribbon" style="background:#2ecc71">RR BILLING LITE</span>
           <h3>LIFETIME</h3>
-          <div class="price"><s style="font-size:14px;font-weight:400;color:var(--muted)">Rp 2.000.000</s> Rp 1.200.000 <small>/ sekali bayar</small></div>
+          <div class="price" id="lite-price">Rp 40.000 <small>/ TV</small></div>
+          <div style="margin-bottom:15px; text-align:center;">
+            <label style="font-size:12px; display:block; margin-bottom:5px;">Jumlah TV:</label>
+            <input type="number" id="lite-qty" value="1" min="1" style="width:60px; padding:5px; border-radius:5px; border:1px solid #ccc; text-align:center;" oninput="updateTotal('lite')">
+          </div>
           <ul>
-            <li>Perangkat tanpa batas</li>
-            <li>Masa aktif selamanya</li>
-            <li>Semua fitur + update gratis</li>
-            <li>Prioritas bantuan penuh</li>
+            <li>Fitur Inti (Dasar)</li>
+            <li>Seumur hidup per kartu TV</li>
+            <li>Sekali bayar</li>
+            <li>Update standar</li>
           </ul>
-          <a class="btn btn-primary" href="https://wa.me/6282180208414?text=Halo%2C%20saya%20mau%20beli%20lisensi%20RR%20Billing%20Pro%20paket%20LIFETIME%20(diskon%2040%25%20-%20Rp%201.200.000)" target="_blank">Beli</a>
+          <a class="btn btn-outline" id="lite-btn" href="#" onclick="buyLicense('lite')" target="_blank">Beli Sekarang</a>
+        </div>
+
+        <div class="plan">
+          <span class="ribbon" style="background:#27ae60">BULANAN</span>
+          <h3>BULANAN</h3>
+          <div class="price" id="lite-monthly-price">Rp 5.000 <small>/ TV / bln</small></div>
+          <div style="margin-bottom:15px; text-align:center;">
+            <label style="font-size:12px; display:block; margin-bottom:5px;">Jumlah TV:</label>
+            <input type="number" id="lite-monthly-qty" value="1" min="1" style="width:60px; padding:5px; border-radius:5px; border:1px solid #ccc; text-align:center;" oninput="updateTotal('lite-monthly')">
+          </div>
+          <ul>
+            <li>Fitur Inti (Dasar)</li>
+            <li>Masa aktif 30 hari per kartu TV</li>
+            <li>Ekonomis & Ringan</li>
+            <li>Cocok untuk pemula</li>
+          </ul>
+          <a class="btn btn-outline" id="lite-monthly-btn" href="#" onclick="buyLicense('lite-monthly')" target="_blank">Beli Sekarang</a>
         </div>
       </div>
 
@@ -105,6 +128,44 @@
       </div>
     </div>
   </section>
+
+  <script>
+    const PRICES = {
+      'pro': { name: 'RR Billing Pro Lifetime', price: 75000, unit: '/ TV' },
+      'pro-monthly': { name: 'RR Billing Pro Bulanan', price: 10000, unit: '/ TV / bln' },
+      'lite': { name: 'RR Billing Lite Lifetime', price: 40000, unit: '/ TV' },
+      'lite-monthly': { name: 'RR Billing Lite Bulanan', price: 5000, unit: '/ TV / bln' }
+    };
+
+    function formatRp(num) {
+      return 'Rp ' + num.toLocaleString('id-ID');
+    }
+
+    function updateTotal(id) {
+      const qtyInput = document.getElementById(id + '-qty');
+      const qty = parseInt(qtyInput.value) || 1;
+      const priceInfo = PRICES[id];
+      const total = qty * priceInfo.price;
+      
+      document.getElementById(id + '-price').innerHTML = formatRp(total) + ' <small>' + priceInfo.unit + '</small>';
+    }
+
+    function buyLicense(id) {
+      const qtyInput = document.getElementById(id + '-qty');
+      const qty = parseInt(qtyInput.value) || 1;
+      const priceInfo = PRICES[id];
+      const total = qty * priceInfo.price;
+      
+      const text = `Halo Admin, saya ingin membeli lisensi ${priceInfo.name} untuk ${qty} TV dengan total harga ${formatRp(total)}. Mohon bantuannya.`;
+      window.open(`https://wa.me/6282180208414?text=${encodeURIComponent(text)}`, '_blank');
+      return false;
+    }
+
+    // Init all totals
+    window.onload = () => {
+      Object.keys(PRICES).forEach(id => updateTotal(id));
+    };
+  </script>
 
   <footer>
     <div class="container foot-inner">

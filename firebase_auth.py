@@ -331,7 +331,7 @@ class FirebaseAuth:
 
         webbrowser.open(f"http://localhost:{port}/")
 
-        thread.join(timeout=120)
+        thread.join(timeout=300)
         try:
             server.shutdown()
         except Exception:

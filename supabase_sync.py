@@ -868,6 +868,21 @@ class SupabaseMember:
             _LOGGER.warning("SupabaseMember.list_by_email error: %s", e)
         return []
 
+    def list_by_owner(self, owner: str, limit: int = 200) -> list:
+        url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}"
+        params = {
+            "owner": f"eq.{owner}",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            resp = self._session.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            _LOGGER.warning("SupabaseMember.list_by_owner error: %s", e)
+        return []
+
     def update_saldo(self, owner: str, member_id: str, saldo_baru: int) -> bool:
         """Set saldo_menit ke nilai baru (caller sudah hitung)."""
         url = f"{SUPABASE_URL}/rest/v1/{MEMBERS_TABLE}?id=eq.{member_id}&owner=eq.{owner}"

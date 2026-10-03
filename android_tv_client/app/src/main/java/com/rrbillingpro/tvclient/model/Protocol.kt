@@ -22,6 +22,7 @@ object Actions {
     const val SHOW_PIN = "SHOW_PIN"
     const val HIDE_PIN = "HIDE_PIN"
     const val PING = "PING"
+    const val QUERY_SCREEN_STATE = "QUERY_SCREEN_STATE"
 }
 
 data class BillLine(
@@ -66,6 +67,8 @@ data class ServerMessage(
     val overlayLastMinutes: Int,
     val logoUrl: String,
     val pin: String = "",
+    val reconnect: Boolean = false,
+    val forceStart: Boolean = false,
 ) {
     companion object {
         fun fromJson(raw: String): ServerMessage? {
@@ -126,6 +129,8 @@ data class ServerMessage(
                         overlayLastMinutes = o.optInt("overlay_last_minutes", 5),
                         logoUrl = o.optString("logo_url", ""),
                         pin = o.optString("pin", ""),
+                        reconnect = o.optBoolean("reconnect", false),
+                        forceStart = o.optBoolean("force_start", false),
                     )
                 }
             } catch (e: Exception) {

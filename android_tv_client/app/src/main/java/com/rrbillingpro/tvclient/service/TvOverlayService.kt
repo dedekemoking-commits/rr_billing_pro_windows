@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Log
 import com.rrbillingpro.tvclient.MainActivity
 import com.rrbillingpro.tvclient.R
 import com.rrbillingpro.tvclient.lockscreen.LockScreenActivity
@@ -48,7 +49,11 @@ class TvOverlayService : Service() {
     private var pinOverlay: PinOverlay? = null
     private var timer: TimerEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var screenWakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+
+    @Volatile
+    private var sessionActive = false
 
     // Health-check overlay (interval 30 dtk): jika sesi berjalan tapi overlay
     // tidak tampil (mis. addView ditolak sekali / di-hide oleh ROM ketat seperti
@@ -114,6 +119,17 @@ class TvOverlayService : Service() {
         // (mati listrik / cold boot) — URL terakhir tersimpan di Prefs.
         lastPromoUrl = Prefs.promoUrl(this)
         lastPromoType = Prefs.promoType(this)
+        // Restore status lock SETELAH reboot/TV mati-nyala: jika sebelumnya
+        // locked (belum LUNAS dari kasir), langsung kunci lagi tanpa menunggu
+        // pesan server. Saat dilogin ulang oleh server, detail diganti.
+        if (Prefs.isLocked(this)) {
+            locked = true
+            lockDetail = Prefs.lockDetail(this)
+            mainHandler.postDelayed({
+                try { LockScreenActivity.start(this@TvOverlayService, lockDetail) } catch (_: Exception) {}
+            }, 500)
+        }
+        com.rrbillingpro.tvclient.KioskAdminReceiver.allowSelfLockTask(this)
         startInForeground()
         registerScreenReceiver()
     }
@@ -164,10 +180,21 @@ class TvOverlayService : Service() {
                 override fun onReceive(context: Context, intent: Intent) {
                     when (intent.action) {
                         Intent.ACTION_SCREEN_ON -> {
+                            if (sessionActive) setSessionScreenOn(true)
                             sendScreenState(true)
-                            onScreenWake()
+                            if (locked) {
+                                // Masih terkunci (belum LUNAS/Unlock dari kasir):
+                                // pastikan layar lock balik ke depan, skip promo.
+                                wakePromoArmed = false
+                                mainHandler.postDelayed({
+                                    try { LockScreenActivity.start(this@TvOverlayService, lockDetail) } catch (_: Exception) {}
+                                }, 300)
+                            } else {
+                                onScreenWake()
+                            }
                         }
                         Intent.ACTION_SCREEN_OFF -> {
+                            releaseSessionScreen()
                             wakePromoArmed = true
                             sendScreenState(false)
                         }
@@ -203,15 +230,31 @@ class TvOverlayService : Service() {
      * tidur, sampai media baru dikirim (SHOW_MEDIA/LOCK_SCREEN mengganti arm).
      * Server TIDAK lagi mengirim ulang SHOW_MEDIA saat reconnect WS — jadi
      * tidak ada dobel putar dan tidak ada putar ulang saat blip/restart. */
+    private fun sendPowerKey() {
+        try {
+            Log.d("RRTVService", "Attempting to send keyevent 26 via shell...")
+            Runtime.getRuntime().exec("input keyevent 26")
+        } catch (e: Exception) {
+            Log.e("RRTVService", "Failed to send power key: ${e.message}")
+        }
+    }
+
     private fun onScreenWake() {
         if (!wakePromoArmed) return
         wakePromoArmed = false
-        if (lastPromoUrl.isBlank()) return
-        mainHandler.post {
-            // MediaActivity memutar media sekali lalu otomatis switch ke
-            // port/input terakhir yang dipakai (tv_last_used_input_id).
-            MediaActivity.start(this, lastPromoType, lastPromoUrl)
+        
+        // Bangunkan TV dengan Power Key (keyevent 26)
+        sendPowerKey()
+        
+        if (lastPromoUrl.isBlank()) {
+            mainHandler.postDelayed({
+                com.rrbillingpro.tvclient.media.MediaActivity.start(this, "image", "")
+            }, 1000)
+            return
         }
+        mainHandler.postDelayed({
+            MediaActivity.start(this, lastPromoType, lastPromoUrl)
+        }, 1000)
     }
 
     /** Cold boot / service mulai dengan layar sudah menyala: ACTION_SCREEN_ON
@@ -220,7 +263,14 @@ class TvOverlayService : Service() {
      * proses — restart service dalam proses yang sama tidak memutar ulang. */
     private fun maybePlayPromoOnColdBoot() {
         if (coldBootPromoDone) return
+        
+        // Kirim Power Key untuk memastikan TV bangun sepenuhnya
+        sendPowerKey()
+        
         if (lastPromoUrl.isBlank()) {
+            mainHandler.postDelayed({
+                com.rrbillingpro.tvclient.media.MediaActivity.start(this, "image", "") 
+            }, 2000)
             coldBootPromoDone = true
             return
         }
@@ -245,6 +295,32 @@ class TvOverlayService : Service() {
         w.sendRaw(json.toString())
     }
 
+    private fun releaseSessionScreen() {
+        try {
+            if (screenWakeLock?.isHeld == true) screenWakeLock?.release()
+        } catch (_: Exception) {
+        }
+        screenWakeLock = null
+    }
+
+    private fun setSessionScreenOn(active: Boolean) {
+        sessionActive = active
+        if (!active) {
+            releaseSessionScreen()
+            return
+        }
+        try {
+            if (screenWakeLock?.isHeld == true) return
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            screenWakeLock = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rrbilling:session-screen").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {
+            screenWakeLock = null
+        }
+    }
+
     // ── Keep-alive saat HDMI pindah / display off ────────────────────────────
     // Partial wake lock + wifi lock: CPU & jaringan tetap jalan walau layar TV
     // dialihkan ke input HDMI lain (proses di STB tidak mati).
@@ -265,6 +341,7 @@ class TvOverlayService : Service() {
     }
 
     private fun releaseKeepAlive() {
+        setSessionScreenOn(false)
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (_: Exception) {
@@ -274,6 +351,7 @@ class TvOverlayService : Service() {
         } catch (_: Exception) {
         }
         wakeLock = null
+        screenWakeLock = null
         wifiLock = null
     }
 
@@ -398,6 +476,7 @@ class TvOverlayService : Service() {
     }
 
     private fun dispatchServerMessage(msg: ServerMessage) {
+        Log.d("RRTVService", "action=${msg.action} sisa=${msg.sisaDetik} reconnect=${msg.reconnect}")
         when (msg.action) {
             Actions.START_TIMER -> {
                 lastTotal = msg.totalTagihan.ifBlank { "Rp 0" }
@@ -411,7 +490,8 @@ class TvOverlayService : Service() {
                 setLocked(false, null)
                 overlay?.show(msg.mejaId, msg.namaRental, msg.totalTagihan,
                     msg.lunasTotal, msg.tagihanTotal)
-                timer?.start(msg.sisaDetik)
+                timer?.start(msg.sisaDetik, msg.forceStart)
+                setSessionScreenOn(true)
                 updateTimerUi(msg.sisaDetik)
                 updateNotification("${msg.mejaId} — ${OverlayWidget.formatHms(msg.sisaDetik)}")
                 if (!OverlayPermission.isGranted(this)) {
@@ -421,13 +501,16 @@ class TvOverlayService : Service() {
 
             Actions.PAUSE_TIMER -> {
                 timer?.pause()
+                setSessionScreenOn(true)
             }
 
             Actions.RESUME_TIMER -> {
                 timer?.resume(msg.sisaDetik)
+                setSessionScreenOn(true)
             }
 
             Actions.STOP_TIMER -> {
+                setSessionScreenOn(false)
                 timer?.stop()
                 overlay?.hide()
                 setLocked(false, null)
@@ -450,10 +533,12 @@ class TvOverlayService : Service() {
                     if (msg.tagihanTotal.isNotBlank()) lastTagihan = msg.tagihanTotal
                     overlay?.updateBill(msg.totalTagihan, msg.lunasTotal, msg.tagihanTotal)
                 }
-                timer?.sync(msg.sisaDetik)
+                timer?.sync(msg.sisaDetik, msg.reconnect)
+                if (msg.sisaDetik >= 0) setSessionScreenOn(true)
             }
 
             Actions.LOCK_SCREEN -> {
+                setSessionScreenOn(true)
                 timer?.stop()
                 overlay?.hide()
                 lastPromoUrl = msg.detail?.promoUrl ?: ""
@@ -512,6 +597,11 @@ class TvOverlayService : Service() {
                 pinOverlay?.hide()
             }
 
+            Actions.QUERY_SCREEN_STATE -> {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                sendScreenState(pm.isInteractive)
+            }
+
             else -> Unit
         }
     }
@@ -551,6 +641,7 @@ class TvOverlayService : Service() {
     }
 
     private fun autoLock() {
+        Log.d("RRTVService", "timer selesaiautoLock")
         overlay?.hide()
         // Pakai detail dari server bila ada; kalau belum sempat tiba, pakai
         // total terakhir yang diketahui supaya tidak tampil "Rp 0".
@@ -566,6 +657,7 @@ class TvOverlayService : Service() {
         locked = value
         lockDetail = detail
         if (value) {
+            Prefs.saveLock(this, detail)
             if (wasLocked) {
                 // Lockscreen sudah tampil (mis. autoLock saat countdown habis):
                 // jangan buka activity baru — cukup perbarui isinya dengan
@@ -575,6 +667,7 @@ class TvOverlayService : Service() {
                 LockScreenActivity.start(this, detail)
             }
         } else {
+            Prefs.clearLock(this)
             LockScreenActivity.finishInstance()
         }
         notifyLock(value)

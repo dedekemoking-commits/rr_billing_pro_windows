@@ -19,6 +19,9 @@
     <!-- Layar tetap nyala saat Lockscreen -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Device admin (Kiosk Mode / Lock Task) -->
+    <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+
     <!-- Autostart service saat STB dinyalakan -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
@@ -80,6 +83,19 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="TV billing overlay timer and lock screen for rental PS" />
         </service>
+
+        <!-- Device admin untuk Lock Task mode (kiosk) saat lockscreen -->
+        <receiver
+            android:name=".KioskAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Autostart service saat boot -->
         <receiver

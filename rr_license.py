@@ -133,9 +133,12 @@ def _unformat_kode(kode: str) -> str:
 #   [1..4] expiry   : 4 byte  (unix timestamp hari, days since epoch)
 #   [5..6] machine  : 2 byte  (folded CRC-32 dari machine_id/username, 0x0000 = semua mesin)
 #                     ↳ Formula: (CRC-32 XOR (CRC-32 >> 16)) & 0xFFFF — reduce collision risk
-#   [7]    reserved : 1 byte  (0x00)
+#   [7]    max_tv   : 1 byte  (0= fallback tabel edition; 1-254 = jumlah TV;
+#                              255 = unlimited)
 # Signature: HMAC-SHA256(SECRET, payload)[0:4]  → 4 byte
 # Total encode: 12 byte → 20 Base32 char → kode ~28 char dengan dash
+# CATATAN: kode lama selalu punya byte[7]=0x00 → otomatis pakai tabel edition
+#          lama (BULANAN=5, 3BULAN=10, TAHUNAN=15, LIFETIME=999999).
 
 EDITION_MAP = {
     "BULANAN":   0x01,
@@ -146,12 +149,14 @@ EDITION_MAP = {
 EDITION_NAMA = {v: k for k, v in EDITION_MAP.items()}
 
 EDITION_HARI = {
-    0x01: 31,
+    0x01: 30,        # BULANAN = 30 hari
     0x03: 92,
     0x0C: 365,
-    0xFF: 1095,      # 3 tahun
+    0xFF: 36500,     # LIFETIME (≈ 100 tahun)
 }
 
+# Tabel ini dipakai HANYA untuk kode lama (byte[7]=0x00) — jangan ubah nilainya,
+# karena kode lisensi lama bergantung padanya. Kode baru memakai field max_tv.
 EDITION_TV_LIMIT = {
     0x01: 5,
     0x03: 10,
@@ -220,8 +225,14 @@ def _epoch_to_date(n: int) -> date:
     return date(2000, 1, 1) + timedelta(days=n)
 
 
-def _build_payload(edition_byte: int, expiry_days: int, machine_crc: int) -> bytes:
-    return struct.pack(">BIHB", edition_byte, expiry_days, machine_crc, 0x00)
+def _build_payload(edition_byte: int, expiry_days: int, machine_crc: int,
+                   max_tv: int = 0) -> bytes:
+    # max_tv: 0 = tabel edition (kode lama), 1-254 = jumlah TV, 255 = unlimited
+    mtv = 0 if max_tv is None else int(max_tv)
+    if mtv >= 999999:
+        mtv = 255
+    mtv = max(0, min(mtv, 255))
+    return struct.pack(">BIHB", edition_byte, expiry_days, machine_crc, mtv)
     # B=1 I=4 H=2 B=1 → total 8 byte
 
 
@@ -242,7 +253,8 @@ class LicenseGenerator:
     def generate(edition: str = "BULANAN",
                  machine_id: str = "AUTO",
                  days: int = None,
-                 start_date: date = None) -> str:
+                 start_date: date = None,
+                 max_tv: int = 0) -> str:
         """
         Buat kode lisensi baru.
 
@@ -253,6 +265,7 @@ class LicenseGenerator:
                       atau "ANY" (lisensi bisa dipakai di semua mesin — kurang aman)
         days        : override jumlah hari aktif (default dari edition)
         start_date  : tanggal mulai (default: hari ini)
+        max_tv      : jumlah TV (0 = tabel edition lama, 255 = unlimited)
 
         Returns
         -------
@@ -277,7 +290,7 @@ class LicenseGenerator:
 
         machine_crc = _crc16(mid) if mid != "000000000000" else 0x0000
 
-        payload   = _build_payload(edition_byte, expiry_days, machine_crc)
+        payload   = _build_payload(edition_byte, expiry_days, machine_crc, max_tv)
         signature = _sign(payload)
         encoded   = _to_b64(payload + signature)
         return _format_kode(encoded)
@@ -301,7 +314,7 @@ class LicenseGenerator:
         if not hmac.compare_digest(signature, expected):
             return {"valid": False, "error": "Signature tidak cocok"}
 
-        edition_byte, expiry_days, machine_crc, _ = struct.unpack(">BIHB", payload)
+        edition_byte, expiry_days, machine_crc, max_tv = struct.unpack(">BIHB", payload)
         expiry_date = _epoch_to_date(expiry_days)
 
         return {
@@ -311,6 +324,7 @@ class LicenseGenerator:
             "machine_crc":  f"{machine_crc:04X}",
             "universal":    machine_crc == 0x0000,
             "expired":      expiry_date < date.today(),
+            "max_tv":       max_tv,
         }
 
 
@@ -355,7 +369,7 @@ class LicenseValidator:
 
         # 4. Decode payload
         try:
-            edition_byte, expiry_days, machine_crc, _ = struct.unpack(">BIHB", payload)
+            edition_byte, expiry_days, machine_crc, max_tv = struct.unpack(">BIHB", payload)
         except struct.error:
             return False, "Payload kode korup.", {}
 
@@ -383,6 +397,7 @@ class LicenseValidator:
             "expiry":     expiry_date.isoformat(),
             "universal":  machine_crc == 0x0000,
             "edition_byte": edition_byte,
+            "max_tv":     max_tv,
         }
         sisa = (expiry_date - date.today()).days
         return (True,
@@ -393,7 +408,7 @@ class LicenseValidator:
 
 # ─── LICENSE MANAGER (PENGGANTI KELAS LAMA) ───────────────────────────────────
 LICENSE_FILE = "rr_billing_license.json"
-TRIAL_DAYS   = 3     # masa trial gratis: 3 hari
+TRIAL_DAYS   = 30    # masa trial gratis: 30 hari, semua fitur premium, tanpa limit TV
 
 class LicenseManager:
     """
@@ -747,6 +762,7 @@ class LicenseManager:
                 "status":         "trial",
                 "mulai":          datetime.now().isoformat(),
                 "mulai_date":     today_str,
+                "trial_days":     TRIAL_DAYS,
                 "last_seen":      today_str,
                 "aktif":          False,
                 "kode_aktivasi":  "",
@@ -770,17 +786,20 @@ class LicenseManager:
             }
 
         # ── Hitung sisa trial dari local license.json ──────────────────────────
+        # File lama tanpa 'trial_days' → anggap 3 hari (trial lama TIDAK di-reset/dipanjangkan).
         mulai_str  = lic.get("mulai_date") or lic.get("mulai", LicenseManager._today_str())[:10]
         mulai_date = date.fromisoformat(mulai_str[:10])
         hari_terpakai = (date.today() - mulai_date).days
-        sisa = TRIAL_DAYS - hari_terpakai
+        trial_days_local = int(lic.get("trial_days", 3) or 3)
+        sisa = trial_days_local - hari_terpakai
 
         # ── FALLBACK: Check trial dari config jika sisa < 0 (PC swap case) ────
         if sisa < 0 and current_user:
             trial_cfg = LicenseManager._get_trial_status_from_config(current_user)
             if trial_cfg:
                 trial_start_str = trial_cfg.get("trial_start")
-                trial_days = trial_cfg.get("trial_days", TRIAL_DAYS)
+                # trial_days lama di config dipertahankan; hilang → pakai TRIAL_DAYS
+                trial_days = int(trial_cfg.get("trial_days", TRIAL_DAYS) or TRIAL_DAYS)
                 try:
                     trial_start = date.fromisoformat(trial_start_str)
                     hari_terpakai_cfg = (date.today() - trial_start).days
@@ -858,8 +877,9 @@ class LicenseManager:
 
         edition       = info.get("edition", "BULANAN")
         edition_byte  = info.get("edition_byte", EDITION_MAP.get(edition, 0x01))
-        default_days  = EDITION_HARI.get(edition_byte, 31)
+        default_days  = EDITION_HARI.get(edition_byte, 30)
         default_limit = EDITION_TV_LIMIT.get(edition_byte, 5)
+        max_tv_raw    = int(info.get("max_tv", 0) or 0)   # byte[7]: 0=tabel, 1-254=jml, 255=unlimited
 
         # ── 2. Load lisensi lama ──────────────────────────────────────────────
         lic = LicenseManager.load()
@@ -877,8 +897,14 @@ class LicenseManager:
             new_expiry = today + timedelta(days=default_days)
 
         # ── 4. Tentukan promo_add_tv ──────────────────────────────────────────
-        if promo_add_tv is None:
+        # max_tv dari payload (0 → pakai promo/tabel lama untuk backward compat)
+        if max_tv_raw == 255:
+            promo_add_tv = 999999
+        elif max_tv_raw >= 1:
+            promo_add_tv = max_tv_raw
+        elif promo_add_tv is None:
             promo_add_tv = lic.get("promo_add_tv", default_limit)
+        # promo_add_tv explicit param → dipertahankan
 
         # ── 5. Simpan ke license.json ─────────────────────────────────────────
         lic.update({
@@ -892,21 +918,59 @@ class LicenseManager:
             "username":       username,
             "binding_mode":   binding_mode,
             "promo_add_tv":   promo_add_tv,
+            "max_tv":         max_tv_raw,
         })
         LicenseManager.save(lic)
         return True, pesan
 
+def _max_tv_from_byte(max_tv_raw: int) -> int:
+    """Terjemahkan byte[7] ke limit numerik.
+    0 → 0 (fallback tabel edition), 1-254 → jumlah TV, 255 → unlimited (999999)."""
+    max_tv_raw = int(max_tv_raw or 0)
+    if max_tv_raw == 255:
+        return 999999
+    if max_tv_raw >= 1:
+        return max_tv_raw
+    return 0
+
+
 def get_edition_limits(current_user: str = "") -> tuple:
-    """Mengembalikan (tv_limit, warnet_limit) berdasarkan edisi lisensi aktif."""
+    """Mengembalikan (tv_limit, warnet_limit) berdasarkan edisi lisensi aktif.
+
+    - Trial aktif → unlimited (999999, 999999)
+    - Lisensi aktif → pakai max_tv dari payload (byte[7]) bila ada;
+      fallback ke tabel edition lama. Warnet limit = TV limit (1:1).
+    """
     lic = LicenseManager.load()
     status = LicenseManager.get_status(current_user=current_user)
+
     if status.get("status") == "trial":
-        return 2, 2
+        return 999999, 999999
+
+    max_tv_raw = int(lic.get("max_tv", 0) or 0)
+    mtv = _max_tv_from_byte(max_tv_raw)
+    if mtv >= 1:
+        return mtv, mtv
+
+    # Kode lama / payload byte[7]=0 → tabel edition (BULANAN=5, ... LIFETIME=999999)
     edition_str = status.get("edition", "") or lic.get("edition", "")
     edition_byte = EDITION_MAP.get(edition_str, 0x01) if edition_str else 0x01
     tv_limit = EDITION_TV_LIMIT.get(edition_byte, 5)
-    warnet_limit = EDITION_WARNET_LIMIT.get(edition_byte, 5)
-    return tv_limit, warnet_limit
+    return tv_limit, tv_limit
+
+
+def is_premium_features_active(current_user: str = "") -> bool:
+    """True jika fitur premium (branding kustom: nama popup, video promo, logo PC)
+    diizinkan: trial masih aktif ATAU lisensi LIFETIME aktif.
+    Paket BULANAN → False (pakai default branding)."""
+    status = LicenseManager.get_status(current_user=current_user)
+    st = status.get("status")
+    if st == "trial":
+        return True
+    if st == "active":
+        ed = status.get("edition") or LicenseManager._effective_edition(LicenseManager.load())
+        return str(ed).upper() == "LIFETIME"
+    return False
 
 
 # ─── CLI SEDERHANA UNTUK GENERATE KODE (sisi developer) ───────────────────────
