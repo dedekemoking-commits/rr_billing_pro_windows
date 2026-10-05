@@ -1745,7 +1745,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.21"
+APP_VERSION = "2.4.22"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -2464,7 +2464,7 @@ class TimerService:
 # tidak ada, LicenseManager sudah punya fallback aman di dalamnya sendiri.
 from rr_license import (LicenseManager, LicenseGenerator, get_machine_id,
                         get_edition_limits, is_premium_features_active,
-                        _max_tv_from_byte)
+                        _max_tv_from_byte, PAKET_INFO)
 
 
 # ─── AES-256 ENCRYPTION FOR SENSITIVE CONFIG DATA ─────────────────────────
@@ -13519,33 +13519,39 @@ class AutoRentApp(ctk.CTk):
         """Jamin qr_page/call.html ada di sebelah app. Untuk EXE (frozen):
         file di-bundle via spec datas (masuk _MEIPASS) — diekstrak ke
         APP_BASE_DIR/qr_page/ sekali, supaya bisa diedit oleh kasir."""
+        return self._qr_pastikan_file_html("call.html") or ""
+
+    def _qr_pastikan_file_html(self, nama="member.html") -> str:
+        """Pastikan satu halaman QR (mis. member.html) ada di APP_BASE_DIR/qr_page.
+        Sama seperti call.html: disalin dari bundle PyInstaller bila belum ada."""
         try:
             folder = os.path.join(APP_BASE_DIR, "qr_page")
-            dst = os.path.join(folder, "call.html")
+            dst = os.path.join(folder, nama)
             if os.path.isfile(dst):
                 return dst
             src = ""
             if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", ""):
-                cand = os.path.join(sys._MEIPASS, "qr_page", "call.html")
+                cand = os.path.join(sys._MEIPASS, "qr_page", nama)
                 if os.path.isfile(cand):
                     src = cand
             if not src:
-                cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qr_page", "call.html")
+                cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qr_page", nama)
                 if os.path.isfile(cand):
                     src = cand
             if src:
                 import shutil
                 os.makedirs(folder, exist_ok=True)
                 shutil.copyfile(src, dst)
-                self._qr_log(f"qr_page/call.html diekstrak ke {dst}")
+                self._qr_log(f"qr_page/{nama} diekstrak ke {dst}")
             return dst if os.path.isfile(dst) else ""
         except Exception as e:
-            self._qr_log(f"qr_page ekstrak gagal: {e}")
+            self._qr_log(f"qr_page/{nama} ekstrak gagal: {e}")
             return ""
 
     def _start_call_poller(self):
         try:
-            self._qr_pastikan_halaman()
+            self._qr_pastikan_halaman()          # call.html (Panggil Kasir)
+            self._qr_pastikan_file_html()        # member.html (Mulai Member via QR)
         except Exception:
             pass
         # Bersihkan dokumen basi (lebih dari 24 jam) dari calls & qr_sessions —
@@ -16587,7 +16593,6 @@ class AutoRentApp(ctk.CTk):
                         continue
                     if iv.get("status", "").upper() == "CONFIRMED" and iv.get("kodeLisensi"):
                         kode = iv["kodeLisensi"]
-                        import rr_keygen
                         # maxTv dari invoice (kolom jumlah_tv/maxTv) lebih dipercaya
                         # daripada PAKET_INFO (yang sekarang per-TV: BULANAN=1).
                         _info = {}
@@ -16621,7 +16626,9 @@ class AutoRentApp(ctk.CTk):
                             _expires_at = str(_info.get("expiry", "") or "")
                         if not _expires_at:
                             _pkg_name = str(iv.get("paket") or iv.get("package") or "BULANAN").upper()
-                            _pkg = rr_keygen.PAKET_INFO.get(
+                            # PAKET_INFO dari rr_license (bukan rr_keygen) supaya modul
+                            # keygen tidak perlu ikut ter-bundle di exe user.
+                            _pkg = PAKET_INFO.get(
                                 {"1 BULAN": "BULANAN", "1 TAHUN": "TAHUNAN"}.get(_pkg_name, _pkg_name))
                             if _pkg:
                                 _expires_at = (_dt.datetime.now()

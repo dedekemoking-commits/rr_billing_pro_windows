@@ -242,6 +242,16 @@ def _sign(payload: bytes) -> bytes:
     return sig[:4]
 
 
+# ─── INFO PAKET LISENSI ──────────────────────────────────────────────────────
+# Dipindahkan dari rr_keygen.py supaya modul keygen (GUI pembuat kode lisensi +
+# password developer) TIDAK perlu ikut ter-bundle di exe yang Distribution ke
+# user. Format: {"hari": masa aktif, "maxTv": batas TV, "harga": harga paket}.
+PAKET_INFO = {
+    "BULANAN":  {"hari": 30,    "maxTv": 1, "harga": 10_000},
+    "LIFETIME": {"hari": 36500, "maxTv": 1, "harga": 75_000},
+}
+
+
 # ─── GENERATOR (SISI DEVELOPER) ───────────────────────────────────────────────
 class LicenseGenerator:
     """
