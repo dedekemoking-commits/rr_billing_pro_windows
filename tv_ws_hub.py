@@ -112,6 +112,10 @@ class TvWsHub:
         # run server) — mencegah replay SHOW_MEDIA saat reconnect blip jaringan.
         self._media_sent_once: set[str] = set()
 
+        # Overlay QR sesi member yang masih aktif per meja — dikirim ulang
+        # saat client TV reconnect, supaya QR tidak hilang saat Wi-Fi blip.
+        self._qr_aktif: dict[str, dict] = {}
+
         # Folder log debug R4 — diisi main.py (app_log_dir) supaya konsisten
         # dengan app.log; None = fallback (folder exe / folder file ini).
         self._r4_log_dir: Optional[str] = None
@@ -276,6 +280,14 @@ class TvWsHub:
                     if state:
                         for cmd in state:
                             await websocket.send(json.dumps(cmd, ensure_ascii=False))
+                    # Overlay QR sesi member yang masih aktif: kirim ulang supaya
+                    # pelanggan tetap bisa scan setelah reconnect / TV bangun.
+                    qr_cmd = getattr(self, "_qr_aktif", {}).get(meja_id)
+                    if qr_cmd:
+                        try:
+                            await websocket.send(json.dumps(qr_cmd, ensure_ascii=False))
+                        except Exception:
+                            pass
                     print(f"[TV WS HUB] Client terhubung: {meja_id} ({msg.get('nama')}) "
                           f"@{address} — {self.count_connected()} TV aktif")
                     continue
@@ -591,10 +603,46 @@ class TvWsHub:
         print(f"[TV WS HUB] HIDE_PIN {meja_id}: {'terkirim' if ok else 'GAGAL (client tidak terhubung)'}")
         return ok
 
+    def send_show_qr(self, meja_id: str, url: str, grup: str = "", sisa_detik: int = 0) -> bool:
+        """Tampilkan overlay QR sesi member di TV (kiri 1/4 QR, kanan info rental).
+        `url` = URL PNG QR yang dilayani media server kasir (port 8082/qr/...)."""
+        payload = {"action": "SHOW_QR", "meja_id": meja_id, "url": url,
+                   "grup": grup or "", "sisa_detik": int(sisa_detik or 0)}
+        ok = self._send_to(meja_id, payload)
+        if ok:
+            self._qr_aktif[meja_id] = payload
+        print(f"[TV WS HUB] SHOW_QR {meja_id}: {'terkirim' if ok else 'GAGAL (client tidak terhubung)'}")
+        return ok
+
+    def send_hide_qr(self, meja_id: str) -> bool:
+        """Sembunyikan overlay QR sesi member (sukses / batal / kedaluwarsa)."""
+        self._qr_aktif.pop(meja_id, None)
+        ok = self._send_to(meja_id, {"action": "HIDE_QR", "meja_id": meja_id})
+        print(f"[TV WS HUB] HIDE_QR {meja_id}: {'terkirim' if ok else 'GAGAL (client tidak terhubung)'}")
+        return ok
+
+    def qr_aktif(self, meja_id: str) -> bool:
+        """True bila sedang ada overlay QR member aktif untuk TV ini."""
+        return meja_id in getattr(self, "_qr_aktif", {})
+
+    def send_update_lock_bg(self, meja_id: str, bg_url: str) -> bool:
+        """Background lockscreen (MP4 loop) diganti kasir -> TV terapkan."""
+        return self._send_to(meja_id, {"action": "UPDATE_LOCK_BG", "meja_id": meja_id,
+                                       "bg_url": bg_url})
+
+    def broadcast_update_lock_bg(self, bg_url: str) -> int:
+        """Kirim UPDATE_LOCK_BG ke semua client terhubung; return jumlah terkirim."""
+        sent = 0
+        for mid in self.get_connected_ids():
+            if self.send_update_lock_bg(mid, bg_url):
+                sent += 1
+        return sent
+
     def send_update_logo(self, meja_id: str, logo_url: str) -> bool:
         """Logo lock diganti kasir -> TV yang sedang terkunci refresh tampilannya."""
         return self._send_to(meja_id, {"action": "UPDATE_LOGO", "meja_id": meja_id,
                                        "logo_url": logo_url})
+
 
     def broadcast_update_logo(self, logo_url: str) -> int:
         """Kirim UPDATE_LOGO ke semua client terhubung; return jumlah terkirim."""

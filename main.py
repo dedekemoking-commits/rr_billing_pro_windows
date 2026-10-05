@@ -1,4 +1,4 @@
-﻿import customtkinter as ctk
+import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess
@@ -1262,6 +1262,431 @@ def fmt_durasi(menit):
     if jam:
         return f"{jam} jam"
     return f"{sisa} menit"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── MEMBER (saldo waktu per grup member) ───────────────────────────────────────
+# Aturan main:
+#   1. Harga & saldo isi ulang member memakai grup "<JENIS> MEMBER"
+#      (PS3 MEMBER / PS4 MEMBER / PS5 MEMBER / VIP MEMBER).
+#   2. Setiap grup member punya saldo TERPISAH per member — jadi satu member bisa
+#      punya sisa waktu di beberapa grup sekaligus (contoh: Budi 6 jam di
+#      VIP MEMBER + 20 menit di PS3 MEMBER).
+#   3. Saldo sebuah grup hanya bisa dipakai di TV dengan grup yang sama:
+#      TV PS3  -> saldo "PS3 MEMBER"   TV PS4  -> saldo "PS4 MEMBER"
+#      TV PS5  -> saldo "PS5 MEMBER"   TV VIP  -> saldo "VIP MEMBER"
+#      TV "Reguler"/lainnya (ruang generik) -> boleh memakai saldo grup mana pun.
+#   4. Field lama "saldo_menit" tetap dipertahankan sebagai TOTAL saldo agar
+#      aplikasi kasir web lama tetap kompatibel.
+MEMBER_JENIS = ("PS3", "PS4", "PS5", "VIP")
+MEMBER_GRUP_LIST = ("PS3 MEMBER", "PS4 MEMBER", "PS5 MEMBER", "VIP MEMBER")
+_MEMBER_ALIAS = {
+    "PS3": ("PS3 MEMBER", "PS3"),
+    "PS4": ("PS4 MEMBER", "PS4"),
+    "PS5": ("PS5 MEMBER", "PS5"),
+    "VIP": ("VIP MEMBER", "ROOM VIP MEMBER", "VIP", "ROOM VIP"),
+}
+# Grup non-member hanya dipakai sebagai SUMBER paket saat grup member belum
+# dibuat — tidak boleh dipakai sebagai asal saldo member.
+_MEMBER_FALLBACK_GRUP = {
+    "PS3": ("PS3", "Reguler"),
+    "PS4": ("PS4", "Reguler"),
+    "PS5": ("PS5", "PS4", "Reguler"),
+    "VIP": ("ROOM VIP", "VIP", "Reguler"),
+}
+_PAKET_TEMPLATE_MEMBER = [
+    {"nama": "30 Menit", "menit": 30, "harga": 3000},
+    {"nama": "1 Jam", "menit": 60, "harga": 5000},
+    {"nama": "2 Jam", "menit": 120, "harga": 9000},
+    {"nama": "3 Jam", "menit": 180, "harga": 13000},
+    {"nama": "5 Jam", "menit": 300, "harga": 20000},
+]
+
+# ── Pemisahan editor harga ────────────────────────────────────────────────────
+# Kontrol Harga  -> hanya grup reguler (PS3 / PS4 / PS5 / VIP + grup Warnet).
+# Tab Member    -> harga isi ulang member, diedit lewat "Kontrol Harga Member"
+#                  pada grup "<JENIS> MEMBER". Grup member TIDAK muncul di Kontrol Harga.
+_GRUP_REGULER_UTAMA = ("PS3", "PS4", "PS5", "VIP")
+# Grup yang disembunyikan dari SEMUA pemilih grup: grup default "Reguler" (dipakai
+# sebagai fallback internal kode) dan seluruh grup member.
+_GRUP_TERSEMBUNYI = (NAMA_GRUP_DEFAULT,)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── SESI MEMBER VIA QR (pelanggan scan QR di TV, login nama + PIN sendiri) ───
+# Dokumen sesi memakai tabel Supabase `qr_sessions` yang sama dengan QR Panggil
+# Kasir, dengan penanda status berawalan "mem_" supaya tidak tertangkap poller
+# PIN biasa (desktop & web kasir). Data dikirim sebagai JSON TEXT:
+#   pin_user  -> permintaan dari halaman pelanggan {"n": nama, "p": pin}
+#   pin       -> jawaban desktop           {"nama","grup","menit","saldo","msg"}
+#   tries     -> jumlah percobaan PIN salah
+#   reason    -> kode alasan terminal
+# ═══════════════════════════════════════════════════════════════════════════════
+MEMBER_QR_AWAIT = "mem_await"          # QR sudah tampil, tunggu nama pelanggan
+MEMBER_QR_SALDO = "mem_saldo"          # nama ketemu, saldo dikirim, tunggu PIN
+MEMBER_QR_OK = "mem_ok"                # PIN benar -> sesi member jalan
+MEMBER_QR_NOTFOUND = "mem_notfound"    # ID tidak ditemukan
+MEMBER_QR_AMBIGU = "mem_ambigu"        # nama dipakai >1 member
+MEMBER_QR_BADPIN = "mem_badpin"        # PIN salah
+MEMBER_QR_NOSALDO = "mem_nosaldo"      # saldo grup TV tidak cukup
+MEMBER_QR_BUSY = "mem_busy"            # member sedang main di kartu lain
+MEMBER_QR_CANCEL = "mem_cancel"        # kasir membatalkan
+MEMBER_QR_EXPIRED = "mem_expired"      # lewat masa tunggu
+MEMBER_QR_BLOCKED = "mem_blocked"      # percobaan PIN habis
+MEMBER_QR_PREFIX = "mem_"
+MEMBER_QR_TTL_DETIK = 300              # 5 menit menanti scan + login
+MEMBER_QR_MAX_TRIES = 5
+_MEMBER_QR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def member_qr_kode_baru(n: int = 6) -> str:
+    """Kode sekali pakai untuk URL QR sesi member (tanpa karakter ambigu)."""
+    try:
+        import secrets
+        return "".join(secrets.choice(_MEMBER_QR_ALPHABET) for _ in range(n))
+    except Exception:
+        import random
+        import string
+        return "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(n))
+
+
+def member_qr_json_load(teks) -> dict:
+    """Parse payload JSON dari kolom qr_sessions (aman terhadap data rusak)."""
+    s = str(teks or "").strip()
+    if not s or not s.startswith("{"):
+        return {}
+    try:
+        data = json.loads(s)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def member_qr_json_dump(data: dict) -> str:
+    """Serialisasi payload untuk kolom qr_sessions (compact, aman ASCII)."""
+    try:
+        return json.dumps(data or {}, ensure_ascii=True, separators=(",", ":"))
+    except Exception:
+        return "{}"
+
+
+def grup_tersembunyi(nama) -> bool:
+    """True bila nama grup tidak boleh muncul di pemilih grup (Kontrol Harga / kartu TV).
+
+    True untuk grup member ('PS3 MEMBER', dst) dan grup default tersembunyi ('Reguler').
+    """
+    n = norm_grup(nama)
+    if not n or n.endswith("MEMBER"):
+        return True
+    return n in {norm_grup(g) for g in _GRUP_TERSEMBUNYI}
+
+
+def grup_reguler_dari(nama_grup) -> str:
+    """Grup reguler sekelas dari sebuah grup tersembunyi; '' bila tak perlu pindah.
+
+    'PS3 MEMBER' -> 'PS3' | 'ROOM VIP MEMBER' -> 'VIP' | 'Reguler' -> 'PS3'
+    """
+    n = norm_grup(nama_grup)
+    if not n:
+        return ""
+    if n.endswith("MEMBER"):
+        dasar = n[:-len("MEMBER")].strip()
+        if dasar in ("ROOM VIP", "VIP ROOM"):
+            return "VIP"
+        return dasar if dasar in MEMBER_JENIS else ""
+    if n in {norm_grup(g) for g in _GRUP_TERSEMBUNYI}:
+        return MEMBER_JENIS[0]
+    return ""
+
+
+def norm_grup(nama) -> str:
+    """Normalisasi nama grup: '  ps3  member ' -> 'PS3 MEMBER'."""
+    return " ".join(str(nama or "").strip().upper().split())
+
+
+def member_group_name(jenis) -> str:
+    """Nama grup member untuk jenis tertentu: 'PS3' -> 'PS3 MEMBER'."""
+    j = norm_grup(jenis)
+    if j.endswith("MEMBER"):
+        return j
+    if j in ("ROOM VIP", "VIP ROOM"):
+        j = "VIP"
+    return f"{j} MEMBER" if j else ""
+
+
+def member_group_candidates(jenis) -> list:
+    """Kandidat nama grup di config untuk jenis (urutan prioritas).
+    Hanya grup '<JENIS> MEMBER' — grup reguler TIDAK jadi asal saldo."""
+    base = member_group_name(jenis)
+    out = [base] if base else []
+    jenis_bersih = base.replace(" MEMBER", "")
+    for alias in _MEMBER_ALIAS.get(jenis_bersih, ()):
+        if norm_grup(alias).endswith("MEMBER") and alias not in out:
+            out.append(alias)
+    return out
+
+
+def resolve_member_group(grup_tarif, jenis):
+    """Cari KEY grup member yang benar-benar ada di config (case-insensitive).
+    Return None bila grup untuk jenis tsb belum dibuat."""
+    if not isinstance(grup_tarif, dict):
+        return None
+    index = {norm_grup(k): k for k in grup_tarif}
+    for cand in member_group_candidates(jenis):
+        key = index.get(norm_grup(cand))
+        if key:
+            return key
+    return None
+
+
+def member_group_for_tv(grup_tv, grup_tarif=None):
+    """Penggabungan grup TV -> grup member asal saldo.
+    'PS3' -> 'PS3 MEMBER', 'Room VIP' -> 'VIP MEMBER', 'PS3 MEMBER' -> itself.
+    None = TV generik (mis. 'Reguler'): saldo grup mana pun boleh dipakai."""
+    g = norm_grup(grup_tv)
+    if not g:
+        return None
+    if g.endswith("MEMBER"):
+        return resolve_member_group(grup_tarif, g) or g
+    for jenis in ("PS3", "PS4", "PS5", "VIP"):
+        if g == jenis or g.startswith(jenis + " ") or g == "ROOM " + jenis or g == jenis + " ROOM":
+            return resolve_member_group(grup_tarif, jenis) or f"{jenis} MEMBER"
+    return None
+
+
+def member_saldo_grup(member) -> dict:
+    """Saldo member per grup member (normalisasi key + migrasi saldo lama)."""
+    out = {}
+    if not isinstance(member, dict):
+        return out
+    raw = member.get("saldo_grup")
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                out[norm_grup(k)] = max(0, int(v or 0))
+            except Exception:
+                continue
+    if not out:
+        try:
+            legacy = int(member.get("saldo_menit", 0) or 0)
+        except Exception:
+            legacy = 0
+        if legacy > 0:
+            grup = member_group_name(member.get("jenis", "VIP")) or "VIP MEMBER"
+            out[norm_grup(grup)] = legacy
+    return {k: v for k, v in out.items() if v > 0}
+
+
+def member_saldo_total(member) -> int:
+    """Total saldo member (semua grup member)."""
+    return sum(member_saldo_grup(member).values())
+
+
+def member_saldo_teks(member) -> str:
+    """Teks saldo per grup untuk tampilan: 'VIP MEMBER: 6 jam • PS3 MEMBER: 20 menit'."""
+    grup = member_saldo_grup(member)
+    if not grup:
+        return "Belum ada saldo"
+    urut = [g for g in MEMBER_GRUP_LIST if g in grup] + \
+           [g for g in sorted(grup) if g not in MEMBER_GRUP_LIST]
+    return "  •  ".join(f"{g}: {fmt_durasi(grup[g])}" for g in urut)
+
+
+def member_cek_grup(member, grup_tv, grup_tarif=None) -> tuple:
+    """Cek apakah saldo member boleh dipakai di TV dengan grup tertentu.
+    Return (boleh: bool, grup_member: str|None, saldo_menit: int, pesan: str).
+
+    TV bergrup generik ('Reguler'/lainnya) → saldo grup mana pun boleh dipakai.
+    TV PS3/PS4/PS5/VIP → harus ada saldo pada grup member yang sama."""
+    saldo = member_saldo_grup(member)
+    if not saldo:
+        return False, None, 0, (f"Member {member.get('nama', '')} belum punya saldo waktu. "
+                                "Isi ulang dulu di tab Member.")
+    if grup_tarif is None:
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+    grup_member = member_group_for_tv(grup_tv, grup_tarif)
+    if not grup_member:                      # TV generik (Reguler/grup bebas)
+        total = sum(saldo.values())
+        return True, None, total, ""
+    grup_member = norm_grup(grup_member)
+    menit = saldo.get(grup_member, 0)
+    if menit <= 0:
+        punya = ", ".join(f"{g} {fmt_durasi(v)}" for g, v in sorted(saldo.items()))
+        return False, grup_member, 0, (
+            f"Tv grup {norm_grup(grup_tv)} memakai saldo {grup_member}. "
+            f"Member ini tidak punya saldo {grup_member} (punya: {punya}).")
+    return True, grup_member, menit, ""
+
+
+def member_grup_paket(grup_tarif, grup) -> list:
+    """Daftar paket isi ulang dari sebuah grup tarif (diformat untuk dialog)."""
+    out = []
+    if not isinstance(grup_tarif, dict) or not grup:
+        return out
+    source = grup_tarif.get(grup)
+    if not isinstance(source, dict):
+        return out
+    for nm, data in source.items():
+        if not isinstance(data, dict):
+            continue
+        try:
+            menit = int(data.get("menit", 0) or 0)
+            harga = int(data.get("harga", 0) or 0)
+        except Exception:
+            continue
+        if menit <= 0 or str(nm).strip().lower() == "main bebas":
+            continue
+        out.append({"nama": str(nm), "menit": menit, "harga": harga})
+    return out
+
+
+def member_grup_siapkan() -> dict:
+    """Pastikan 4 grup member (PS3/PS4/PS5/VIP MEMBER) ada di config.
+    Grup yang hilang dibuat dengan menyalin paket dari grup reguler sekelas,
+    atau memakai template paket bila grup reguler belum ada. Idempotent.
+    Return dict laporan: {dibuat: [...], paket: {grup: jml_paket}}."""
+    laporan = {"dibuat": [], "paket": {}}
+
+    def _mut(cfg_):
+        grup_tarif = cfg_.get("grup_tarif", {}) or {}
+        if not isinstance(grup_tarif, dict):
+            grup_tarif = {}
+        index = {norm_grup(k): k for k in grup_tarif}
+        diubah = False
+        for jenis in MEMBER_JENIS:
+            grup = member_group_name(jenis)
+            ada = index.get(norm_grup(grup))
+            if ada:
+                laporan["paket"][ada] = len(member_grup_paket(grup_tarif, ada))
+                continue
+            # ── grup member belum ada: salin paket dari grup sekelas ──
+            sumber = None
+            for alias in _MEMBER_FALLBACK_GRUP.get(jenis, ()):
+                key = index.get(norm_grup(alias))
+                if key and member_grup_paket(grup_tarif, key):
+                    sumber = key
+                    break
+            if sumber:
+                grup_tarif[grup] = {nm: {"harga": int(d.get("harga", 0) or 0),
+                                         "menit": int(d.get("menit", 0) or 0)}
+                                    for nm, d in grup_tarif[sumber].items()
+                                    if isinstance(d, dict)}
+            else:
+                grup_tarif[grup] = {p["nama"]: {"harga": p["harga"], "menit": p["menit"]}
+                                    for p in _PAKET_TEMPLATE_MEMBER}
+            index[norm_grup(grup)] = grup
+            laporan["dibuat"].append(grup)
+            laporan["paket"][grup] = len(member_grup_paket(grup_tarif, grup))
+            diubah = True
+        if diubah:
+            cfg_["grup_tarif"] = grup_tarif
+        return cfg_
+
+    try:
+        ConfigManager.update(_mut)
+    except Exception as e:
+        _LOGGER.warning("Siapkan grup member gagal: %s", e)
+    return laporan
+
+
+def member_grup_pisahkan() -> dict:
+    """Pisahkan editor harga member dari tab Kontrol Harga.
+
+    1. Kartu TV/kursi yang masih menunjuk grup tersembunyi ('Reguler' atau
+       '<JENIS> MEMBER') diarahkan ke grup reguler sekelas
+       ('Reguler' → 'PS3', 'PS4 MEMBER' → 'PS4', dst).
+    2. Grup reguler PS3/PS4/PS5/VIP dibuat bila belum ada, diisi paket standar.
+
+    Key 'Reguler' dan grup member TIDAK dihapus (tetap fallback internal & sumber
+    harga member), hanya disembunyikan dari semua pemilih grup. Idempotent.
+    Return laporan dict: {"dialihkan": [...], "dibuat": [...]}
+    """
+    laporan = {"dialihkan": [], "dibuat": []}
+
+    def _mut(cfg_):
+        grup_tarif = cfg_.get("grup_tarif", {}) or {}
+        if not isinstance(grup_tarif, dict):
+            grup_tarif = {}
+        index = {norm_grup(k): k for k in grup_tarif}
+        diubah = False
+        # 1. pastikan grup reguler utama ada
+        for jenis in MEMBER_JENIS:
+            if index.get(norm_grup(jenis)):
+                continue
+            grup_tarif[jenis] = {k: dict(v) for k, v in _PAKET_STANDAR.items()}
+            index[norm_grup(jenis)] = jenis
+            laporan["dibuat"].append(jenis)
+            diubah = True
+        # 2. arahkan kartu dari grup tersembunyi ke grup reguler sekelas
+        for list_key in ("daftar_tv", "daftar_warnet"):
+            for item in (cfg_.get(list_key, []) or []):
+                if not isinstance(item, dict):
+                    continue
+                tujuan = grup_reguler_dari(item.get("nama_grup", ""))
+                if not tujuan:
+                    continue
+                key_tujuan = index.get(norm_grup(tujuan))
+                if not key_tujuan or item.get("nama_grup") == key_tujuan:
+                    continue
+                laporan["dialihkan"].append(
+                    f"{list_key} '{item.get('nama', '')}': "
+                    f"{item.get('nama_grup')} → {key_tujuan}")
+                item["nama_grup"] = key_tujuan
+                diubah = True
+        if diubah:
+            cfg_["grup_tarif"] = grup_tarif
+        return cfg_
+
+    try:
+        ConfigManager.update(_mut)
+    except Exception as e:
+        _LOGGER.warning("Pisahkan grup member gagal: %s", e)
+    return laporan
+
+
+def grup_tarif_warnet_key(cfg) -> dict:
+    """Map grup warnet dari config (dipakai saat rapikan grup reguler)."""
+    warnet = cfg.get("grup_tarif_warnet", {}) or {}
+    return warnet if isinstance(warnet, dict) else {}
+
+
+def _grup_warnet_only(cfg, nama_grup) -> bool:
+    """True bila grup ditandai khusus warnet (tidak boleh dipakai TV)."""
+    only = cfg.get("warnet_only_groups", []) or []
+    if not isinstance(only, (list, tuple, set)):
+        return False
+    return norm_grup(nama_grup) in {norm_grup(g) for g in only}
+
+
+def member_saldo_migrasi() -> int:
+    """Migrasi data member: pastikan tiap member punya dict 'saldo_grup' dan
+    'saldo_menit' selalu sama dengan totalnya. Return jumlah member yang diubah.
+
+    Perbaikan dilakukan DI DALAM mutator (data dimuat ulang di sana) supaya
+    perubahan member lain yang tertunda tidak tertimpa."""
+    ubah = {"n": 0}
+
+    def _mut(cfg_):
+        members = cfg_.get("members", {}) or {}
+        if not isinstance(members, dict):
+            return cfg_
+        for _hp, m in members.items():
+            if not isinstance(m, dict):
+                continue
+            grup = member_saldo_grup(m)
+            if (m.get("saldo_grup") != grup
+                    or int(m.get("saldo_menit", 0) or 0) != sum(grup.values())):
+                m["saldo_grup"] = grup
+                m["saldo_menit"] = sum(grup.values())
+                ubah["n"] += 1
+        cfg_["members"] = members
+        return cfg_
+
+    try:
+        ConfigManager.update(_mut)
+    except Exception as e:
+        _LOGGER.warning("Migrasi saldo member gagal: %s", e)
+        return 0
+    return ubah["n"]
+
 
 LOGO_RESIZE_MAX = 768  # 3x dari ukuran lama (256px) — logo di header web booking
 
@@ -2697,7 +3122,7 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         super().__init__(master)
         self.on_save = on_save
         self.title("Pengaturan Overlay TV")
-        self.geometry("480x480")
+        self.geometry("480x700")
         self.configure(fg_color=C_BG)
         self.resizable(False, False)
         self.transient(master)
@@ -2759,6 +3184,25 @@ class DialogOverlaySetting(ctk.CTkToplevel):
             cb.pack(side="left", padx=4)
         self._on_webos_toast_toggle()
 
+        # ── Section: Gambar bergerak (background lockscreen) ──
+        sep2 = ctk.CTkFrame(self, height=2, fg_color=C_MUTED)
+        sep2.pack(fill="x", padx=20, pady=(8, 6))
+        ctk.CTkLabel(self, text="—— BACKGROUND LOCKSCREEN ——", font=FONT_SUB,
+                     text_color=C_MUTED).pack(pady=(2, 2))
+        ctk.CTkLabel(self, text="Video MP4 loop untuk latar lockscreen & layar QR member.",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
+        self.lbl_bg_gerak_status = ctk.CTkLabel(self, text="", font=FONT_SMALL,
+                                                 text_color=C_MUTED)
+        self.lbl_bg_gerak_status.pack(pady=(0, 4))
+        ctk.CTkButton(self, text="🎬  Upload Gambar Bergerak (MP4)", height=34,
+                      fg_color=C_BTN, hover_color=C_ACCENT2, border_width=1,
+                      border_color=C_ACCENT2, font=FONT_SUB, text_color=C_ACCENT2,
+                      command=self._upload_bg_gerak).pack(padx=30, fill="x")
+        ctk.CTkButton(self, text="📤  Kirim Ulang ke TV", height=30,
+                      fg_color=C_BTN, hover_color=C_ACCENT2, border_width=1,
+                      border_color=C_GREEN, font=FONT_SMALL, text_color=C_GREEN,
+                      command=self._kirim_ulang_bg).pack(padx=30, pady=(6, 0), fill="x")
+
         # ── Buttons ──
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=30, pady=(10, 14))
@@ -2768,6 +3212,36 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="✅ Simpan", width=130, height=36,
                       fg_color=C_GREEN, hover_color="#2F7A2F",
                       font=FONT_SUB, command=self._save).pack(side="right", padx=(0, 8))
+
+    def _upload_bg_gerak(self):
+        master = self.master
+        fn = getattr(master, "_buka_upload_bg_gerak", None)
+        if callable(fn):
+            fn(parent=self)
+            self._refresh_status_bg()
+
+    def _kirim_ulang_bg(self):
+        master = self.master
+        fn = getattr(master, "_broadcast_bg_gerak", None)
+        if callable(fn):
+            n = fn()
+            self._refresh_status_bg()
+            messagebox.showinfo(
+                "Background Lockscreen",
+                (f"✅ Terkirim ke {n} TV yang terhubung."
+                 if n else "⚠️ Belum ada file MP4, atau tidak ada TV yang terhubung."),
+                parent=self)
+
+    def _refresh_status_bg(self):
+        master = self.master
+        url = ""
+        fn = getattr(master, "_tv_bg_gerak_url", None)
+        if callable(fn):
+            url = fn()
+        if self.lbl_bg_gerak_status:
+            self.lbl_bg_gerak_status.configure(
+                text=("✅ File aktif: bg_gerak.mp4" if url else "Belum ada video."),
+                text_color=C_GREEN if url else C_MUTED)
 
     def _on_mode_change(self):
         state = "normal" if self.mode_var.get() == "last_minutes" else "disabled"
@@ -4990,34 +5464,56 @@ class LoginPage(ctk.CTkFrame):
                     return
                 ent["count"] = int(ent.get("count", 0) or 0) + 1
                 limits[email] = ent
+                # Bersihkan sisa counter dengan key kosong (artifak login tanpa email)
+                limits.pop("", None)
                 cfg = ConfigManager.load()
                 cfg["google_login_limits"] = limits
                 ConfigManager.save(cfg)
             except Exception:
                 pass
             nama = auth.get_display_name() or ""
+            email = str(email or "").strip()
+            if not email or "@" not in email:
+                # Tanpa email, akun tidak bisa dicocokkan ke lisensi cloud dan
+                # username akan jadi acak ('_3'). Hentikan, jangan lanjut.
+                _LOGGER.error("Login Google tanpa email — dibatalkan (displayName=%r)", nama)
+                self.lbl_status.configure(
+                    text="✖ Email akun tidak terbaca dari Google.\n"
+                         "Coba login ulang, atau pakai form username/password.",
+                    text_color=C_RED)
+                return
             self.lbl_status.configure(text="✅ Login Google berhasil", text_color=C_GREEN)
             uname = self._find_username_by_email(email)
-            # Cari username Firestore yang punya licenseStatus aktif untuk email ini
+            # Cari username Firestore yang punya licenseStatus aktif untuk email ini.
+            # PENTING: pilih yang MASA LISENSI TERPANJANG — satu email bisa punya
+            # beberapa doc (mis. 'dedekemoking' 1 bulan + 'rrbillingpro' LIFETIME).
+            # Kalau ambil yang pertama, user bisa dapat lisensi yang sudah kedaluwarsa.
             try:
                 fc = FirestoreClient()
-                fb_results = fc.query_where_equal("billingps_users", "email", email)
-                for r in fb_results:
-                    fb_uname = r.get("_id", "")
-                    # Bersihkan prefix _user_
-                    if fb_uname.startswith("_user_"):
-                        bare = fb_uname[6:]
-                        bare_doc = fc.get_user_doc(bare)
-                        if bare_doc and bare_doc.get("licenseStatus", {}).get("status") == "active":
-                            _LOGGER.info("Using Firestore username '%s' (active licenseStatus)", bare)
-                            uname = bare
-                            break
-                    elif r.get("licenseStatus", {}).get("status") == "active":
-                        _LOGGER.info("Using Firestore username '%s' (active licenseStatus)", fb_uname)
-                        uname = fb_uname
-                        break
-            except Exception:
-                pass
+                best = None  # (expiry_ordinal, nama)
+                for r in fc.query_where_equal("billingps_users", "email", email):
+                    rid = str(r.get("_id") or "")
+                    bare = rid[6:] if rid.startswith("_user_") else rid
+                    lsd = r.get("licenseStatus") or {}
+                    if not isinstance(lsd, dict) or lsd.get("status") != "active":
+                        continue
+                    exp = str(lsd.get("expiresAt") or lsd.get("expired") or "")
+                    try:
+                        ordinal = int(exp[:10].replace("-", "") or 0)
+                    except Exception:
+                        ordinal = 0
+                    if not bare:
+                        continue
+                    if best is None or ordinal > best[0]:
+                        best = (ordinal, bare, exp)
+                if best and (uname is None or uname != best[1]):
+                    # Jangan menimpa akun lokal yang SUDAH punya email & lisensi
+                    # lebih panjang; tapi doc cloud ber-expiry terpanjang lebih diandalkan.
+                    uname = best[1]
+                    _LOGGER.info("Pakai username Firestore '%s' (licenseStatus aktif, s/d %s)",
+                                 uname, best[2] or "-")
+            except Exception as e:
+                _LOGGER.warning("Pencocokan username Lisensi gagal: %s", e)
             if not uname:
                 try:
                     fc = FirestoreClient()
@@ -5043,8 +5539,26 @@ class LoginPage(ctk.CTkFrame):
                             users[uname] = {"password_enc": hash_password("google_" + uname),
                                             "role": "admin", "email": email}
                             cfg["users"] = users
+                        else:
+                            # Akun lama dibuat tanpa email → lengkapi sekarang
+                            # supaya login berikutnya & pencocokan lisensi benar.
+                            d = users.get(uname)
+                            if isinstance(d, dict) and not str(d.get("email") or "").strip():
+                                d["email"] = email
                         return cfg
                     ConfigManager.update(_provisi)
+                except Exception:
+                    pass
+                # Pastikan akun lokal & cloud konsisten soal email
+                try:
+                    profil = ConfigManager.get("profil_rental", {}) or {}
+                    if isinstance(profil, dict) and not str((profil.get(uname) or {}).get("email") or "").strip():
+                        profil[uname] = dict(profil.get(uname) or {}, email=email)
+
+                        def _simpan_profil(cfg):
+                            cfg["profil_rental"] = profil
+                            return cfg
+                        ConfigManager.update(_simpan_profil)
                 except Exception:
                     pass
                 self.on_login_success(uname, "admin")
@@ -5054,7 +5568,13 @@ class LoginPage(ctk.CTkFrame):
             self.lbl_status.configure(text=f"✖ {msg}", text_color=C_RED)
 
     def _show_register_google_dialog(self, email, nama_google):
-        username_auto = email.split("@")[0].replace(".", "_").replace("-", "_").lower()
+        email = str(email or "").strip()
+        username_auto = email.split("@")[0].replace(".", "_").replace("-", "_").lower() if email else ""
+        if not is_valid_username(username_auto):
+            # Nama tampilan/email tidak bisa jadi username valid → pakai basis
+            # dari nama rental agar username tetap masuk akal (bukan '_1', '_2', ...).
+            dasar = "".join(ch for ch in (nama_google or "rental").lower() if ch.isalnum() or ch in "_-")[:16]
+            username_auto = dasar if is_valid_username(dasar) else "rental"
         dlg = ctk.CTkToplevel(self.winfo_toplevel())
         dlg.title("📝  Lengkapi Data Rental")
         dlg.geometry("420x440")
@@ -5110,6 +5630,11 @@ class LoginPage(ctk.CTkFrame):
 
         def _save():
             try:
+                if not (email and "@" in email):
+                    lbl_error.configure(
+                        text="✖ Email Google tidak terbaca — daftar tidak bisa dilanjutkan.\n"
+                             "Tutup dialog ini lalu coba login Google lagi.", text_color=C_RED)
+                    return
                 rental = entry_rental.get().strip()
                 alamat = entry_alamat.get("1.0", "end").strip()
                 wa = entry_wa.get().strip()
@@ -5166,15 +5691,24 @@ class LoginPage(ctk.CTkFrame):
                       command=dlg.destroy).pack(fill="x", pady=(6, 0))
 
     def _find_username_by_email(self, email: str):
+        """Cari username lokal yang terdaftar dengan email ini.
+
+        Email kosong TIDAK pernah dicocokkan — kalau tidak, akun dengan email
+        kosong akan saling tertukar dan menyalin lisensi antar akun."""
         try:
-            profil = ConfigManager.get("profil_rental", {})
-            for uname, p in profil.items():
-                if isinstance(p, dict) and p.get("email", "").lower() == email.lower():
-                    return uname
-            users = ConfigManager.get("users", {})
-            for uname, u in users.items():
-                if isinstance(u, dict) and u.get("email", "").lower() == email.lower():
-                    return uname
+            email = str(email or "").strip()
+            if not email or "@" not in email:
+                return None
+            profil = ConfigManager.get("profil_rental", {}) or {}
+            if isinstance(profil, dict):
+                for uname, p in profil.items():
+                    if isinstance(p, dict) and str(p.get("email", "")).strip().lower() == email.lower():
+                        return uname
+            users = ConfigManager.get("users", {}) or {}
+            if isinstance(users, dict):
+                for uname, u in users.items():
+                    if isinstance(u, dict) and str(u.get("email", "")).strip().lower() == email.lower():
+                        return uname
         except Exception:
             pass
         return None
@@ -5383,6 +5917,284 @@ class DialogGantiIP(ctk.CTkToplevel):
             return
         self.on_confirm(new_ip, 0)
         self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  KONTROL HARGA MEMBER — editor paket isi ulang per grup member
+# ═══════════════════════════════════════════════════════════════════════════════
+class DialogHargaMember(ctk.CTkToplevel):
+    """Kontrol Harga Member — ubah paket isi ulang untuk satu grup member.
+
+    Terpisah dari tab Kontrol Harga: grup '<JENIS> MEMBER' tidak muncul di sana,
+    harganya diatur lewat dialog ini dari chip grup di tab Member.
+    Satu baris = nama paket / harga / jam / menit. Tarif per menit 0 (sudah lunas
+    saat isi ulang).
+    """
+
+    def __init__(self, master, grup, app=None):
+        super().__init__(master)
+        self.grup = norm_grup(grup)
+        self.app = app
+        self.rows = []
+        self.title(f"Kontrol Harga Member — {self.grup}")
+        self.geometry("760x560")
+        self.minsize(660, 480)
+        self.configure(fg_color=C_BG)
+        self.transient(master)
+        self.grab_set()
+
+        self.paket_lama = {}
+        cfg = ConfigManager.load()
+        grup_tarif = cfg.get("grup_tarif", {}) or {}
+        key = resolve_member_group(grup_tarif, self.grup) or self.grup
+        sumber = grup_tarif.get(key) or {}
+        if isinstance(sumber, dict):
+            self.paket_lama = {str(n): dict(v) for n, v in sumber.items()
+                               if isinstance(v, dict)}
+
+        hdr = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10)
+        hdr.pack(fill="x", padx=14, pady=(14, 8))
+        ctk.CTkLabel(hdr, text=f"💳  KONTROL HARGA MEMBER — {self.grup}",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(anchor="w", padx=14, pady=(10, 2))
+        ctk.CTkLabel(hdr, text=(
+            "Harga ini dipakai saat ISI ULANG waktu member di tab Member.\n"
+            f"Saldo grup '{self.grup}' hanya bisa dipakai di TV/Kursi bergrup "
+            f"{self.grup.replace(' MEMBER', '')}."),
+            font=FONT_SMALL, text_color=C_MUTED, justify="left").pack(anchor="w", padx=14, pady=(0, 6))
+        ctk.CTkLabel(self, text=self._info_saldo_grup(), font=FONT_SMALL,
+                     text_color=C_GREEN, justify="left").pack(anchor="w", padx=18, pady=(0, 6))
+
+        # ── header kolom ──
+        kol = ctk.CTkFrame(self, fg_color="transparent")
+        kol.pack(fill="x", padx=18)
+        for teks, w in (("Nama Paket", 230), ("Harga (Rp)", 130), ("Jam", 60),
+                        ("Menit", 70), ("", 40)):
+            ctk.CTkLabel(kol, text=teks, width=w, anchor="w", font=FONT_SMALL,
+                         text_color=C_MUTED).pack(side="left", padx=(0, 6))
+
+        body = ctk.CTkScrollableFrame(self, fg_color=C_CARD, corner_radius=10)
+        body.pack(fill="both", expand=True, padx=14, pady=8)
+        self.body = body
+
+        paket_urut = [(n, v) for n, v in self.paket_lama.items()
+                      if norm_grup(n) != "MAIN BEBAS"]
+        if not paket_urut:
+            paket_urut = [(p["nama"], {"harga": p["harga"], "menit": p["menit"]})
+                          for p in _PAKET_TEMPLATE_MEMBER]
+        for nama, val in paket_urut:
+            self._tambah_baris(nama, val.get("harga", 0), val.get("menit", 0))
+
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.pack(fill="x", padx=14, pady=(0, 14))
+        ctk.CTkButton(foot, text="➕ Tambah Baris", width=150, height=36,
+                      fg_color=C_BTN, border_width=1, border_color=C_GREEN,
+                      font=FONT_SMALL, text_color=C_GREEN,
+                      command=lambda: self._tambah_baris("", 0, 60)
+                      ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(foot, text="💾 Simpan Harga Member", width=230, height=36,
+                      fg_color=C_ACCENT2, hover_color="#5A0FCC",
+                      font=("Russo One", 11, "bold"), text_color="#FFFFFF",
+                      command=self._simpan).pack(side="right", padx=6)
+        ctk.CTkButton(foot, text="Batal", width=110, height=36, fg_color=C_BTN,
+                      font=FONT_SMALL, text_color=C_TEXT,
+                      command=self.destroy).pack(side="right", padx=6)
+
+    # ── info ──
+    def _info_saldo_grup(self):
+        members = ConfigManager.get("members", {}) or {}
+        jumlah, total = 0, 0
+        if isinstance(members, dict):
+            for m in members.values():
+                if isinstance(m, dict):
+                    menit = member_saldo_grup(m).get(self.grup, 0)
+                    if menit > 0:
+                        jumlah += 1
+                        total += menit
+        if jumlah:
+            return (f"👥 {jumlah} member punya saldo {self.grup} — total "
+                    f"{fmt_durasi(total)} belum terpakai")
+        return f"👥 Belum ada member dengan saldo {self.grup}"
+
+    # ── baris ──
+    def _tambah_baris(self, nama="", harga=0, menit=0):
+        jam, sisa = divmod(max(0, int(menit or 0)), 60)
+        row = ctk.CTkFrame(self.body, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=3)
+        var = {
+            "nama": tk.StringVar(value=str(nama)),
+            "harga": tk.StringVar(value=str(int(harga or 0))),
+            "jam": tk.StringVar(value=str(jam)),
+            "menit": tk.StringVar(value=str(sisa)),
+        }
+        ctk.CTkEntry(row, textvariable=var["nama"], width=230, height=32,
+                     fg_color=C_BTN, text_color=C_TEXT, font=FONT_SMALL
+                     ).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(row, textvariable=var["harga"], width=130, height=32,
+                     fg_color=C_BTN, text_color=C_ACCENT, font=FONT_SMALL
+                     ).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(row, textvariable=var["jam"], width=60, height=32,
+                     fg_color=C_BTN, text_color=C_YELLOW, font=FONT_SMALL
+                     ).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(row, textvariable=var["menit"], width=70, height=32,
+                     fg_color=C_BTN, text_color=C_YELLOW, font=FONT_SMALL
+                     ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(row, text="X", width=40, height=32, fg_color=C_BTN,
+                      font=FONT_SMALL, text_color=C_RED,
+                      command=lambda: self._hapus_baris(row)).pack(side="left")
+        self.rows.append((row, var))
+
+    def _hapus_baris(self, row):
+        if len(self.rows) <= 1:
+            messagebox.showwarning("Tidak Bisa Dihapus",
+                                   "Minimal harus ada satu paket isi ulang.", parent=self)
+            return
+        self.rows = [(r, v) for r, v in self.rows if r is not row]
+        row.destroy()
+
+    # ── simpan ──
+    def _kumpulkan(self):
+        paket, seen = {}, set()
+        for row, var in self.rows:
+            nama = str(var["nama"].get()).strip()
+            if not nama:
+                continue
+            kunci = norm_grup(nama)
+            if kunci in seen:
+                return None, f"Nama paket duplikat: '{nama}'"
+            harga_s = str(var["harga"].get()).strip() or "0"
+            if not harga_s.isdigit():
+                return None, f"Harga paket '{nama}' harus angka (tanpa titik/koma)."
+            jam_s = str(var["jam"].get()).strip() or "0"
+            menit_s = str(var["menit"].get()).strip() or "0"
+            if not jam_s.isdigit() or not menit_s.isdigit():
+                return None, f"Jam/menit paket '{nama}' harus angka."
+            total = int(jam_s) * 60 + int(menit_s)
+            if total <= 0:
+                return None, f"Durasi paket '{nama}' harus lebih dari 0."
+            seen.add(kunci)
+            paket[nama] = {"harga": int(harga_s), "menit": total}
+        if not paket:
+            return None, "Isi minimal satu paket isi ulang."
+        return paket, ""
+
+    def _simpan(self):
+        paket, error = self._kumpulkan()
+        if error:
+            messagebox.showwarning("Input Belum Lengkap", error, parent=self)
+            return
+        key = self.grup
+        if "Main Bebas" in self.paket_lama:
+            paket["Main Bebas"] = dict(self.paket_lama["Main Bebas"])
+
+        def _mut(cfg):
+            gt = cfg.get("grup_tarif", {}) or {}
+            if not isinstance(gt, dict):
+                gt = {}
+            gt[key] = {n: dict(v) for n, v in paket.items()}
+            cfg["grup_tarif"] = gt
+            return cfg
+
+        try:
+            ConfigManager.update(_mut)
+        except Exception as e:
+            _LOGGER.warning("Simpan harga member gagal: %s", e)
+            messagebox.showerror("Gagal Menyimpan", f"Error: {e}", parent=self)
+            return
+
+        # Muat ulang tarif di memori + segarkan chip di tab Member
+        if self.app is not None:
+            try:
+                cfg = ConfigManager.load()
+                self.app.grup_tarif = self.app._migrasi_grup_tarif(
+                    cfg.get("grup_tarif"), cfg.get("paket_main"))
+                self.app._member_refresh_grup_chips()
+            except Exception as e:
+                _LOGGER.warning("Refresh tarif setelah simpan harga member: %s", e)
+        try:
+            AuditLogger.log(action="member_harga_simpan",
+                            username=getattr(self.app, "current_user", "?"),
+                            status="success",
+                            details={"grup": key, "paket": list(paket.keys())})
+        except Exception:
+            pass
+        messagebox.showinfo(
+            "✅ Harga Member Tersimpan",
+            f"{len(paket) - (1 if 'Main Bebas' in paket else 0)} paket isi ulang untuk "
+            f"grup '{key}' berhasil disimpan.", parent=self)
+        self.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DIALOG PIN MEMBER — konfirmasi pemilik sesi saat mulai dari saldo member
+# ═══════════════════════════════════════════════════════════════════════════════
+class DialogPinMember(ctk.CTkToplevel):
+    """Popup konfirmasi PIN member sebelum memulai sesi dari saldo waktu.
+
+    Dipakai kasir di dialog paket kartu TV/warnet: setelah memilih member,
+    kasir wajib memasukkan PIN 4-6 digit milik member tersebut sebagai bukti
+    bahwa yang memang pemilik akun yang sedang bermain."""
+
+    def __init__(self, master, member, on_submit, judul="Konfirmasi PIN Member"):
+        super().__init__(master)
+        self.on_submit = on_submit
+        self.member = member
+        self.title(judul)
+        self.geometry("430x330")
+        self.configure(fg_color=C_BG)
+        self.transient(master)
+        self.resizable(False, False)
+        self.grab_set()
+
+        ctk.CTkLabel(self, text="🔐  KONFIRMASI PIN MEMBER",
+                     font=("Russo One", 14, "bold"), text_color=C_YELLOW).pack(pady=(16, 2))
+        ctk.CTkLabel(self, text="PIN membuktikan bahwa yang bermain adalah pemilik member.",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 8))
+
+        info = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=8)
+        info.pack(fill="x", padx=26)
+        ctk.CTkLabel(info, text=str(member.get("nama", "")),
+                     font=FONT_BODY, text_color=C_TEXT).pack(anchor="w", padx=12, pady=(8, 0))
+        ctk.CTkLabel(info, text=f"No HP: {member.get('hp', '')}   •   "
+                                f"Jenis: {str(member.get('jenis', 'VIP')).upper()}",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.lbl_saldo = ctk.CTkLabel(self, text=str(member.get("info_saldo", "") or ""),
+                                      font=("Consolas", 11),
+                                      text_color=C_GREEN, justify="left")
+        self.lbl_saldo.pack(pady=(6, 2))
+
+        self.entry_pin = ctk.CTkEntry(self, placeholder_text="PIN 4–6 digit",
+                                      font=("Consolas", 20, "bold"), width=200, height=44,
+                                      fg_color=C_BTN, text_color=C_GREEN, border_color=C_GREEN,
+                                      justify="center", show="●")
+        self.entry_pin.pack(pady=4)
+        self.entry_pin.bind("<Return>", lambda e: self._submit())
+        self.lbl_error = ctk.CTkLabel(self, text="", font=("Consolas", 10), text_color=C_RED)
+        self.lbl_error.pack(pady=(0, 4))
+
+        btn_f = ctk.CTkFrame(self, fg_color="transparent")
+        btn_f.pack(pady=6)
+        ctk.CTkButton(btn_f, text="✅  MULAI SESI", width=140, fg_color=C_ACCENT2,
+                      hover_color=C_ACCENT, font=("Russo One", 11, "bold"),
+                      command=self._submit).pack(side="left", padx=6)
+        ctk.CTkButton(btn_f, text="Batal", width=110, fg_color="transparent",
+                      border_width=1, border_color=C_BORDER, text_color=C_MUTED,
+                      command=self.destroy).pack(side="left", padx=6)
+
+        self.after(80, self.entry_pin.focus_set)
+        center_window(self, master, width=430, height=330)
+
+    def set_error(self, pesan):
+        self.lbl_error.configure(text=pesan)
+        self.entry_pin.delete(0, "end")
+        self.entry_pin.focus_set()
+
+    def _submit(self):
+        pin = self.entry_pin.get().strip()
+        if not (pin.isdigit() and 4 <= len(pin) <= 6):
+            self.set_error("PIN harus 4–6 digit angka.")
+            return
+        self.on_submit(pin)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5777,6 +6589,9 @@ class DialogPaket(ctk.CTkToplevel):
         if not getattr(self, 'for_warnet', False):
             self._build_booking_section(scroll)
 
+        # ── MEMBER (saldo waktu) — di bawah PAKET BOOKING ──
+        self._build_member_section(scroll)
+
         # DISCOUNT section
         diskon_frame = ctk.CTkFrame(self, fg_color="transparent")
         diskon_frame.pack(fill="x", padx=12, pady=(4, 2))
@@ -6013,6 +6828,263 @@ class DialogPaket(ctk.CTkToplevel):
             self.on_confirm(paket, harga, menit, pesanan, total_pesanan,
                             0, "nominal", False, booking=b)
             self.destroy()
+
+    # ── MEMBER: daftar member + pencarian + popup PIN ─────────────────────
+    def _build_member_section(self, parent):
+        """Section member (di bawah PAKET BOOKING): semua member terdaftar
+        bisa dicari, dan memilih member memunculkan popup konfirmasi PIN."""
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        grup_member = member_group_for_tv(self.nama_grup, grup_tarif)
+        grup_tv_norm = norm_grup(self.nama_grup)
+        self._mem_grup_member = norm_grup(grup_member) if grup_member else None
+        self._mem_cache = []
+        self._mem_pilih = None
+
+        box = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=8)
+        box.pack(fill="x", padx=8, pady=(6, 4))
+        hdr = ctk.CTkFrame(box, fg_color="transparent")
+        hdr.pack(fill="x", padx=10, pady=(8, 0))
+        ctk.CTkLabel(hdr, text="👤  MEMBER  —  main dari saldo waktu",
+                     font=("Russo One", 10, "bold"), text_color=C_ACCENT2).pack(side="left")
+        ctk.CTkButton(hdr, text="📷  Via QR", width=110, height=26,
+                      fg_color=C_BTN, hover_color="#1E1E4A", text_color=C_YELLOW,
+                      font=("Russo One", 9, "bold"),
+                      command=self._member_mulai_via_qr).pack(side="right")
+        ket = (f"Saldo untuk TV ini: grup {self._mem_grup_member}" if self._mem_grup_member
+               else f"TV grup {grup_tv_norm} (ruang generik) — semua saldo member bisa dipakai")
+        ctk.CTkLabel(box, text=ket, font=("Courier New", 9), text_color=C_MUTED,
+                     wraplength=420, justify="left").pack(anchor="w", padx=10, pady=(0, 6))
+
+        # Pencarian member (biar kasir cepat saat member banyak)
+        cari_row = ctk.CTkFrame(box, fg_color="transparent")
+        cari_row.pack(fill="x", padx=10, pady=(0, 4))
+        self.mem_cari_var = ctk.StringVar(value="")
+        self.mem_cari_entry = ctk.CTkEntry(cari_row, textvariable=self.mem_cari_var,
+                                           placeholder_text="Cari nama / no HP member…",
+                                           font=FONT_SMALL, height=30,
+                                           fg_color=C_BTN, text_color=C_TEXT)
+        self.mem_cari_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.mem_cari_entry.bind("<KeyRelease>", lambda e: self._render_member_daftar())
+        ctk.CTkButton(cari_row, text="🔍 Cari", width=70, height=30, font=("Courier New", 9, "bold"),
+                      fg_color=C_BTN, hover_color="#1E1E4A", text_color=C_TEXT,
+                      command=lambda: self._render_member_daftar()).pack(side="left", padx=2)
+        ctk.CTkButton(cari_row, text="✖", width=32, height=30, font=("Courier New", 10, "bold"),
+                      fg_color=C_BTN, hover_color=C_RED, text_color=C_MUTED,
+                      command=self._member_reset_cari).pack(side="left", padx=(2, 0))
+
+        self.mem_daftar = ctk.CTkScrollableFrame(box, height=132, fg_color=C_PANEL,
+                                                 corner_radius=6, label_text="")
+        self.mem_daftar.pack(fill="x", padx=8, pady=(0, 6))
+        self._muat_member_cache()
+        self._render_member_daftar()
+
+    def _member_reset_cari(self):
+        self.mem_cari_var.set("")
+        self._render_member_daftar()
+
+    def _muat_member_cache(self):
+        """Muat daftar member + saldo per grup (dari config, sudah dimigrasi)."""
+        try:
+            member_grup_siapkan()
+            member_saldo_migrasi()
+        except Exception as e:
+            _LOGGER.warning("Migrasi member gagal: %s", e)
+        members = ConfigManager.get("members", {}) or {}
+        cache = []
+        if isinstance(members, dict):
+            for hp, m in members.items():
+                if not isinstance(m, dict):
+                    continue
+                cache.append({
+                    "hp": str(hp),
+                    "nama": str(m.get("nama", "")),
+                    "jenis": str(m.get("jenis", "VIP") or "VIP").strip().upper(),
+                    "pin_enc": str(m.get("pin_enc", "") or ""),
+                    "saldo_grup": member_saldo_grup(m),
+                    "saldo_menit": member_saldo_total(m),
+                })
+        cache.sort(key=lambda x: x["nama"].lower())
+        self._mem_cache = cache
+
+    def _render_member_daftar(self):
+        """Tampilkan semua member terdaftar (difilter kata kunci pencarian)."""
+        for w in self.mem_daftar.winfo_children():
+            w.destroy()
+        q = (self.mem_cari_var.get() or "").strip().lower()
+        if not self._mem_cache:
+            ctk.CTkLabel(self.mem_daftar, text="Belum ada member terdaftar.\n"
+                                                "Daftarkan di sidebar: Member → ➕ Daftar Member.",
+                         font=FONT_SMALL, text_color=C_MUTED, justify="center").pack(pady=14)
+            return
+        hasil = [m for m in self._mem_cache
+                 if not q or q in m["nama"].lower() or q in m["hp"]
+                 or any(q in g.lower() for g in m["saldo_grup"])]
+        if not hasil:
+            ctk.CTkLabel(self.mem_daftar, text="Member tidak ditemukan.",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(pady=12)
+            return
+        for m in hasil:
+            self._build_member_row(m)
+        ctk.CTkLabel(self.mem_daftar, text=f"{len(hasil)} dari {len(self._mem_cache)} member",
+                     font=("Courier New", 8), text_color=C_MUTED).pack(anchor="e", padx=6, pady=(0, 2))
+
+    def _build_member_row(self, m):
+        """Satu baris member: nama, saldo, dan status 'boleh main di TV ini'.
+
+        CATATAN: jangan menaruh CTkLabel di DALAM CTkButton — CTkButton sudah
+        memakai geometry manager grid untuk isiannya, sehingga pack di dalamnya
+        melempar TclError ("cannot use geometry manager pack ... which already
+        has slaves managed by grid") dan seluruh daftar member gagal dibuat.
+        Karena itu area klik memakai CTkFrame + bind (<Button-1>)."""
+        grup = self._mem_grup_member
+        if grup:
+            menit = m["saldo_grup"].get(grup, 0)
+            boleh = menit > 0
+        else:
+            menit = m["saldo_menit"]
+            boleh = m["saldo_menit"] > 0
+        row = ctk.CTkFrame(self.mem_daftar, fg_color="transparent")
+        row.pack(fill="x", padx=2, pady=1)
+
+        teks_saldo = (fmt_durasi(menit) if menit > 0 else "0 menit")
+        sub_saldo = (f"{grup}: {teks_saldo}" if grup else f"total: {teks_saldo}")
+
+        # Area info + penanda status (klik = mulai sesi member ini)
+        info = ctk.CTkFrame(row, fg_color="transparent", corner_radius=6)
+        info.pack(side="left", fill="x", expand=True)
+        lbl_nama = ctk.CTkLabel(info, text=f"{m['nama']}  •  {m['jenis']}",
+                                font=("Courier New", 10, "bold"), text_color=C_TEXT, anchor="w")
+        lbl_nama.pack(anchor="w", padx=(8, 0))
+        lbl_saldo = ctk.CTkLabel(info, text=f"· {m['hp']} · {sub_saldo}",
+                                 font=("Courier New", 9), text_color=C_MUTED, anchor="w")
+        lbl_saldo.pack(anchor="w", padx=(8, 0))
+        if not boleh:
+            lbl_status = ctk.CTkLabel(row, text="✖ tidak ada saldo grup ini",
+                                      font=("Courier New", 8), text_color=C_RED, anchor="e")
+        else:
+            lbl_status = ctk.CTkLabel(row, text="▶ mulai sesi",
+                                      font=("Courier New", 8), text_color=C_GREEN, anchor="e")
+        lbl_status.pack(side="right", padx=(0, 10))
+
+        def _klik(_evt=None, mm=m):
+            self._member_mulai_dialog(mm)
+            return "break"          # CTkLabel menghentikan event -> jangan sampai ke frame
+
+        for w in (lbl_nama, lbl_saldo, lbl_status):
+            w.bind("<Button-1>", _klik)
+        info.bind("<Button-1>", lambda e: _klik(e))
+        for w in (info, lbl_nama, lbl_saldo, lbl_status):
+            try:
+                w.configure(cursor="hand2")
+            except Exception:
+                pass
+
+    def _member_mulai_via_qr(self):
+        """Kasir memilih mode QR: pelanggan scan di TV & login sendiri (nama + PIN)."""
+        try:
+            kartu = self.app._qr_cari_kartu(self.tv_label)
+        except Exception:
+            kartu = None
+        if kartu is None:
+            messagebox.showwarning("Kartu Tidak Ada",
+                                   f"Kartu '{self.tv_label}' tidak ditemukan.",
+                                   parent=self)
+            return
+        if not kartu.sesi_kosong():
+            messagebox.showwarning("Kartu Dipakai",
+                                   f"Kartu '{self.tv_label}' sedang dipakai sesi lain.",
+                                   parent=self)
+            return
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        try:
+            self.app._member_qr_mulai(kartu)
+        except Exception as e:
+            messagebox.showerror("Member QR", f"Gagal memulai sesi QR: {e}", parent=self.app)
+
+    def _member_mulai_dialog(self, m):
+        """Pilih member → validasi saldo sesuai grup TV → popup PIN konfirmasi."""
+        try:
+            kartu = self.app._qr_cari_kartu(self.tv_label)
+        except Exception:
+            kartu = None
+        if kartu is not None and not kartu.sesi_kosong():
+            messagebox.showwarning("Kartu Dipakai",
+                                   f"Kartu '{self.tv_label}' sedang dipakai sesi lain.\n"
+                                   "Selesaikan sesi dulu sebelum memakai saldo member.",
+                                   parent=self)
+            return
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        boleh, grup_member, menit, pesan = member_cek_grup(m, self.nama_grup, grup_tarif)
+        if not boleh:
+            messagebox.showwarning("⚠ Saldo Tidak Cukup", pesan, parent=self)
+            return
+        # Snapshot member + saldo saat popup dibuka (bisa berubah di luar)
+        info_saldo = (f"Saldo {norm_grup(grup_member)}: {fmt_durasi(menit)}" if grup_member
+                      else f"Saldo total: {fmt_durasi(menit)}")
+        m_view = dict(m)
+        m_view["info_saldo"] = info_saldo
+        DialogPinMember(self, m_view,
+                        lambda pin: self._member_mulai_verifikasi(m, grup_member, menit, pin)
+                        ).lift()
+
+    def _member_mulai_verifikasi(self, m, grup_member, menit, pin):
+        """Verifikasi PIN member lalu mulai sesi dari saldo grup tsb."""
+        member_grup_siapkan()
+        member_saldo_migrasi()
+        members = ConfigManager.get("members", {}) or {}
+        asli = members.get(m["hp"]) if isinstance(members, dict) else None
+        if not isinstance(asli, dict):
+            messagebox.showerror("Member Tidak Ditemukan", "Data member tidak ditemukan.",
+                                 parent=self)
+            return
+        if not verify_password(pin, asli.get("pin_enc", "") or ""):
+            self._pin_dialog_error("✖ PIN salah — member tidak bisa dikonfirmasi.")
+            return
+        # Cek ulang saldo (bisa saja berubah sejak popup dibuka)
+        saldo = member_saldo_grup(asli)
+        if grup_member:
+            menit_terpakai = saldo.get(norm_grup(grup_member), 0)
+        else:
+            menit_terpakai = sum(saldo.values())
+        if menit_terpakai <= 0:
+            self._pin_dialog_error("⚠ Saldo member sudah habis / grup tidak sesuai.")
+            return
+        # Cegah member yang sama sedang main di kartu lain
+        label_main = self.app._member_label_aktif(m["hp"], kecuali=self.tv_label)
+        if label_main:
+            self._pin_dialog_error(f"⛔ {m['nama']} sedang aktif bermain di {label_main}.")
+            return
+        self._pin_dialog_tutup()
+        member_nm = str(asli.get("nama", m["nama"]))
+        # Mulai sesi: harga paket 0 (waktu sudah dibayar lewat isi ulang).
+        # Sisa waktu = saldo grup; pemotongan terjadi saat sesi selesai.
+        self.on_confirm(f"MEMBER · {member_nm}", 0, int(menit_terpakai), {}, 0,
+                        0, "nominal", True, member={
+                            "hp": m["hp"], "nama": member_nm,
+                            "grup": norm_grup(grup_member) if grup_member else "",
+                            "jenis": m["jenis"]})
+        self.destroy()
+
+    def _pin_dialog_error(self, pesan):
+        for w in self.winfo_children():
+            try:
+                if isinstance(w, DialogPinMember) and w.winfo_exists():
+                    w.set_error(pesan)
+                    return
+            except Exception:
+                continue
+        messagebox.showwarning("Member", pesan, parent=self)
+
+    def _pin_dialog_tutup(self):
+        for w in self.winfo_children():
+            try:
+                if isinstance(w, DialogPinMember) and w.winfo_exists():
+                    w.destroy()
+            except Exception:
+                continue
 
     def _build_menu_content(self, parent, menu_dict):
         """Build menu items (makanan/minuman) inside collapsible group."""
@@ -7252,6 +8324,19 @@ class KartuTV(tk.Canvas):
         self._last_riwayat_idx = None
         self._last_cloud_id = None
         self.paid          = True   # status pembayaran sesi (sinkron ke riwayat)
+        # ── Mode member (saldo waktu per grup) ──
+        self.mode_member   = False
+        self.member_hp     = None
+        self.member_nama   = None
+        self.member_grup   = None
+        self.member_detik_pakai = 0
+        self.sisa_waktu_awal = 0
+        # ── Pending sesi member via QR (menunggu scan + login pelanggan) ──
+        self.pending_member_qr = False
+        self.member_qr_sid = None
+        self.member_qr_kode = ""
+        self.member_qr_sisa = 0
+        self._member_qr_job = None
         self._warning_blink_on = False
         self._timer_paused = False
         self._timer_was_running = False
@@ -7369,6 +8454,11 @@ class KartuTV(tk.Canvas):
             text=f"\u21bb {self.nama_grup}", font=("Courier New", 11, "bold"),
             fill=C_ACCENT2, anchor="w", tags="lbl_grup")
         self.tag_bind("lbl_grup", "<Button-1>", lambda e: self._buka_ganti_grup())
+        # Grup member yang dipakai TV ini — saldo member harus grup yang sama
+        self._ids['lbl_grup_member'] = self.create_text(
+            8, y+26, text=self._teks_grup_member(), font=("Courier New", 9),
+            fill=C_MUTED, anchor="w", tags="lbl_grup_member")
+        y += 14
         self._ids['lbl_paket'] = self.create_text(W-8, y+10,
             text="\u2014", font=("Courier New", 10),
             fill=C_MUTED, anchor="e", tags="lbl_paket")
@@ -7427,18 +8517,25 @@ class KartuTV(tk.Canvas):
 
         # ── Button Row 3 (Media promosi + QR) ─────────────────────────────
         r3y = y
-        n_btn3, btn_cols3 = 4, 4
+        n_btn3, btn_cols3 = 5, 5
         avail3 = W - 8 - (n_btn3 - 1) * gap_b
         bw3 = avail3 // btn_cols3
+        bx3 = 4
         btn_defs3 = [
             ("video", "🎬 VIDEO", "black", "white", self._buka_media_video),
             ("gambar", "🖼 GAMBAR", "black", "white", self._buka_media_gambar),
             ("logo", "🖼 LOGO", "black", "white", self._ganti_logo_kartu),
             ("qr", "📱 QR", "black", "white", self._buka_qr_kartu),
+            ("memberqr", "👤 MEMBER", "black", "white", self._member_qr_mulai_dari_kartu),
         ]
         for i, (key, txt, bg, fg, cmd) in enumerate(btn_defs3):
-            self._draw_canvas_btn(key, bx + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 9, "bold"), cmd)
+            self._draw_canvas_btn(key, bx3 + i*(bw3+gap_b), r3y, bw3, btn_h, txt, bg, fg, ("Russo One", 9, "bold"), cmd)
         y = r3y + btn_h + 6
+        # Banner pending member-QR (hanya tampil saat kasir menunggu scan)
+        self._ids['lbl_member_qr'] = self.create_text(
+            W//2, y+8, text="", font=("Courier New", 10, "bold"),
+            fill=C_YELLOW, anchor="center", tags="lbl_member_qr")
+        y += 18
         # Kasir tidak boleh mengubah IP TV / media promosi / logo
         if self.role != "admin":
             for k in ("ip", "video", "gambar", "logo"):
@@ -7516,6 +8613,10 @@ class KartuTV(tk.Canvas):
     # ── Util status sesi ─────────────────────────────────────────────────────
     def sesi_kosong(self):
         return self.paket_aktif is None
+
+    def _member_qr_aktif(self):
+        """True bila kartu sedang menunggu scan QR member (blokir mulai sesi lain)."""
+        return bool(getattr(self, "pending_member_qr", False))
 
     # ── Status pembayaran (sinkron ke riwayat) ───────────────────────────────
     def _update_paid_badge(self):
@@ -7984,6 +9085,15 @@ class KartuTV(tk.Canvas):
         self._simpan_daftar_tv()
         self.after(1000, self._online_checker)
 
+    def _teks_grup_member(self):
+        """Teks '👤 Grup: PS3 MEMBER' di kartu TV — penggabungan grup TV → grup member.
+        TV bergrup generik (Reguler/dll) tidak dikunci ke satu grup member:
+        saldo member dari grup mana pun boleh dipakai."""
+        grup = member_group_for_tv(getattr(self, "nama_grup", ""))
+        if not grup:
+            return "👤 Grup: Reguler (semua saldo member)"
+        return f"👤 Grup: {norm_grup(grup)}"
+
     def _buka_ganti_grup(self):
         if not self.sesi_kosong():
             messagebox.showwarning("⚠ Sesi Sedang Berjalan",
@@ -8013,6 +9123,9 @@ class KartuTV(tk.Canvas):
             grup_baru = var_grup.get()
             self.nama_grup = grup_baru
             self.itemconfig(self._ids['lbl_grup'], text=f"\U0001f3f7 {grup_baru}")
+            gid_member = self._ids.get('lbl_grup_member')
+            if gid_member:
+                self.itemconfig(gid_member, text=self._teks_grup_member())
             if self.on_ganti_grup:
                 self.on_ganti_grup(self, grup_baru)
             dlg.destroy()
@@ -8551,6 +9664,105 @@ class KartuTV(tk.Canvas):
         path = app._qr_simpan_png(self.label_tv, url)
         DialogQrKartu(app, self.label_tv, url, path)
 
+    # ── MODE MEMBER: Mulai via QR (pelanggan scan & login sendiri) ───────────
+    def _member_qr_mulai_dari_kartu(self):
+        """Tombol 👤 MEMBER di kartu: mulai sesi member lewat QR, atau batalkan
+        bila sedang menunggu scan."""
+        app = self.winfo_toplevel()
+        if getattr(self, "pending_member_qr", False):
+            self._member_qr_batal()
+            return
+        app._member_qr_mulai(self)
+
+    def _member_qr_state_awal(self):
+        self.pending_member_qr = False
+        self.member_qr_sid = None
+        self.member_qr_kode = ""
+        self.member_qr_sisa = 0
+        self._member_qr_job = None
+
+    def _member_qr_banner(self, teks="", warna=None):
+        """Tampilkan/hilangkan banner pending member-QR di kartu."""
+        lbl = (self._ids or {}).get('lbl_member_qr')
+        if lbl is None:
+            return
+        try:
+            self.itemconfig(lbl, text=teks, fill=(warna or C_YELLOW))
+        except Exception:
+            pass
+
+    def _member_qr_tampil(self, kode, sisa_detik):
+        """Mode pending: banner kuning + tombol MEMBER jadi BATAL."""
+        self.member_qr_sisa = int(sisa_detik or 0)
+        sisa = max(0, int(sisa_detik or 0))
+        teks_sisa = "%d:%02d" % (sisa // 60, sisa % 60) if sisa else "0:00"
+        self._member_qr_banner(f"⏳ Menunggu QR member…  {teks_sisa}  ·  tekan 👤 MEMBER untuk BATAL")
+        rect = (self._ids or {}).get('btn_memberqr')
+        txt = (self._ids or {}).get('btn_memberqr_txt')
+        if rect is not None:
+            self.itemconfig(rect, fill=C_RED)
+        if txt is not None:
+            self.itemconfig(txt, text="✕ BATAL", fill="white")
+
+    def _member_qr_selesai(self, pesan="", tidur=False):
+        """Keluar dari mode pending (sukses/batal/kedaluwarsa).
+
+        tidur=True -> TV juga dimatikan (dipakai saat 5 menit habis tanpa scan
+        atau kasir menekan BATAL); sukses sesi TIDAK menyentuhNyala TV."""
+        if self._member_qr_job:
+            try:
+                self.after_cancel(self._member_qr_job)
+            except Exception:
+                pass
+            self._member_qr_job = None
+        self.pending_member_qr = False
+        self.member_qr_sid = None
+        self._member_qr_banner("")
+        rect = (self._ids or {}).get('btn_memberqr')
+        txt = (self._ids or {}).get('btn_memberqr_txt')
+        if rect is not None:
+            self.itemconfig(rect, fill=C_BTN)
+        if txt is not None:
+            self.itemconfig(txt, text="👤 MEMBER")
+        app = self.winfo_toplevel()
+        if app is not None:
+            app._member_qr_hide_tv(self.label_tv)
+            if tidur:
+                app._member_qr_tidur_tv(self)
+
+    def _member_qr_batal(self, tanya=True):
+        """Kasir membatalkan sesi member-QR yang sedang menunggu."""
+        if not getattr(self, "pending_member_qr", False):
+            return
+        if tanya and not messagebox.askyesno(
+                "Batalkan Sesi Member",
+                f"Batalkan sesi member QR di {self.label_tv}?",
+                parent=self.winfo_toplevel()):
+            return
+        app = self.winfo_toplevel()
+        if app is not None:
+            app._member_qr_hapus_doc(self.member_qr_sid, MEMBER_QR_CANCEL)
+        # Kasir batalkan: TV juga tidur lagi (tidak menggantung menyala).
+        self._member_qr_selesai(tidur=True)
+
+    def _member_qr_kirim_ulang(self):
+        """Kirim ulang overlay QR ke TV (TV sempat restart / reinstall)."""
+        if not getattr(self, "pending_member_qr", False):
+            return
+        app = self.winfo_toplevel()
+        kode = self.member_qr_kode
+        url = app._member_qr_url(self.label_tv, kode, self.nama_grup)
+        png = app._member_qr_png(self, url)
+        hub = getattr(app, "tv_ws_hub", None)
+        ok = bool(hub) and hub.send_show_qr(self.label_tv, png or url,
+                                            norm_grup(self.nama_grup or ""))
+        if not ok:
+            messagebox.showinfo(
+                "Kirim Ulang QR",
+                f"TV '{self.label_tv}' belum terhubung ke server kasir.\n"
+                "Pastikan client TV aktif, lalu coba lagi.",
+                parent=self.winfo_toplevel())
+
     def _refresh_client_badge(self):
         try:
             if not self.winfo_exists():
@@ -8594,6 +9806,171 @@ class KartuTV(tk.Canvas):
             "✅ Install APK" if ok else "❌ Install Gagal",
             f"TV: {self.label_tv}\n{pesan}",
             parent=self.winfo_toplevel()))
+
+    # ── MODE MEMBER: mulai sesi dari saldo waktu per grup ──────────────────
+    def _mulai_sesi_member(self, member, menit_saldo):
+        """Mulai sesi dari saldo member. Waktu sudah dibayar saat isi ulang,
+        jadi harga paket 0; saldo baru dipotong saat sesi selesai."""
+        app = self.winfo_toplevel()
+        member = member or {}
+        self.mode_member = True
+        self.member_hp = member.get("hp") or None
+        self.member_nama = member.get("nama") or ""
+        self.member_grup = (norm_grup(member.get("grup") or "")
+                            if member.get("grup") else None)
+        self.member_detik_pakai = 0
+        self.daftar_paket_sesi = [f"MEMBER · {self.member_nama}"]
+        self.harga_paket_sesi = [0]
+        self.lunas_paket = [True]
+        self.pesanan_aktif = {}
+        self.lunas_pesanan = {}
+        self.biaya_pesanan = 0
+        self.diskoni = 0
+        self.diskoni_mode = "nominal"
+        self.paid = True
+        self.is_bebas = False
+        self.paket_aktif = f"MEMBER · {self.member_nama}"
+        self.sisa_waktu = int(menit_saldo or 0) * 60
+        self.sisa_waktu_awal = self.sisa_waktu
+        self.paket_harga_tetap = 0
+        self.waktu_mulai = datetime.now()
+        self.menit_dipakai_awal = 0
+        self._last_transaction_item = None
+        try:
+            hp = self.member_hp
+            if hp:
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                def _mut(cfg):
+                    members = cfg.get("members", {}) or {}
+                    mm = members.get(hp)
+                    if isinstance(mm, dict):
+                        mm["terakhir_aktif"] = now_str
+                    cfg["members"] = members
+                    return cfg
+
+                ConfigManager.update(_mut)
+        except Exception:
+            pass
+        grup_txt = f" ({self.member_grup})" if self.member_grup else ""
+        self.itemconfig(self._ids['lbl_paket'],
+                        text=f"MEMBER · {self.member_nama}{grup_txt}", fill=C_GREEN)
+        # ── Timer & tombol (meniru alur paket berwaktu) ──
+        if self._timer_job:
+            self.after_cancel(self._timer_job)
+            self._timer_job = None
+        self._billing_paused = False
+        self._enable_btn("selesai", C_BTN, C_RED)
+        self._enable_btn("shop", "black", "white")
+        self._enable_btn("pause", "black", "white")
+        self._card_bg_color = "white"
+        self.itemconfig(self._ids['bg'], fill="white")
+        self._warning_blink_on = False
+        # Baris laporan: paket "MEMBER · <nama> (<grup>)", total Rp 0 (hanya pesanan yang menambah).
+        try:
+            self._last_transaction_item = self.on_transaksi(
+                self.label_tv, self._paket_laporan(), {}, 0, paid=True)
+            self._bind_last_transaction()
+            # on_transaksi (_catat_transaksi) mengembalikan ITEM_ID Treeview (string),
+            # bukan index — jadi index meta harus dicari lewat _resolve_session_idx.
+            idx = app._resolve_session_idx(self)
+            if idx is not None and 0 <= idx < len(app.riwayat_meta):
+                app.riwayat_meta[idx]['member_hp'] = self.member_hp
+                app.riwayat_meta[idx]['member_nama'] = self.member_nama
+                app.riwayat_meta[idx]['member_grup'] = self.member_grup
+        except Exception as e:
+            _LOGGER.warning("Catat laporan sesi member gagal: %s", e)
+        try:
+            self._update_bayar_buttons()
+            self._update_paid_badge()
+            if self.sisa_waktu > 0:
+                self._tick_waktu()
+                self._enable_btn("paket", "black", "white")
+            self._ws_send_total(self._total_setelah_diskon())
+            self._ws_send_start(self.sisa_waktu)
+            if getattr(self, "tv_type", "android") == "webos":
+                self._webos_toast(f"MEMBER {self.member_nama} Dimulai")
+        except Exception as e:
+            _LOGGER.warning("Sesi member TV gagal dijalankan: %s", e)
+        try:
+            AuditLogger.log(action="member_session_start",
+                            username=getattr(app, "current_user", ""),
+                            status="success",
+                            details={"label": self.label_tv, "hp": self.member_hp,
+                                     "nama": self.member_nama, "grup": self.member_grup,
+                                     "menit": int(menit_saldo or 0)})
+        except Exception:
+            pass
+
+    def _potong_saldo_member_akhir(self):
+        """Potong saldo member sebesar menit terpakai (dibulatkan ke atas) dari
+        grup yang dipakai sesi ini. Menit terpakai = sisa awal - sisa akhir."""
+        if not getattr(self, "mode_member", False) or not self.member_hp:
+            return 0
+        try:
+            if self.is_bebas:
+                detik = int(self._total_menit_terpakai() or 0) * 60
+            else:
+                detik = max(0, int(getattr(self, "sisa_waktu_awal", 0) or 0)
+                            - int(self.sisa_waktu or 0))
+            menit = -(-detik // 60)  # ceil
+            if menit <= 0:
+                self._reset_member_state()
+                return 0
+            hp = self.member_hp
+            grup = norm_grup(self.member_grup) if self.member_grup else None
+            grup_teks = grup or "GENERIK"
+
+            def _mut(cfg):
+                members = cfg.get("members", {}) or {}
+                mm = members.get(hp)
+                if isinstance(mm, dict):
+                    saldo = member_saldo_grup(mm)
+                    if grup and grup in saldo:
+                        saldo[grup] = max(0, saldo[grup] - menit)
+                    elif saldo:
+                        # TV generik: potong dari bucket terbesar
+                        key = max(saldo, key=lambda k: saldo[k])
+                        saldo[key] = max(0, saldo[key] - menit)
+                    mm["saldo_grup"] = {k: v for k, v in saldo.items() if v > 0}
+                    mm["saldo_menit"] = sum(saldo.values())
+                cfg["members"] = members
+                return cfg
+
+            ConfigManager.update(_mut)
+            try:
+                print(f"[MEMBER] {self.label_tv} | {self.member_nama} ({hp}) "
+                      f"grup={grup_teks} -{menit} mnt")
+            except Exception:
+                pass
+            self._reset_member_state()
+            return menit
+        except Exception as e:
+            _LOGGER.warning("Potong saldo member gagal: %s", e)
+            self._reset_member_state()
+            return 0
+
+    def _reset_member_state(self):
+        self.mode_member = False
+        self.member_hp = None
+        self.member_nama = None
+        self.member_grup = None
+        self.member_detik_pakai = 0
+        self.sisa_waktu_awal = 0
+
+    def _paket_laporan(self):
+        """Label paket untuk LAPORAN. Sesi member tampil sebagai
+        'MEMBER · <nama> (<grup>)' (waktu sudah dibayar saat isi ulang →
+        nilainya Rp 0, hanya pesanan yang menambah total)."""
+        if getattr(self, "mode_member", False):
+            nama = str(getattr(self, "member_nama", "") or "")
+            grup = str(getattr(self, "member_grup", "") or "")
+            if nama and grup:
+                return f"MEMBER · {nama} ({grup})"
+            if nama:
+                return f"MEMBER · {nama}"
+            return "MEMBER"
+        return self.paket_aktif or "—"
 
     def _pilih_paket(self):
         if self.is_bebas:
@@ -8701,7 +10078,7 @@ class KartuTV(tk.Canvas):
         except Exception:
             pass
 
-    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True, booking=None):
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True, booking=None, member=None):
         app = self.winfo_toplevel()
         # Validasi stok makanan/minuman sebelum paket+pesanan diterima
         if pesanan and hasattr(app, '_stok_validate_orders'):
@@ -8714,6 +10091,11 @@ class KartuTV(tk.Canvas):
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
+        # ── Sesi member (saldo waktu per grup): waktu sudah dibayar saat isi
+        # ulang, jadi harga paket 0. Saldo dipotong saat sesi SELESAI. ──
+        if member:
+            self._mulai_sesi_member(member, int(paket_menit or 0))
+            return
 
         # Status pembayaran sesi DIAMBIL DARI DOKUMEN BOOKING (bukan input
         # manual): lunas/lunas_transfer → LUNAS penuh; dp → bayar sejumlah DP
@@ -8776,6 +10158,7 @@ class KartuTV(tk.Canvas):
             else:
                 self.sisa_waktu  = paket_menit * 60
                 self.paket_harga_tetap = paket_harga
+            self.sisa_waktu_awal = self.sisa_waktu
             self.waktu_mulai = datetime.now()
             self.itemconfig(self._ids['lbl_paket'], text=f"{paket_nm} | {fmt_rp(self._total_setelah_diskon())}", fill="black")
             self.itemconfig(self._ids['lbl_timer'], fill=C_ACCENT)
@@ -9095,7 +10478,7 @@ class KartuTV(tk.Canvas):
                 if hasattr(app, '_save_riwayat'):
                     app._save_riwayat()
         else:
-            self.on_transaksi(self.label_tv, self.paket_aktif, self.pesanan_aktif, total_akhir,
+            self.on_transaksi(self.label_tv, self._paket_laporan(), self.pesanan_aktif, total_akhir,
                               diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
         # Kunci layar TV client (Android): tampilkan Lockscreen fullscreen
         # dengan rincian pesanan lengkap (Sewa / Makanan / Minuman / Total).
@@ -9368,6 +10751,9 @@ class KartuTV(tk.Canvas):
         if self._timer_job:
             self.after_cancel(self._timer_job)
             self._timer_job = None
+        # ── Sesi member: potong saldo grup sesuai menit terpakai ──
+        # (dipanggil SEBELUM state member direset)
+        self._potong_saldo_member_akhir()
         self.paket_aktif   = None
         self.sisa_waktu    = 0
         self.is_bebas      = False
@@ -9539,6 +10925,13 @@ class KartuWarnet(tk.Canvas):
         self._last_riwayat_idx = None
         self._last_cloud_id = None
         self.paid             = True   # status pembayaran sesi (sinkron ke riwayat)
+        # ── Mode member (saldo waktu per grup) ──
+        self.mode_member      = False
+        self.member_hp        = None
+        self.member_nama      = None
+        self.member_grup      = None
+        self.member_detik_pakai = 0
+        self.sisa_waktu_awal  = 0
         self.is_on            = False
         self.pc_locked        = False   # LOCK terakhir yang dikirim ke client (persisten lintas reconnect)
         self._pc_lock_reason  = ""
@@ -10217,7 +11610,158 @@ class KartuWarnet(tk.Canvas):
         except Exception:
             pass
 
-    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True, booking=None):
+    # ── MODE MEMBER: mulai sesi dari saldo waktu per grup (warnet) ────────
+    def _mulai_sesi_member(self, member, menit_saldo):
+        """Sesi member untuk kursi warnet — sama seperti kartu TV: harga paket 0,
+        saldo grup dipotong saat sesi selesai."""
+        app = self.winfo_toplevel()
+        member = member or {}
+        self.mode_member = True
+        self.member_hp = member.get("hp") or None
+        self.member_nama = member.get("nama") or ""
+        self.member_grup = (norm_grup(member.get("grup") or "")
+                            if member.get("grup") else None)
+        self.member_detik_pakai = 0
+        self.daftar_paket_sesi = [f"MEMBER · {self.member_nama}"]
+        self.harga_paket_sesi = [0]
+        self.lunas_paket = [True]
+        self.pesanan_aktif = {}
+        self.lunas_pesanan = {}
+        self.biaya_pesanan = 0
+        self.diskoni = 0
+        self.diskoni_mode = "nominal"
+        self.paid = True
+        self.is_bebas = False
+        self.paket_aktif = f"MEMBER · {self.member_nama}"
+        self.sisa_waktu = int(menit_saldo or 0) * 60
+        self.sisa_waktu_awal = self.sisa_waktu
+        self.paket_harga_tetap = 0
+        self.waktu_mulai = datetime.now()
+        self.menit_dipakai_awal = 0
+        try:
+            hp = self.member_hp
+            if hp:
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                def _mut(cfg):
+                    members = cfg.get("members", {}) or {}
+                    mm = members.get(hp)
+                    if isinstance(mm, dict):
+                        mm["terakhir_aktif"] = now_str
+                    cfg["members"] = members
+                    return cfg
+
+                ConfigManager.update(_mut)
+        except Exception:
+            pass
+        grup_txt = f" ({self.member_grup})" if self.member_grup else ""
+        # Timer, tombol, dan laporan (meniru alur paket berwaktu warnet)
+        if self._timer_job:
+            self.after_cancel(self._timer_job)
+            self._timer_job = None
+        try:
+            self.itemconfig(self._ids['lbl_paket'],
+                            text=f"MEMBER · {self.member_nama}{grup_txt}", fill=C_GREEN)
+            self._enable_btn("selesai", C_BTN, C_RED)
+            self._enable_btn("shop", C_BTN, C_ACCENT2)
+            self._card_bg_color = C_CARD
+            self.itemconfig(self._ids['bg'], fill="white")
+            self._warning_blink_on = False
+            self.is_on = True
+            self.itemconfig(self._ids['btn_status'], fill=C_GREEN, outline=C_GREEN)
+            self.itemconfig(self._ids['btn_status_txt'], text="ON", fill=C_GREEN)
+            # Baris laporan: paket "MEMBER · <nama> (<grup>)", total Rp 0 (hanya pesanan menambah)
+            self._last_transaction_item = self.on_transaksi(
+                self.label_kursi, self._paket_laporan(), {}, 0, source='warnet', paid=True)
+            self._bind_last_transaction()
+            # on_transaksi mengembalikan item_id Treeview (string) — cari index meta
+            idx = app._resolve_session_idx(self)
+            if idx is not None and 0 <= idx < len(app.riwayat_meta):
+                app.riwayat_meta[idx]['member_hp'] = self.member_hp
+                app.riwayat_meta[idx]['member_nama'] = self.member_nama
+                app.riwayat_meta[idx]['member_grup'] = self.member_grup
+            if self.sisa_waktu > 0:
+                self._tick_waktu()
+            if hasattr(app, '_refresh_warnet_footer'):
+                app._refresh_warnet_footer()
+        except Exception as e:
+            _LOGGER.warning("Sesi member warnet gagal dijalankan: %s", e)
+        try:
+            AuditLogger.log(action="member_session_start",
+                            username=getattr(app, "current_user", ""), status="success",
+                            details={"kursi": self.label_kursi, "hp": self.member_hp,
+                                     "nama": self.member_nama, "grup": self.member_grup,
+                                     "menit": int(menit_saldo or 0)})
+        except Exception:
+            pass
+
+    def _potong_saldo_member_akhir(self):
+        """Potong saldo member sebesar menit terpakai dari grup sesi ini."""
+        if not getattr(self, "mode_member", False) or not self.member_hp:
+            return 0
+        try:
+            if self.is_bebas:
+                detik = int(self._total_menit_terpakai() or 0) * 60
+            else:
+                detik = max(0, int(getattr(self, "sisa_waktu_awal", 0) or 0)
+                            - int(self.sisa_waktu or 0))
+            menit = -(-detik // 60)  # ceil
+            if menit <= 0:
+                self._reset_member_state()
+                return 0
+            hp = self.member_hp
+            grup = norm_grup(self.member_grup) if self.member_grup else None
+
+            def _mut(cfg):
+                members = cfg.get("members", {}) or {}
+                mm = members.get(hp)
+                if isinstance(mm, dict):
+                    saldo = member_saldo_grup(mm)
+                    if grup and grup in saldo:
+                        saldo[grup] = max(0, saldo[grup] - menit)
+                    elif saldo:
+                        key = max(saldo, key=lambda k: saldo[k])
+                        saldo[key] = max(0, saldo[key] - menit)
+                    mm["saldo_grup"] = {k: v for k, v in saldo.items() if v > 0}
+                    mm["saldo_menit"] = sum(saldo.values())
+                cfg["members"] = members
+                return cfg
+
+            ConfigManager.update(_mut)
+            try:
+                print(f"[MEMBER WARNET] {self.label_kursi} | {self.member_nama} ({hp}) "
+                      f"grup={grup or 'GENERIK'} -{menit} mnt")
+            except Exception:
+                pass
+            self._reset_member_state()
+            return menit
+        except Exception as e:
+            _LOGGER.warning("Potong saldo member warnet gagal: %s", e)
+            self._reset_member_state()
+            return 0
+
+    def _reset_member_state(self):
+        self.mode_member = False
+        self.member_hp = None
+        self.member_nama = None
+        self.member_grup = None
+        self.member_detik_pakai = 0
+        self.sisa_waktu_awal = 0
+
+    def _paket_laporan(self):
+        """Label paket untuk LAPORAN sesi member: 'MEMBER · <nama> (<grup>)'
+        (total Rp 0 + biaya pesanan bila ada)."""
+        if getattr(self, "mode_member", False):
+            nama = str(getattr(self, "member_nama", "") or "")
+            grup = str(getattr(self, "member_grup", "") or "")
+            if nama and grup:
+                return f"MEMBER · {nama} ({grup})"
+            if nama:
+                return f"MEMBER · {nama}"
+            return "MEMBER"
+        return self.paket_aktif or "—"
+
+    def _on_paket_confirm(self, paket_nm, paket_harga, paket_menit, pesanan, total_pesanan, diskoni=0, diskoni_mode="nominal", paid=True, booking=None, member=None):
         app = self.winfo_toplevel()
         # Validasi stok makanan/minuman sebelum paket+pesanan diterima
         if pesanan and hasattr(app, '_stok_validate_orders'):
@@ -10230,6 +11774,11 @@ class KartuWarnet(tk.Canvas):
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
+        # ── Sesi member (saldo waktu per grup): waktu sudah dibayar saat isi
+        # ulang, jadi harga paket 0. Saldo dipotong saat sesi SELESAI. ──
+        if member:
+            self._mulai_sesi_member(member, int(paket_menit or 0))
+            return
 
         if not previous_session:
             self.pesanan_aktif = pesanan
@@ -10268,6 +11817,7 @@ class KartuWarnet(tk.Canvas):
             else:
                 self.sisa_waktu = paket_menit * 60
                 self.paket_harga_tetap = paket_harga
+            self.sisa_waktu_awal = self.sisa_waktu
             self.waktu_mulai = datetime.now()
             self.itemconfig(self._ids['lbl_paket'], text=f"{paket_nm} | {fmt_rp(self._total_setelah_diskon())}",
                              fill=C_YELLOW)
@@ -10485,7 +12035,7 @@ class KartuWarnet(tk.Canvas):
                 if hasattr(app, '_save_riwayat'):
                     app._save_riwayat()
         else:
-            self.on_transaksi(self.label_kursi, self.paket_aktif or '-', self.pesanan_aktif, total_akhir, source='warnet',
+            self.on_transaksi(self.label_kursi, self._paket_laporan(), self.pesanan_aktif, total_akhir, source='warnet',
                               diskoni=self.diskoni, diskoni_mode=self.diskoni_mode)
         if hasattr(app, 'warnet_server') and getattr(self, '_pc_id', None):
             self.pc_locked = True
@@ -10712,6 +12262,8 @@ class KartuWarnet(tk.Canvas):
         if self._timer_job:
             self.after_cancel(self._timer_job)
             self._timer_job = None
+        # ── Sesi member: potong saldo grup sesuai menit terpakai ──
+        self._potong_saldo_member_akhir()
         self.paket_aktif = None
         self.sisa_waktu = 0
         self.is_bebas = False
@@ -10935,6 +12487,7 @@ class AutoRentApp(ctk.CTk):
                     port=cfg.get("warnet_media_port", 8082),
                     qr_page_dir=os.path.join(APP_BASE_DIR, "qr_page"),
                 )
+                self.tv_media_server.qr_panggilan_dir = os.path.join(APP_BASE_DIR, "qr_panggilan")
                 self.tv_media_server.start()
                 self._ensure_default_promo()
                 self._set_media_default_promo()
@@ -11246,6 +12799,147 @@ class AutoRentApp(ctk.CTk):
             versi = 0
         return f"{base}logo_lock.png?v={versi}"
 
+    # ── Gambar bergerak (MP4 loop) untuk background lockscreen & layar QR ──
+    BG_GERAK_NAMA = "bg_gerak.mp4"
+    BG_GERAK_MAX_MB = 60
+
+    def _tv_bg_gerak_url(self) -> str:
+        """URL MP4 loop untuk client TV (kosong bila belum ada file)."""
+        try:
+            ms = getattr(self, 'tv_media_server', None)
+            if not ms or not ms.running:
+                return ""
+            path = os.path.join(ms.media_dir, self.BG_GERAK_NAMA)
+            if not os.path.isfile(path):
+                return ""
+            try:
+                versi = int(os.path.getmtime(path))
+            except Exception:
+                versi = 0
+            return (f"http://{self._get_lan_ip()}:{ms.port}/media/"
+                    f"{self.BG_GERAK_NAMA}?v={versi}")
+        except Exception:
+            return ""
+
+    def _simpan_bg_gerak(self, path) -> str:
+        """Simpan video MP4 loop ke media_promo sebagai bg_gerak.mp4.
+
+        Dirotasi ke orientasi landscape (TV) bila perlu, volume 0, H.264+AAC
+        supaya ExoPlayer di STB Android bisamuter. Bila ffmpeg tidak tersedia,
+        file disalin mentah apa adanya. Return path dest."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            raise RuntimeError("Server media (port 8082) tidak berjalan.")
+        dest = os.path.join(ms.media_dir, self.BG_GERAK_NAMA)
+        try:
+            size_mb = os.path.getsize(path) / (1024 * 1024)
+        except Exception:
+            size_mb = 0
+        if size_mb > self.BG_GERAK_MAX_MB:
+            raise RuntimeError(
+                f"Ukuran video {size_mb:.1f} MB melebihi batas "
+                f"{self.BG_GERAK_MAX_MB} MB.\n"
+                "Kompres dulu (mis. 720p, 10-20 detik) agar ringan di TV.")
+        ffmpeg = (lambda: "")()
+        try:
+            ffmpeg = ffmpeg_path()
+        except Exception:
+            ffmpeg = ""
+        if ffmpeg and os.path.isfile(ffmpeg):
+            # PENTUNG: ffmpeg tidak boleh membaca & menulis file yang sama.
+            # Kalau sumber == tujuan (kasir mengunggah ulang bg_gerak.mp4),
+            # output akan terpotong (hanya beberapa frame pertama).
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4",
+                                                prefix="bg_gerak_",
+                                                dir=os.path.dirname(dest))
+            os.close(tmp_fd)
+            try:
+                cmd = [ffmpeg, "-y", "-i", path,
+                       "-vf", "scale=1280:-2",
+                       "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+                       "-pix_fmt", "yuv420p", "-profile:v", "baseline",
+                       "-level", "3.0", "-an",
+                       "-movflags", "+faststart", tmp_path]
+                p = subprocess.run(cmd, capture_output=True, timeout=300)
+                if p.returncode != 0 or not os.path.isfile(tmp_path) \
+                        or os.path.getsize(tmp_path) < 1024:
+                    raise RuntimeError((p.stderr or b"")[-400:].decode("utf-8", "ignore"))
+                shutil.copy2(tmp_path, dest)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        else:
+            shutil.copy2(path, dest)
+        return dest
+
+    def _broadcast_bg_gerak(self) -> int:
+        """Kirim UPDATE_LOCK_BG ke semua TV + simpan URL di config."""
+        url = self._tv_bg_gerak_url()
+        if not url:
+            return 0
+        hub = getattr(self, 'tv_ws_hub', None)
+        n = 0
+        if hub:
+            try:
+                n = hub.broadcast_update_lock_bg(url)
+                print(f"[TV BG] broadcast UPDATE_LOCK_BG ke {n} TV: {url}")
+            except Exception as e:
+                print(f"[TV BG] broadcast gagal: {e}")
+        try:
+            def _mut(cfg):
+                cfg["tv_lock_bg_url"] = url
+                return cfg
+            ConfigManager.update(_mut)
+        except Exception as e:
+            _LOGGER.warning("simpan url bg lock gagal: %s", e)
+        return n
+
+    def _buka_upload_bg_gerak(self, parent=None):
+        """Dialog/aksi kasir: pilih video MP4 untuk background lockscreen."""
+        win = parent or self
+        if not self._fitur_premium():
+            messagebox.showwarning(
+                "Fitur Premium (Trial / LIFETIME)",
+                "Gambar bergerak untuk lockscreen hanya tersedia saat trial aktif "
+                "atau lisensi LIFETIME.",
+                parent=win)
+            return
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            messagebox.showwarning("Gambar Bergerak",
+                                   "Server media (port 8082) tidak berjalan.\n"
+                                   "Mulai ulang aplikasi billing lalu coba lagi.",
+                                   parent=win)
+            return
+        path = filedialog.askopenfilename(
+            parent=win, title="Pilih Video MP4 (gambar bergerak)",
+            filetypes=[("Video MP4", "*.mp4 *.m4v"), ("Semua file", "*.*")])
+        if not path:
+            return
+        lbl = getattr(win, "lbl_bg_gerak_status", None)
+        try:
+            if lbl is not None:
+                lbl.configure(text="Memproses video…", text_color=C_YELLOW)
+            self._simpan_bg_gerak(path)
+        except Exception as e:
+            if lbl is not None:
+                lbl.configure(text=f"Gagal: {str(e)[:80]}", text_color=C_RED)
+            messagebox.showerror("Gambar Bergerak",
+                                 f"Tidak bisa menyimpan video:\n{e}", parent=win)
+            return
+        n = self._broadcast_bg_gerak()
+        ket = (f"✅ Video berhasil disimpan ({self.BG_GERAK_NAMA}).\n"
+               f"Broadcast ke {n} TV yang terhubung.\n"
+               "Dipakai sebagai background lockscreen & layar QR sesi member.\n\n"
+               "TV yang sedang terkunci perlu_LOCK_SCREEN berikutnya atau "
+               "nyala/mati layar untuk menerapkan.")
+        if lbl is not None:
+            lbl.configure(text=f"✅ Tersimpan — dikirim ke {n} TV", text_color=C_GREEN)
+        messagebox.showinfo("Gambar Bergerak", ket, parent=win)
+
     def _simpan_logo_lock(self, path) -> str:
         """Simpan logo lock sebagai PNG ASLI (di-normalisasi) di media_promo.
 
@@ -11470,6 +13164,253 @@ class AutoRentApp(ctk.CTk):
         if tv_type == "webos":
             url += "&type=webos"
         return url
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SESI MEMBER VIA QR — kasir klik 👤 MEMBER, pelanggan scan & login sendiri
+    # ══════════════════════════════════════════════════════════════════════════
+    MEMBER_QR_PAGE = "member.html"   # halaman QR di host yang sama dgn call.html
+
+    def _member_qr_url(self, nama_tv: str, kode: str, grup: str = "") -> str:
+        from urllib.parse import quote
+        owner = self._resolve_license_user() or ""
+        base = self._qr_host_web() or ""
+        if base.endswith("call.html"):
+            base = base[:-len("call.html")]
+        base = base.rstrip("/") + "/" + self.MEMBER_QR_PAGE
+        url = f"{base}?tv={quote(nama_tv)}&k={quote(kode)}&o={quote(owner)}"
+        if grup:
+            url += f"&g={quote(grup)}"
+        return url
+
+    def _member_qr_url_lokal(self, nama_tv: str, kode: str, grup: str = "") -> str:
+        """URL member.html di media server lokal (port 8082/qr/member.html).
+
+        Dipakai kalau halaman Firebase belum di-deploy — HP pelanggan tetap bisa
+        scan selama terhubung ke WiFi rental (halaman butuh internet untuk
+        Supabase, tapi alamatnya tidak bergantung pihak ketiga)."""
+        from urllib.parse import quote
+        ms = getattr(self, "tv_media_server", None)
+        if not ms or not getattr(ms, "running", False):
+            return ""
+        owner = self._resolve_license_user() or ""
+        url = (f"http://{self._get_lan_ip()}:{ms.port}/qr/{self.MEMBER_QR_PAGE}"
+               f"?tv={quote(nama_tv)}&k={quote(kode)}&o={quote(owner)}")
+        if grup:
+            url += f"&g={quote(grup)}"
+        return url
+
+    def _member_qr_cari_kartu(self, label_tv):
+        """Cari kartu TV/warnet berdasarkan label (bisa None)."""
+        for k in list(getattr(self, "_semua_kartu_tv", []) or []):
+            if getattr(k, "label_tv", "") == label_tv:
+                return k
+        for k in list(getattr(self, '_semua_kartu_warnet', []) or []):
+            if getattr(k, "label_kursi", "") == label_tv:
+                return k
+        return None
+
+    def _member_qr_mulai(self, kartu):
+        """Kasir memulai sesi member lewat QR: bangunkan TV, buat dokumen sesi,
+        kirim QR ke TV, masukkan kartu ke mode pending."""
+        try:
+            if kartu is None:
+                return
+            if not kartu.sesi_kosong():
+                messagebox.showinfo("Kartu Sedang Dipakai",
+                                    f"{getattr(kartu, 'label_tv', '')} sedang berjalan.",
+                                    parent=self)
+                return
+            member_grup_siapkan()
+            member_saldo_migrasi()
+            kode = member_qr_kode_baru()
+            grup = getattr(kartu, "nama_grup", "") or ""
+            url = self._member_qr_url(getattr(kartu, "label_tv", ""), kode, norm_grup(grup))
+
+            # buat baris di qr_sessions (tabel yang sama, status berawalan mem_)
+            doc = self._member_qr_buat_doc(kode, getattr(kartu, "label_tv", ""), grup, url)
+            if not doc:
+                messagebox.showerror("Member QR Gagal",
+                                     "Gagal membuat sesi QR (Supabase).\nCoba lagi atau pakai "
+                                     "mulai member via PIN.", parent=self)
+                return
+            kartu.pending_member_qr = True
+            kartu.member_qr_sid = doc.get("id")
+            kartu.member_qr_kode = kode
+            kartu._member_qr_tampil(kode, MEMBER_QR_TTL_DETIK)
+            self._member_qr_tick(kartu)
+            # bangunkan TV bila tidur/mati, lalu kirim QR
+            self._member_qr_kirim_tv(kartu, url)
+            try:
+                AuditLogger.log(action="member_qr_mulai", username=self.current_user,
+                                status="success",
+                                details={"tv": getattr(kartu, "label_tv", ""), "grup": grup})
+            except Exception:
+                pass
+        except Exception as e:
+            _LOGGER.warning("member QR mulai gagal: %s", e)
+
+    def _member_qr_buat_doc(self, kode, label_tv, grup, url):
+        """Insert baris qr_sessions berstatus mem_await. Return dict {'id':...} atau None."""
+        try:
+            import time as _t
+            from supabase_sync import get_qrsession_client
+            payload = {
+                "sid": "", "tv": str(label_tv), "kode": str(kode),
+                "owner": str(self._resolve_license_user() or ""),
+                "status": MEMBER_QR_AWAIT,
+                "pin": member_qr_json_dump({"grup": norm_grup(grup or ""), "url": url}),
+                "pin_user": "", "pin_set_at": 0, "tries": 0,
+                "created": int(_t.time() * 1000), "updatedAt": "",
+            }
+            row = get_qrsession_client().insert(payload)
+            return row if isinstance(row, dict) and row.get("id") else None
+        except Exception as e:
+            _LOGGER.warning("member QR buat doc gagal: %s", e)
+            return None
+
+    def _member_qr_hapus_doc(self, sid, alasan=""):
+        """Tandai/bersihkan dokumen sesi member di qr_sessions."""
+        if not sid:
+            return
+        try:
+            from supabase_sync import get_qrsession_client
+            if alasan:
+                try:
+                    get_qrsession_client().update(sid, {"status": alasan,
+                                                        "updatedAt": str(int(time.time()))})
+                except Exception:
+                    pass
+            get_qrsession_client().delete(sid)
+        except Exception as e:
+            self._qr_log(f"hapus doc member QR {sid}: {e}")
+
+    def _member_qr_tick(self, kartu):
+        """Hitung mundur banner pending (juga jadi cek kedaluwarsa)."""
+        if not getattr(kartu, "pending_member_qr", False):
+            return
+        try:
+            if not kartu.winfo_exists():
+                return
+        except Exception:
+            return
+        kartu.member_qr_sisa = int(getattr(kartu, "member_qr_sisa", 0) or 0) - 1
+        if kartu.member_qr_sisa <= 0:
+            # 5 menit habis & pelanggan belum scan -> TV tidur kembali.
+            self._member_qr_hapus_doc(getattr(kartu, "member_qr_sid", None), MEMBER_QR_EXPIRED)
+            kartu._member_qr_selesai(tidur=True)
+            return
+        kartu._member_qr_tampil(getattr(kartu, "member_qr_kode", ""), kartu.member_qr_sisa)
+        try:
+            kartu._member_qr_job = kartu.after(1000, lambda: self._member_qr_tick(kartu))
+        except Exception:
+            pass
+
+    def _member_qr_kirim_tv(self, kartu, url):
+        """Bangunkan TV bila perlu, lalu kirim overlay QR."""
+        self._member_qr_bangunkan_tv(kartu)
+        hub = getattr(self, "tv_ws_hub", None)
+        label = getattr(kartu, "label_tv", "")
+        png = self._member_qr_png(kartu, url)
+        grup = norm_grup(getattr(kartu, "nama_grup", "") or "")
+        sisa = int(getattr(kartu, "member_qr_sisa", 0) or 0)
+        if hub and hub.is_meja_connected(label):
+            hub.send_show_qr(label, png or url, grup, sisa)
+            return
+        # TV belum tersambung -> tunggu client konek, kirim QR (maks ~48 detik)
+        self.after(4000, lambda: self._member_qr_kirim_tv_retry(kartu, png or url))
+
+    def _member_qr_kirim_tv_retry(self, kartu, png, sisa_coba=12):
+        """Kirim ulang SHOW_QR sampai TV terhubung (maks ~48 detik)."""
+        hub = getattr(self, "tv_ws_hub", None)
+        label = getattr(kartu, "label_tv", "")
+        if not getattr(kartu, "pending_member_qr", False):
+            return
+        if hub and hub.is_meja_connected(label):
+            hub.send_show_qr(label, png, norm_grup(getattr(kartu, "nama_grup", "") or ""),
+                            int(getattr(kartu, "member_qr_sisa", 0) or 0))
+            self._qr_log(f"member QR: terkirim ke TV {label}")
+            return
+        if sisa_coba <= 0:
+            self._qr_log(f"member QR: TV {label} belum merespons setelah 48 detik")
+            return
+        self.after(4000, lambda: self._member_qr_kirim_tv_retry(kartu, png, sisa_coba - 1))
+
+    def _member_qr_hide_tv(self, label_tv):
+        try:
+            hub = getattr(self, "tv_ws_hub", None)
+            if hub and label_tv:
+                hub.send_hide_qr(label_tv)
+        except Exception as e:
+            _LOGGER.warning("member QR hide TV gagal: %s", e)
+
+    def _member_qr_tidur_tv(self, kartu):
+        """Matikan TV setelah sesi QR member berakhir tanpa scan / dibatalkan."""
+        label = getattr(kartu, "label_tv", "")
+        if not label:
+            return
+        try:
+            # TV harus dalam keadaan menyala untuk menerima perintah; kalau WS
+            # masih hidup berarti TV nyala -> sleep sekarang juga.
+            hub = getattr(self, "tv_ws_hub", None)
+            sudah_mati = not (hub and hub.is_meja_connected(label))
+        except Exception:
+            sudah_mati = True
+        if sudah_mati:
+            self._qr_log(f"member QR: TV {label} sudah tidak terhubung, TV dibiarkan tidur")
+            return
+        try:
+            kartu._tv_sleep_now(0, "Waktu QR member habis, pelanggan tidak scan")
+            self._qr_log(f"member QR: TV {label} dimatikan (tidak ada scan member)")
+            try:
+                AuditLogger.log(action="member_qr_tidur", username=self.current_user,
+                                status="success", details={"tv": label})
+            except Exception:
+                pass
+        except Exception as e:
+            _LOGGER.warning("member QR tidurkan TV gagal: %s", e)
+
+    def _member_qr_bangunkan_tv(self, kartu):
+        """Bangunkan TV yang sedang tidur sebelum QR dikirim.
+
+        TV yang menyala biasanya sudah tersambung WS; kalau belum, kirim
+        perintah hidupkan (power toggle) lalu tunggu client konek ulang."""
+        label = getattr(kartu, "label_tv", "")
+        hub = getattr(self, "tv_ws_hub", None)
+        if hub and hub.is_meja_connected(label):
+            layar = hub.get_screen_state(label)
+            if layar is False:
+                # Tertidur tapi WS hidup -> bangunkan tanpa perintah nyala/mati
+                try:
+                    kartu._adb_action(lambda: ADBHelper.adb_shell(
+                        kartu.ip, "input keyevent KEYCODE_WAKEUP",
+                        timeout=8, port=kartu.port or 5555))
+                    self._qr_log(f"member QR: TV {label} bangun (layar mati)")
+                except Exception as e:
+                    self._qr_log(f"member QR wakeup gagal: {e}")
+            return
+        try:
+            kartu._adb_action(lambda: ADBHelper.power_toggle(kartu.ip, port=kartu.port))
+            self._qr_log(f"member QR: TV {label} tidak tersambung, kirim WAKEUP")
+        except Exception as e:
+            self._qr_log(f"member QR WAKEUP gagal: {e}")
+
+    def _member_qr_png(self, kartu, url):
+        """Buat PNG QR di qr_panggilan/ lalu kembalikan URL yang bisa diakses TV."""
+        try:
+            sid = getattr(kartu, "member_qr_sid", None) or "t"
+            folder = os.path.join(APP_BASE_DIR, "qr_panggilan")
+            os.makedirs(folder, exist_ok=True)
+            fname = f"member_{sid}.png"
+            path = os.path.join(folder, fname)
+            import qrcode
+            qrcode.make(url).save(path)
+            ms = getattr(self, "tv_media_server", None)
+            if ms is not None and getattr(ms, "running", False):
+                return f"http://{self._get_lan_ip()}:{ms.port}/qr/{fname}"
+        except Exception as e:
+            _LOGGER.warning("buat PNG QR member gagal: %s", e)
+        return ""
+
 
     def _qr_type_tv(self, nama_tv: str) -> str:
         """Tipe TV (android/webos) untuk QR web."""
@@ -12161,7 +14102,11 @@ class AutoRentApp(ctk.CTk):
                 rows = get_qrsession_client().query_all()
                 for r in rows:
                     try:
-                        self._qr_pin_proses(r)
+                        status = str(r.get("status", "") or "")
+                        if status.startswith(MEMBER_QR_PREFIX):
+                            self._member_qr_proses(r)      # alur member QR
+                        else:
+                            self._qr_pin_proses(r)       # alur PIN panggil kasir
                     except Exception:
                         pass
             except Exception as e:
@@ -12172,6 +14117,193 @@ class AutoRentApp(ctk.CTk):
             pass
         if getattr(self, "_pin_poller_supabase", False):
             self.after(4000, self._pin_poll_supabase)
+
+    # ── Alur sesi member via QR (doc status berawalan mem_) ───────────────────
+    def _member_qr_proses(self, doc: dict):
+        """State machine sesi member QR. Dipanggil dari thread poller.
+
+        mem_await  + pin_user {"n": nama}          -> cek member -> mem_saldo / mem_notfound / mem_ambigu
+        mem_saldo  + pin_user {"n","p": pin}        -> cek PIN  -> mem_ok / mem_badpin / mem_nosaldo / mem_busy
+        """
+        import time as _t
+        did = str(doc.get("id") or doc.get("_id") or "")
+        if not did:
+            return
+        status = str(doc.get("status", "") or "")
+        tv = str(doc.get("tv", "") or "")
+        kode = str(doc.get("kode", "") or "")
+        if not tv or not kode:
+            return
+        kartu = self._member_qr_cari_kartu(tv)
+        if kartu is None:
+            return
+        # hanya proses sesi milik TV ini yang sedang pending
+        if str(getattr(kartu, "member_qr_kode", "") or "") != kode:
+            return
+        req = member_qr_json_load(doc.get("pin_user"))
+        nama = str(req.get("n", "") or "").strip()
+        pin = str(req.get("p", "") or "").strip()
+        cache = getattr(self, "_member_qr_req_cache", None)
+        if cache is None:
+            cache = {}
+            self._member_qr_req_cache = cache
+        cache[did] = req
+        # Pemicu proses = payload baru dari halaman (bukan statusnya), supaya
+        # pelanggan boleh mencoba lagi nama / PIN setelah gagal.
+        req_kunci = member_qr_json_dump(req)
+        seen = getattr(self, "_member_qr_req_seen", None)
+        if seen is None:
+            seen = {}
+            self._member_qr_req_seen = seen
+        if not nama or seen.get(did) == req_kunci:
+            return
+        seen[did] = req_kunci
+        dibuat = float(doc.get("created", 0) or 0)
+        dibuat = dibuat / 1000.0 if dibuat > 1e12 else dibuat
+        if dibuat and (_t.time() - dibuat) > MEMBER_QR_TTL_DETIK:
+            if status not in (MEMBER_QR_OK,):
+                self._member_qr_hapus_doc(did, MEMBER_QR_EXPIRED)
+                self.after(0, lambda k=kartu: k._member_qr_selesai())
+            return
+        if nama and not pin:
+            self._member_qr_langkah_nama(did, kartu, nama)
+        elif nama and pin:
+            self._member_qr_langkah_pin(did, kartu, nama, pin, doc)
+
+    def _member_qr_langkah_nama(self, did, kartu, nama):
+        """Pelanggan sudah mengetik nama -> validasi member + kirim saldo per grup."""
+        try:
+            member_grup_siapkan()
+            member_saldo_migrasi()
+            members = ConfigManager.get("members", {}) or {}
+            kunci = norm_grup(nama)
+            cocok = [(hp, m) for hp, m in members.items()
+                     if isinstance(m, dict) and norm_grup(m.get("nama", "")) == kunci]
+            if not cocok:
+                self._member_qr_jawab(did, MEMBER_QR_NOTFOUND,
+                                      msg="ID tidak ditemukan")
+                return
+            if len(cocok) > 1:
+                self._member_qr_jawab(did, MEMBER_QR_AMBIGU,
+                                      msg="Nama dipakai lebih dari satu member — "
+                                          "hubungi kasir atau pakai PIN langsung.")
+                return
+            hp, m = cocok[0]
+            saldo = member_saldo_grup(m)
+            grup_tv = getattr(kartu, "nama_grup", "") or ""
+            boleh, grup_member, menit, pesan = member_cek_grup(m, grup_tv,
+                                                              ConfigManager.load().get("grup_tarif"))
+            payload = {
+                "nama": str(m.get("nama", "") or ""),
+                "hp": str(hp),
+                "grup_tv": norm_grup(grup_tv),
+                "grup_member": norm_grup(grup_member) if grup_member else "",
+                "menit": int(menit or 0),
+                "saldo": {g: int(v) for g, v in saldo.items()},
+                "bisa": bool(boleh),
+                "msg": "" if boleh else (pesan or "Saldo tidak cukup untuk TV ini."),
+            }
+            self._member_qr_jawab(did, MEMBER_QR_SALDO, payload=payload, pin_user_out=True)
+        except Exception as e:
+            _LOGGER.warning("member QR langkah nama gagal: %s", e)
+
+    def _member_qr_langkah_pin(self, did, kartu, nama, pin, doc):
+        """Pelanggan sudah kirim PIN -> validasi PIN & saldo, lalu mulai sesi."""
+        try:
+            member_grup_siapkan()
+            member_saldo_migrasi()
+            members = ConfigManager.get("members", {}) or {}
+            kunci = norm_grup(nama)
+            cocok = [(hp, m) for hp, m in members.items()
+                     if isinstance(m, dict) and norm_grup(m.get("nama", "")) == kunci]
+            if not cocok:
+                self._member_qr_jawab(did, MEMBER_QR_NOTFOUND, msg="ID tidak ditemukan")
+                return
+            hp, m = cocok[0]
+            # verifikasi PIN
+            if not verify_password(pin, str(m.get("pin_enc", "") or "")):
+                tries = int(doc.get("tries", 0) or 0) + 1
+                if tries >= MEMBER_QR_MAX_TRIES:
+                    self._member_qr_jawab(did, MEMBER_QR_BLOCKED,
+                                          msg="PIN salah terlalu sering. Sesi dibatalkan.",
+                                          tries=tries)
+                    return
+                self._member_qr_jawab(did, MEMBER_QR_BADPIN, tries=tries,
+                                      msg="PIN anda masukkan salah",
+                                      payload={"nama": str(m.get("nama", "") or ""),
+                                               "hp": str(hp)})
+                return
+            # PIN benar -> cek saldo sesuai grup TV
+            grup_tv = getattr(kartu, "nama_grup", "") or ""
+            boleh, grup_member, menit, pesan = member_cek_grup(m, grup_tv,
+                                                              ConfigManager.load().get("grup_tarif"))
+            if not boleh or menit <= 0:
+                self._member_qr_jawab(did, MEMBER_QR_NOSALDO,
+                                      msg=pesan or "Saldo grup tidak cukup untuk TV ini.")
+                return
+            # cegah member sedang main di kartu lain
+            label_main = self._member_label_aktif(str(hp), kecuali=getattr(kartu, "label_tv", ""))
+            if label_main:
+                self._member_qr_jawab(did, MEMBER_QR_BUSY,
+                                      msg=f"Member ini sedang aktif di {label_main}.")
+                return
+            # mulai sesi member di kartu
+            nama_teks = str(m.get("nama", "") or "")
+            m_view = {
+                "hp": str(hp), "nama": nama_teks,
+                "grup": norm_grup(grup_member) if grup_member else None,
+                "saldo_grup": member_saldo_grup(m), "saldo_menit": member_saldo_total(m),
+            }
+            self._member_qr_jawab(did, MEMBER_QR_OK,
+                                  msg=f"Selamat{nama_teks and ', ' + nama_teks}! Sesi dimulai.",
+                                  payload={"nama": nama_teks,
+                                           "grup": m_view["grup"] or "",
+                                           "menit": int(menit)})
+            # jalankan mulai sesi di thread UI
+            self.after(0, lambda: self._member_qr_mulai_sesi(kartu, m_view, int(menit), did))
+        except Exception as e:
+            _LOGGER.warning("member QR langkah PIN gagal: %s", e)
+
+    def _member_qr_mulai_sesi(self, kartu, m_view, menit, did):
+        """Dipanggil di thread UI: mulai sesi member lalu keluar dari mode pending."""
+        try:
+            if not getattr(kartu, "pending_member_qr", False):
+                return
+            kartu.pending_member_qr = False
+            kartu._member_qr_selesai()
+            kartu._mulai_sesi_member(m_view, menit)
+            self._member_qr_hapus_doc(did, MEMBER_QR_OK)
+            try:
+                AuditLogger.log(action="member_qr_login", username=self.current_user,
+                                status="success",
+                                details={"tv": getattr(kartu, "label_tv", ""),
+                                         "hp": m_view.get("hp"), "menit": menit})
+            except Exception:
+                pass
+        except Exception as e:
+            _LOGGER.warning("member QR mulai sesi gagal: %s", e)
+            messagebox.showerror("Member QR", f"Gagal memulai sesi: {e}", parent=self)
+
+    def _member_qr_jawab(self, did, status, msg="", payload=None, tries=None, pin_user_out=False):
+        """Tulis jawaban desktop ke dokumen sesi member."""
+        try:
+            from supabase_sync import get_qrsession_client
+            data = {"status": status, "updatedAt": str(int(time.time()))}
+            if msg:
+                data["reason"] = str(msg)[:300]
+            if tries is not None:
+                data["tries"] = int(tries)
+            if payload is not None:
+                data["pin"] = member_qr_json_dump(payload)
+            if pin_user_out:
+                # Permintaan pelanggan diubah supaya halaman menampilkan saldo
+                # lalu meminta PIN (kolom "p" dikosongkan).
+                req = member_qr_json_load(self._member_qr_req_cache.get(did))
+                req["p"] = ""
+                data["pin_user"] = member_qr_json_dump(req)
+            get_qrsession_client().update(did, data)
+        except Exception as e:
+            _LOGGER.warning("member QR jawab gagal: %s", e)
 
     def _qr_panggilan_masuk(self, doc: dict):
         """Dipanggil thread CallPoller — validasi, simpan ke riwayat lokal
@@ -13339,7 +15471,11 @@ class AutoRentApp(ctk.CTk):
             _LOGGER.warning("Cloud activation sync error: %s", e)
 
     def _start_license_poller(self):
-        """Start background poller untuk memantau perubahan lisensi dari cloud."""
+        """Start background poller untuk memantau perubahan lisensi dari cloud.
+
+        Dua sumber: Supabase (poller resmi) + Firestore licenseStatus. Poller
+        Supabase TIDAK melihat Firestore, padahal lisensi LIFETIME user disimpan
+        di Firestore — tanpa ini perubahan/revoke di Firestore tidak terpantau."""
         uname = self.current_user or ""
         if not uname:
             return
@@ -13350,9 +15486,54 @@ class AutoRentApp(ctk.CTk):
             _LOGGER.info("License poller (Supabase) started for %s", uname)
         except Exception as e:
             _LOGGER.warning("License poller start error: %s", e)
+        self._start_firestore_license_poller()
+
+    def _start_firestore_license_poller(self, interval_ms=300000):
+        """Poller Firestore licenseStatus (default 5 menit) — best effort."""
+        self._stop_firestore_license_poller()
+        last = {"ls": None}
+
+        def _tick():
+            if getattr(self, "_fs_lic_stop", True):
+                return
+            try:
+                ls = self._lisensi_dari_firestore()
+                if not ls:
+                    return
+                sig = (str(ls.get("status") or ""), str(ls.get("expiresAt") or ""),
+                       str(ls.get("maxTv") or ""))
+                if sig != last["ls"]:
+                    last["ls"] = sig
+                    _LOGGER.info("Firestore licenseStatus berubah: %s (user=%s)",
+                                 sig, getattr(self, "_lic_firestore_user", "?"))
+                    self._on_cloud_license_update(ls)
+            except Exception as e:
+                _LOGGER.debug("Firestore license poll error: %s", e)
+            finally:
+                if not getattr(self, "_fs_lic_stop", True):
+                    try:
+                        self._fs_lic_after = self.after(interval_ms, _tick)
+                    except Exception:
+                        pass
+
+        self._fs_lic_stop = False
+        try:
+            self._fs_lic_after = self.after(15000, _tick)
+        except Exception:
+            self._fs_lic_stop = True
+
+    def _stop_firestore_license_poller(self):
+        self._fs_lic_stop = True
+        try:
+            if getattr(self, "_fs_lic_after", None):
+                self.after_cancel(self._fs_lic_after)
+                self._fs_lic_after = None
+        except Exception:
+            pass
 
     def _stop_license_poller(self):
         """Stop license poller."""
+        self._stop_firestore_license_poller()
         poller = getattr(self, "_license_poller", None)
         try:
             ev = getattr(poller, "stop_ev", None) if poller else None
@@ -13367,13 +15548,34 @@ class AutoRentApp(ctk.CTk):
     # ── SINGLE SESSION (1 AKUN = 1 PC) ─────────────────────────────────
     @staticmethod
     def _get_device_id():
-        """Device ID persisten per PC (UUID di config; dibuat otomatis sekali)."""
+        """Device ID persisten per MESIN (bukan per folder/config).
+
+        Dulu hanya UUID acak di config → setiap salinan app (dist/, RRBILLINGPRO_x/,
+        RRBillingPro_Package/, ...) punya deviceId berbeda sehingga akun yang sama
+        terbaca "login di PC lain" padahal mesinnya sama.
+
+        Sekarang: pakai fingerprint mesin (MAC + hostname) yang sama dengan
+        get_machine_id() di rr_license.py, disimpan ke config sebagai device_id
+        bila belum ada. Config lama yang deviceId-nya bukan fingerprint ikut
+        dimigrasikan (menggantikan UUID lama)."""
         cfg = ConfigManager.load()
         dev = str(cfg.get("device_id") or "").strip()
+        try:
+            from rr_license import get_machine_id as _mid
+            fingerprint = str(_mid() or "").strip().upper()
+        except Exception:
+            fingerprint = ""
         if not dev:
-            dev = uuid.uuid4().hex[:12].upper()
+            dev = fingerprint or uuid.uuid4().hex[:12].upper()
             cfg["device_id"] = dev
             ConfigManager.save(cfg)
+        elif fingerprint and norm_grup(dev) != norm_grup(fingerprint):
+            # Migrasi UUID lama → fingerprint mesin (mencegah false positive)
+            # "login di PC lain" untuk salinan app di folder lain.
+            _LOGGER.info("Migrasi device_id %s → fingerprint mesin %s", dev, fingerprint)
+            cfg["device_id"] = fingerprint
+            ConfigManager.save(cfg)
+            dev = fingerprint
         return dev
 
     @staticmethod
@@ -13398,8 +15600,11 @@ class AutoRentApp(ctk.CTk):
         try:
             if not getattr(self, "_session_login_at", None):
                 self._session_login_at = int(time.time() * 1000)
+            payload = self._session_payload()
             fc = FirestoreClient()
-            fc.set_user_doc(uname, {"activeSession": self._session_payload()}, merge=True)
+            fc.set_user_doc(uname, {"activeSession": payload}, merge=True)
+            _LOGGER.info("[SESSION] daftar user='%s' pc='%s' deviceId=%s",
+                         uname, payload["pcName"], payload["deviceId"])
         except Exception as e:
             _LOGGER.warning("Session register error: %s", e)
 
@@ -13421,7 +15626,14 @@ class AutoRentApp(ctk.CTk):
         t.join(timeout=2.0)
 
     def _conflicting_session_pc(self):
-        """Kembalikan dict sesi PC lain yang masih aktif (grace 90 dtk), atau None."""
+        """Return dict sesi PC lain yang masih aktif (grace 90 dtk), atau None.
+
+        PENTING: device_id disimpan per FILE CONFIG, dan repo ini berisi banyak
+        salinan config (dist/, RRBILLINGPRO_x/, RRBillingPro_Package/, ...).
+        Menjalankan app dari folder berbeda pada MESIN YANG SAMA menghasilkan
+        deviceId berbeda → dulu salah dibaca sebagai "login di PC lain".
+        Karena itu pcName (hostname) juga dibandingkan: sama ⇒ ini PC ini sendiri.
+        """
         uname = getattr(self, "current_user", None) or ""
         if not uname:
             return None
@@ -13435,12 +15647,34 @@ class AutoRentApp(ctk.CTk):
                 last = int(s.get("lastSeen") or 0)
             except Exception:
                 pass
-            if dev and dev != self._get_device_id() and (time.time() * 1000 - last) < 90000:
+            if not dev:
+                return None
+            if dev == self._get_device_id():
+                return None                      # sesi milik PC ini sendiri
+            pc_lain = str(s.get("pcName") or "")
+            if pc_lain and pc_lain.lower() == self._get_pc_name().strip().lower():
+                # Hostname sama = mesin yang sama (salinan app berbeda folder).
+                _LOGGER.info("[SESSION] abaikan sesi 'deviceId=%s' — PC '%s' = mesin ini",
+                             dev, pc_lain)
+                return None
+            umur = (time.time() * 1000 - last) / 1000.0
+            if umur < 90:
+                _LOGGER.info("[SESSION] KONFLIK user='%s' — aktif di PC '%s' deviceId=%s (%.0f dtk)",
+                             uname, pc_lain or "?", dev, umur)
                 return {
-                    "pcName": str(s.get("pcName") or "PC lain"),
+                    "pcName": pc_lain or "PC lain",
                     "deviceId": dev,
                     "loginAt": int(s.get("loginAt") or 0),
                 }
+            # Sesi sudah basi (>90 dtk, mis. app ditutup paksa / app crash) →
+            # bersihkan diam-diam supaya tidak muncul sebagai "PC lain" di login berikutnya.
+            _LOGGER.info("[SESSION] bersihkan sesi basi user='%s' (PC '%s', %.0f dtk)",
+                         uname, pc_lain or "?", umur)
+            try:
+                if last and umur >= 90:
+                    threading.Thread(target=self._clear_session_cloud, daemon=True).start()
+            except Exception:
+                pass
         except Exception:
             pass
         return None
@@ -13797,18 +16031,21 @@ class AutoRentApp(ctk.CTk):
             for g in warnet_map.keys():
                 if g not in names:
                     names.append(g)
+            names = [g for g in names if not grup_tersembunyi(g)]
             # Ensure "Warnet" group is first if it exists
             if 'Warnet' in names:
                 names.remove('Warnet')
                 names.insert(0, 'Warnet')
             return names or [NAMA_GRUP_DEFAULT]
-        # Default (for PS/TV): exclude warnet-only groups
+        # Default (for PS/TV): exclude warnet-only groups + grup tersembunyi
         names = [g for g in (self.grup_tarif.keys() if getattr(self, 'grup_tarif', None) else []) if g not in warnet_only]
+        names = [g for g in names if not grup_tersembunyi(g)]
         return names or [NAMA_GRUP_DEFAULT]
 
     def daftar_semua_grup(self):
         """Return list of ALL group names untuk Kontrol Harga (shared + warnet).
-        User bisa edit harga untuk semua grup.
+        Grup member ('<JENIS> MEMBER') & grup default tersembunyi ('Reguler') tidak
+        ikut — harga member diatur dari tab Member (Kontrol Harga Member).
         """
         cfg = ConfigManager.load()
         names = list(self.grup_tarif.keys()) if getattr(self, 'grup_tarif', None) else []
@@ -13817,6 +16054,7 @@ class AutoRentApp(ctk.CTk):
         for g in warnet_map.keys():
             if g not in names:
                 names.append(g)
+        names = [g for g in names if not grup_tersembunyi(g)]
         return names or [NAMA_GRUP_DEFAULT]
 
     # ── Login ──────────────────────────────────────────────────────────────────
@@ -14103,6 +16341,79 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
 
+    def _lisensi_dari_firestore(self):
+        """Ambil licenseStatus dari Firestore (billingps_users/<user>).
+
+        Mencoba beberapa username kandidat:
+          1. username hasil login
+          2. username yang PUNYA licenseStatus aktif untuk email akun ini
+             (dokumen lokal bisa berbeda nama, mis. login lokal '_3' vs
+              lisensi cloud 'rrbillingpro')
+
+        Return dict licenseStatus yang valid, atau None. Set
+        self._lic_firestore_user ke username cloud yang dipakai."""
+        self._lic_firestore_user = None
+        kandidat = []
+        for u in (self._resolve_license_user() or self.current_user or "").strip(),:
+            if u:
+                kandidat.append(u)
+        try:
+            fc = FirestoreClient()
+            # Email akun dari auth.json / config
+            email = ""
+            try:
+                import pathlib as _pl_e
+                _af = _pl_e.Path("rr_billing_auth.json")
+                if _af.exists():
+                    email = str((json.loads(_af.read_text()) or {}).get("email") or "").strip()
+            except Exception:
+                email = ""
+            if not email:
+                try:
+                    for _u, _d in (ConfigManager.get("users", {}) or {}).items():
+                        if isinstance(_d, dict) and str(_d.get("email") or "").strip():
+                            email = str(_d["email"]).strip()
+                            break
+                except Exception:
+                    pass
+            # Username cloud yang punya lisensi aktif untuk email ini.
+            # Jika email punya beberapa doc, kumpulkan SEMUA dan pilih ber-expiry
+            # terpanjang (mis. 'rrbillingpro' LIFETIME mengalahkan 'dedekemoking' 1 bulan).
+            if email:
+                try:
+                    for r in fc.query_where_equal("billingps_users", "email", email):
+                        rid = str(r.get("_id") or "")
+                        lsd = r.get("licenseStatus") or {}
+                        if not isinstance(lsd, dict) or lsd.get("status") != "active":
+                            continue
+                        bare = rid[6:] if rid.startswith("_user_") else rid
+                        if bare and bare not in kandidat:
+                            kandidat.append(bare)
+                except Exception as e:
+                    _LOGGER.warning("Cari username lisensi via email gagal: %s", e)
+            # Kumpulkan licenseStatus dari semua kandidat, pilih yang paling panjang.
+            terbaik = None
+            for u in kandidat:
+                try:
+                    ls = fc.fetch_license_status_by_username(u)
+                except Exception:
+                    ls = None
+                if not isinstance(ls, dict) or ls.get("status") != "active":
+                    continue
+                exp = str(ls.get("expiresAt") or ls.get("expired") or "")
+                try:
+                    ordinal = int(exp[:10].replace("-", "") or 0)
+                except Exception:
+                    ordinal = 0
+                if terbaik is None or ordinal > terbaik[0]:
+                    terbaik = (ordinal, u, ls)
+            if terbaik:
+                self._lic_firestore_user = terbaik[1]
+                return terbaik[2]
+        except Exception as e:
+            _LOGGER.warning("Baca licenseStatus Firestore gagal: %s", e)
+        return None
+
     def _try_restore_license_from_cloud(self):
         """Coba restore lisensi dari Firestore setelah login dengan 4 sumber."""
         if not self.current_user:
@@ -14231,6 +16542,25 @@ class AutoRentApp(ctk.CTk):
                     # Re-check lisensi setelah restore agar UI update
                     self.after(1000, self._cek_lisensi_saat_start)
                 return
+            # ── SOURCE 2: Firestore licenseStatus (billingps_users/<user>) ────
+            # PENTING: lisensi LIFETIME user disimpan di Firestore, bukan Supabase.
+            # Tanpa fallback ini akun lokal baru login终身 → jatuh ke trial 30 hari.
+            ls_fs = self._lisensi_dari_firestore()
+            if ls_fs:
+                import datetime as _dt
+                exp_raw = str(ls_fs.get("expiresAt") or ls_fs.get("expired") or "")
+                if exp_raw:
+                    _exp = _dt.datetime.fromisoformat(
+                        (exp_raw + "T00:00:00" if "T" not in exp_raw else exp_raw).replace("Z", "+00:00"))
+                    if _exp.tzinfo is None:
+                        _exp = _exp.replace(tzinfo=_dt.timezone.utc)
+                    if _exp > _dt.datetime.now(_dt.timezone.utc):
+                        _LOGGER.info("Cloud license restore: Firestore user='%s' maxTv=%s",
+                                     self._lic_firestore_user, ls_fs.get("maxTv"))
+                        _write_cloud_license(exp_raw, max_tv=int(ls_fs.get("maxTv") or 0) or 0,
+                                             promo_add_tv=int(ls_fs.get("promoAddTv") or 0) or 0)
+                        self.after(1000, self._cek_lisensi_saat_start)
+                        return
             # Fallback: cari langsung di tabel licenses
             try:
                 import datetime as _dt
@@ -14353,7 +16683,7 @@ class AutoRentApp(ctk.CTk):
         self._build_sidebar()
 
         self.frames = {}
-        for name in ["dashboard", "warnet", "harga", "stok", "riwayat", "booking", "wifi", "aktivasi", "profil", "log_aplikasi", "users"]:
+        for name in ["dashboard", "warnet", "harga", "stok", "riwayat", "booking", "wifi", "aktivasi", "profil", "log_aplikasi", "users", "member"]:
             f = ctk.CTkFrame(self.content, fg_color=C_BG, corner_radius=0)
             self.frames[name] = f
 
@@ -14367,6 +16697,7 @@ class AutoRentApp(ctk.CTk):
         self._setup_aktivasi()
         self._setup_profil()
         self._setup_log_aplikasi()
+        self._setup_member()
         # Admin-only kasir management tab (APTV2-style)
         if self.current_role == "admin":
             self._setup_users()
@@ -14439,6 +16770,7 @@ class AutoRentApp(ctk.CTk):
                 ("👤", "Profil",          "profil"),
                 ("📋", "Log Aplikasi",    "log_aplikasi"),
                 ("👥", "Manajemen Kasir", "users"),
+                ("💳", "Member",          "member"),
             ]
         else:
             nav_items = [
@@ -14447,6 +16779,7 @@ class AutoRentApp(ctk.CTk):
                 ("📋", "Histori Aktivasi", "aktivasi"),
                 ("📜", "Riwayat",         "riwayat"),
                 ("📅", "Booking",         "booking"),
+                ("💳", "Member",          "member"),
             ]
         self.nav_btns = {}
         for ico, label, key in nav_items:
@@ -14564,7 +16897,7 @@ class AutoRentApp(ctk.CTk):
     
     def _show_tab(self, key):
         role = self.current_role or "kasir"
-        kasir_allowed = {"dashboard", "warnet", "aktivasi", "riwayat", "booking"}
+        kasir_allowed = {"dashboard", "warnet", "aktivasi", "riwayat", "booking", "member"}
         if role != "admin" and key not in kasir_allowed:
             messagebox.showwarning("⚠ AKSES TERBATAS", "Hanya admin yang dapat mengakses fitur ini.")
             return
@@ -16880,7 +19213,8 @@ class AutoRentApp(ctk.CTk):
         if warnet_map:
             return
         if getattr(self, 'grup_tarif', None):
-            first = next(iter(self.grup_tarif.values()))
+            terlihat = [g for g in self.grup_tarif if not grup_tersembunyi(g)]
+            first = self.grup_tarif[terlihat[0]] if terlihat else next(iter(self.grup_tarif.values()))
             warnet_map['Warnet'] = {k: dict(v) for k, v in first.items()}
         else:
             warnet_map['Warnet'] = {k: dict(v) for k, v in _PAKET_STANDAR.items()}
@@ -16914,6 +19248,27 @@ class AutoRentApp(ctk.CTk):
             cfg['grup_tarif_warnet'] = warnet_map
             cfg['warnet_only_groups'] = sorted(set(warnet_only) | set(warnet_map.keys()))
             ConfigManager.save(cfg)
+
+    def _harga_pilih_grup(self, grup):
+        """Pilih grup tarif tertentu di tab Kontrol Harga.
+        Setara dengan `_ganti_grup_aktif`, tapi aman dipanggil via after() dan
+        memuat grup warnet dari `grup_tarif_warnet` bila belum ada di memori."""
+        if not hasattr(self, "_grup_aktif"):
+            return
+        if grup not in getattr(self, "grup_tarif", {}):
+            # grup baru dibuat di config — muat ke memori dulu
+            cfg = ConfigManager.load()
+            grup_tarif = cfg.get("grup_tarif", {}) or {}
+            if grup in grup_tarif:
+                self.grup_tarif[grup] = {k: dict(v) for k, v in grup_tarif[grup].items()}
+            else:
+                warnet_map = cfg.get("grup_tarif_warnet", {}) or {}
+                if grup in warnet_map:
+                    self.grup_tarif[grup] = {k: dict(v) for k, v in warnet_map[grup].items()}
+        if grup not in self.grup_tarif:
+            messagebox.showinfo("Grup Tarif", f"Grup '{grup}' belum tersedia di Kontrol Harga.")
+            return
+        self._ganti_grup_aktif(grup)
 
     def _refresh_grup_info(self):
         jumlah_tv = sum(1 for k in self._semua_kartu_tv if k.nama_grup == self._grup_aktif)
@@ -17354,8 +19709,12 @@ class AutoRentApp(ctk.CTk):
         grup_box = ctk.CTkFrame(self.scroll_harga, fg_color=C_PANEL, corner_radius=12,
                                  border_width=1, border_color=C_ACCENT2)
         grup_box.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(grup_box, text="🏷  GRUP TARIF (mis. PS3, PS4, Room VIP — masing-masing harga sendiri)",
-                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(12, 6))
+        ctk.CTkLabel(grup_box, text="🏷  GRUP TARIF REGULER (PS3, PS4, PS5, VIP — masing-masing harga sendiri)",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=16, pady=(12, 2))
+        ctk.CTkLabel(grup_box, text=("Harga isi ulang MEMBER tidak di sini — diatur dari tab "
+                                     "Member → Kontrol Harga Member (grup PS3/PS4/PS5/VIP MEMBER)."),
+                     font=FONT_SMALL, text_color=C_MUTED, justify="left",
+                     wraplength=900).pack(anchor="w", padx=16, pady=(0, 4))
 
         grup_row = ctk.CTkFrame(grup_box, fg_color="transparent")
         grup_row.pack(fill="x", padx=16, pady=(0, 6))
@@ -21103,6 +23462,509 @@ class AutoRentApp(ctk.CTk):
         ctk.CTkButton(dlg, text="Batal", fg_color="transparent", hover_color=C_BTN,
                       border_width=1, border_color=C_BORDER, font=("Russo One", 11), text_color=C_MUTED,
                       command=_cancel).pack(pady=(0, 12), padx=30, fill="x")
+
+    # ── Member (saldo waktu per grup member) ───────────────────────────────────
+    JENIS_MEMBER = MEMBER_JENIS          # PS3 / PS4 / PS5 / VIP
+
+    def _members_dict(self):
+        m = ConfigManager.get("members", {})
+        return m if isinstance(m, dict) else {}
+
+    def _member_label_aktif(self, hp, kecuali=""):
+        """Label kartu/kursi tempat member dengan No HP tsb sedang main.
+        Return "" kalau tidak sedang aktif. `kecuali` = label yang diabaikan."""
+        hp = str(hp or "").strip()
+        if not hp:
+            return ""
+        try:
+            semua = list(self._semua_kartu_tv or []) + list(
+                getattr(self, '_semua_kartu_warnet', []) or [])
+        except Exception:
+            return ""
+        for k in semua:
+            label = getattr(k, "label_tv", None) or getattr(k, "label_kursi", None) or ""
+            if label and label == kecuali:
+                continue
+            if getattr(k, "mode_member", False) and str(getattr(k, "member_hp", "") or "") == hp \
+                    and not k.sesi_kosong():
+                return label
+        return ""
+
+    def _setup_member(self):
+        f = self.frames.get("member")
+        if not f:
+            return
+        for w in f.winfo_children():
+            w.destroy()
+        hdr = ctk.CTkFrame(f, fg_color=C_PANEL, height=54, corner_radius=0)
+        hdr.pack(fill="x")
+        ctk.CTkLabel(hdr, text="💳  MANAJEMEN MEMBER",
+                     font=FONT_TITLE, text_color=C_ACCENT).pack(side="left", padx=18, pady=14)
+        ctk.CTkButton(hdr, text="➕ Daftar Member", fg_color=C_ACCENT2,
+                      command=lambda: self._member_dialog()).pack(side="right", padx=18, pady=10)
+
+        content = ctk.CTkScrollableFrame(f, fg_color=C_BG)
+        content.pack(fill="both", expand=True, padx=16, pady=12)
+
+        # ── Panel grup member (harga isi ulang + saldo per grup) ──
+        grup_card = ctk.CTkFrame(content, fg_color=C_PANEL, corner_radius=10,
+                                 border_width=1, border_color=C_ACCENT2)
+        grup_card.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(grup_card, text="GRUP MEMBER — klik untuk atur harga isi ulang",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=14, pady=(10, 2))
+        ctk.CTkLabel(grup_card, text=(
+            "Setiap grup punya saldo sendiri per member. Saldo 'PS3 MEMBER' hanya bisa dipakai di TV "
+            "grup PS3, dst. Harga isi ulang tiap grup diatur lewat Kontrol Harga Member "
+            "(klik chip di bawah) — bukan dari tab Kontrol Harga."),
+            font=FONT_SMALL, text_color=C_MUTED, justify="left",
+            wraplength=1000).pack(anchor="w", padx=14, pady=(0, 6))
+        chip_row = ctk.CTkFrame(grup_card, fg_color="transparent")
+        chip_row.pack(fill="x", padx=14, pady=(0, 4))
+        self._member_grup_chips = {}
+        for g in MEMBER_GRUP_LIST:
+            chip = ctk.CTkButton(chip_row, text=g, height=28, font=("Courier New", 11, "bold"),
+                                 fg_color=C_BTN, hover_color="#1E1E4A", text_color=C_TEXT,
+                                 corner_radius=14, command=lambda gg=g: self._member_buka_harga(gg))
+            chip.pack(side="left", padx=(0, 6))
+            self._member_grup_chips[g] = chip
+        self.mem_grup_status = ctk.CTkLabel(grup_card, text="", font=FONT_SMALL, text_color=C_MUTED)
+        self.mem_grup_status.pack(anchor="w", padx=14, pady=(2, 6))
+        ctk.CTkButton(grup_card, text="⚙️  Siapkan Grup Harga (PS3/PS4/PS5/VIP)",
+                      width=330, height=30, font=("Courier New", 10, "bold"),
+                      fg_color=C_BTN, hover_color="#1A3A5A", text_color="#3A8AFF",
+                      command=self._member_siapkan_grup_harga).pack(anchor="w", padx=14, pady=(0, 10))
+
+        search_row = ctk.CTkFrame(content, fg_color="transparent")
+        search_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(search_row, text="🔍", font=("Segoe UI Emoji", 14)).pack(side="left", padx=(0, 4))
+        self.mem_search = ctk.CTkEntry(search_row, placeholder_text="Cari member: nama / no HP / grup…",
+                                       fg_color=C_BTN, text_color=C_TEXT)
+        self.mem_search.pack(side="left", fill="x", expand=True)
+        self.mem_search.bind("<KeyRelease>", lambda e: self._refresh_member_list())
+        ctk.CTkButton(search_row, text="🔄 Refresh", width=100, fg_color=C_BTN,
+                      command=lambda: (self._member_persistensi_migrasi(), self._refresh_member_list())
+                      ).pack(side="left", padx=(6, 0))
+
+        list_card = ctk.CTkFrame(content, fg_color=C_PANEL, corner_radius=12)
+        list_card.pack(fill="both", expand=True)
+        ctk.CTkLabel(list_card, text="Daftar Member", font=FONT_SUB,
+                     text_color=C_ACCENT2).pack(anchor="w", padx=12, pady=(12, 6))
+        self.member_list_box = ctk.CTkScrollableFrame(list_card, fg_color="transparent")
+        self.member_list_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._member_persistensi_migrasi()
+        self._member_refresh_grup_chips()
+        self._refresh_member_list()
+
+    # ── migrasi ringan: pastikan grup member + saldo per grup tersedia ──
+    def _member_persistensi_migrasi(self):
+        try:
+            member_grup_siapkan()
+        except Exception as e:
+            _LOGGER.warning("member_grup_siapkan gagal: %s", e)
+        try:
+            member_saldo_migrasi()
+        except Exception as e:
+            _LOGGER.warning("member_saldo_migrasi gagal: %s", e)
+        # Grup member & 'Reguler' tidak boleh muncul di Kontrol Harga/dropdown kartu;
+        # kartu diarahkan ke grup reguler sekelas (idempotent).
+        try:
+            laporan = member_grup_pisahkan()
+            if laporan.get("dialihkan") or laporan.get("dibuat"):
+                _LOGGER.info("Pisahkan grup member: %s", laporan)
+                self._reload_grup_tarif()
+        except Exception as e:
+            _LOGGER.warning("member_grup_pisahkan gagal: %s", e)
+
+    def _member_siapkan_grup_harga(self):
+        """Pastikan grup reguler PS3/PS4/PS5/VIP ada & kartu tidak lagi menunjuk
+        grup tersembunyi ('Reguler' / '<JENIS> MEMBER')."""
+        if not messagebox.askyesno(
+                "Siapkan Grup Harga",
+                "Tindakan ini:\n"
+                "• Membuat grup tarif reguler PS3, PS4, PS5, VIP bila belum ada\n"
+                "• Mengarahkan TV/kursi yang masih di grup 'Reguler' atau grup MEMBER\n"
+                "  ke grup reguler sekelas\n\n"
+                "Grup 'Reguler' tetap disimpan sebagai cadangan internal (disembunyikan).\n"
+                "Lanjutkan?"):
+            return
+        try:
+            laporan = member_grup_pisahkan()
+        except Exception as e:
+            _LOGGER.warning("Siapkan grup harga gagal: %s", e)
+            messagebox.showerror("Siapkan Grup Harga", f"Gagal: {e}")
+            return
+        self._reload_grup_tarif()
+        self._member_refresh_grup_chips()
+        self._refresh_member_list()
+        ringkas = []
+        if laporan.get("dibuat"):
+            ringkas.append("grup dibuat: " + ", ".join(laporan["dibuat"]))
+        if laporan.get("dialihkan"):
+            ringkas.append("kartu dialihkan:\n• " + "\n• ".join(laporan["dialihkan"]))
+        if not ringkas:
+            ringkas = ["Semua sudah rapi — tidak ada perubahan."]
+        messagebox.showinfo("✅ Grup Harga Siap", "\n".join(ringkas))
+        AuditLogger.log(action="member_grup_pisahkan", username=self.current_user,
+                        status="success", details=laporan)
+
+    def _reload_grup_tarif(self):
+        """Muat ulang tarif di memori + segarkan semua dropdown grup."""
+        try:
+            cfg = ConfigManager.load()
+            self.grup_tarif = self._migrasi_grup_tarif(cfg.get("grup_tarif"),
+                                                        cfg.get("paket_main"))
+        except Exception as e:
+            _LOGGER.warning("Reload grup tarif gagal: %s", e)
+        for meth in ("_refresh_opt_grup_semua", "_refresh_grup_info", "_refresh_info_bebas"):
+            fn = getattr(self, meth, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception as e:
+                    _LOGGER.warning("%s gagal: %s", meth, e)
+        for kartu in self._semua_kartu_tv:
+            try:
+                kartu.get_paket_data = lambda g=kartu.nama_grup: self.get_paket_data(g)
+            except Exception:
+                pass
+        for kartu in getattr(self, '_semua_kartu_warnet', []):
+            try:
+                kartu.get_paket_data = lambda g=kartu.nama_grup: self.get_paket_data(g, for_warnet=True)
+            except Exception:
+                pass
+
+    def _member_refresh_grup_chips(self):
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        if hasattr(self, "mem_grup_status"):
+            rincian = []
+            for g in MEMBER_GRUP_LIST:
+                key = resolve_member_group(grup_tarif, g) or g
+                jml = len(member_grup_paket(grup_tarif, key))
+                rincian.append(f"{g}: {jml} paket")
+            self.mem_grup_status.configure(text="  •  ".join(rincian))
+
+    def _member_buka_harga(self, grup):
+        """Buka Kontrol Harga Member untuk grup tsb (dipakai saat isi ulang)."""
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        key = resolve_member_group(grup_tarif, grup) or grup
+        if key not in (grup_tarif or {}):
+            messagebox.showinfo("Grup Member",
+                                f"Grup '{key}' belum ada.\nTekan 🔄 Refresh untuk membuatnya otomatis.")
+            return
+        try:
+            DialogHargaMember(self, key, app=self).lift()
+        except Exception as e:
+            _LOGGER.warning("buka harga grup member gagal: %s", e)
+            messagebox.showerror("Kontrol Harga Member", f"Gagal membuka dialog: {e}")
+
+    def _refresh_member_list(self):
+        for w in self.member_list_box.winfo_children():
+            w.destroy()
+        q = ""
+        if hasattr(self, "mem_search"):
+            q = self.mem_search.get().strip().lower()
+        rows = []
+        for hp, m in self._members_dict().items():
+            if not isinstance(m, dict):
+                continue
+            nama = str(m.get("nama", ""))
+            saldo = member_saldo_grup(m)
+            if q and not (q in str(hp).lower() or q in nama.lower()
+                          or any(q in g.lower() for g in saldo)):
+                continue
+            rows.append((str(hp), nama, str(m.get("jenis", "VIP") or "VIP").strip().upper(),
+                         member_saldo_teks(m), member_saldo_total(m),
+                         str(m.get("terakhir_aktif", "") or "")))
+        rows.sort(key=lambda r: r[1].lower())
+        if not rows:
+            ctk.CTkLabel(self.member_list_box,
+                         text="Member tidak ditemukan." if q else "Belum ada member terdaftar.",
+                         font=FONT_SMALL, text_color=C_MUTED).pack(pady=18)
+            return
+        for hp, nama, jenis, saldo_teks, saldo_total, terakhir in rows:
+            row = ctk.CTkFrame(self.member_list_box, fg_color=C_CARD, corner_radius=8)
+            row.pack(fill="x", pady=6)
+            # Aksi pack DULU (side="right") supaya lebar tombol direservasi
+            # lebih dulu — kalau info (expand) dipack lebih awal, tombol
+            # tergeser keluar panel dan tidak terlihat.
+            ctk.CTkButton(row, text="🗑 Hapus", fg_color=C_RED, width=90,
+                          command=lambda h=hp, n=nama: self._member_delete(h, n)).pack(side="right", padx=(4, 8))
+            ctk.CTkButton(row, text="💰 Isi Ulang", fg_color=C_GREEN, width=110, text_color="black",
+                          command=lambda h=hp: self._member_topup(h)).pack(side="right", padx=4)
+            ctk.CTkButton(row, text="✏️ Edit", fg_color=C_BTN, width=85,
+                          command=lambda h=hp: self._member_dialog(h)).pack(side="right", padx=4)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True, padx=12, pady=6)
+            ctk.CTkLabel(info, text=f"{nama}  •  {jenis}", font=FONT_BODY,
+                         text_color=C_TEXT).pack(anchor="w")
+            ctk.CTkLabel(info, text=f"No HP: {hp}   •   Saldo: {saldo_teks}   "
+                                    f"•   Total: {fmt_durasi(saldo_total) if saldo_total > 0 else '0 menit'}",
+                         font=FONT_SMALL, text_color=C_YELLOW).pack(anchor="w")
+            sub = f"Jenis member: {jenis} — saldo awal & paket isi ulang memakai grup {member_group_name(jenis)}"
+            if terakhir:
+                sub += f"   •   Terakhir aktif: {terakhir}"
+            ctk.CTkLabel(info, text=sub, font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w")
+
+    def _member_dialog(self, hp_exist=None):
+        existing = None
+        if hp_exist:
+            existing = self._members_dict().get(hp_exist)
+            if not isinstance(existing, dict):
+                messagebox.showwarning("⚠ Tidak ada", "Member tidak ditemukan.")
+                return
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("Edit Member" if existing else "Daftar Member Baru")
+        dlg.geometry("480x440")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="EDIT MEMBER" if existing else "DAFTAR MEMBER BARU",
+                     font=("Russo One", 14, "bold"), text_color=C_ACCENT).pack(pady=(16, 10))
+
+        e_nama = ctk.CTkEntry(dlg, placeholder_text="Nama member (cth: Budi)",
+                              fg_color=C_BTN, text_color=C_TEXT)
+        e_nama.pack(fill="x", padx=30, pady=(0, 6))
+        if existing:
+            e_nama.insert(0, str(existing.get("nama", "")))
+
+        jenis_var = ctk.StringVar(value=str(existing.get("jenis", "VIP") if existing else "VIP").strip().upper())
+        ctk.CTkOptionMenu(dlg, values=list(self.JENIS_MEMBER), variable=jenis_var,
+                          fg_color=C_BTN, button_color=C_ACCENT2).pack(fill="x", padx=30, pady=(0, 6))
+
+        e_hp = ctk.CTkEntry(dlg, placeholder_text="No HP/WA (8–15 digit angka)",
+                            fg_color=C_BTN, text_color=C_TEXT)
+        e_hp.pack(fill="x", padx=30, pady=(0, 6))
+        if existing:
+            e_hp.insert(0, str(hp_exist))
+            e_hp.configure(state="disabled")
+
+        e_pin = ctk.CTkEntry(dlg, placeholder_text="PIN 4–6 digit" + (" (kosongkan jika tidak diubah)" if existing else ""),
+                             show="●", fg_color=C_BTN, text_color=C_TEXT)
+        e_pin.pack(fill="x", padx=30, pady=(0, 6))
+
+        lbl = ctk.CTkLabel(dlg, text="", font=("Consolas", 10), text_color=C_RED, wraplength=400)
+        lbl.pack(pady=(0, 6))
+
+        def _save():
+            nama = e_nama.get().strip()
+            hp = str(hp_exist) if existing else e_hp.get().strip()
+            pin = e_pin.get().strip()
+            jenis = jenis_var.get().strip().upper()
+            if not nama:
+                lbl.configure(text="Nama member wajib diisi.")
+                return
+            if not (hp.isdigit() and 8 <= len(hp) <= 15):
+                lbl.configure(text="No HP/WA tidak valid (8–15 digit angka).")
+                return
+            if jenis not in self.JENIS_MEMBER:
+                lbl.configure(text="Jenis member tidak valid.")
+                return
+            if existing:
+                if pin and not (pin.isdigit() and 4 <= len(pin) <= 6):
+                    lbl.configure(text="PIN harus 4–6 digit angka.")
+                    return
+            else:
+                if not (pin.isdigit() and 4 <= len(pin) <= 6):
+                    lbl.configure(text="PIN harus 4–6 digit angka.")
+                    return
+                if hp in self._members_dict():
+                    lbl.configure(text=f"No HP {hp} sudah terdaftar.")
+                    return
+
+            def _mut(cfg):
+                members = cfg.get("members", {}) or {}
+                if existing and isinstance(members.get(hp), dict):
+                    members[hp]["nama"] = nama
+                    members[hp]["jenis"] = jenis
+                    if pin:
+                        members[hp]["pin_enc"] = hash_password(pin)
+                else:
+                    members[hp] = {
+                        "nama": nama, "jenis": jenis, "pin_enc": hash_password(pin),
+                        "saldo_grup": {}, "saldo_menit": 0,
+                        "dibuat": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "terakhir_aktif": "", "riwayat_isi": [],
+                    }
+                cfg["members"] = members
+                return cfg
+
+            ConfigManager.update(_mut)
+            AuditLogger.log(action="member_edited" if existing else "member_created",
+                            username=self.current_user, status="success",
+                            details={"hp": hp, "nama": nama, "jenis": jenis})
+            dlg.destroy()
+            messagebox.showinfo("✅ Berhasil", f"Member '{nama}' {'diperbarui' if existing else 'terdaftar'}.")
+            self._refresh_member_list()
+
+        ctk.CTkButton(dlg, text="💾 SIMPAN", fg_color=C_ACCENT2,
+                      font=("Russo One", 12, "bold"), command=_save).pack(pady=(8, 4), padx=30, fill="x")
+        ctk.CTkButton(dlg, text="Batal", fg_color="transparent", hover_color=C_BTN,
+                      border_width=1, border_color=C_BORDER, font=("Russo One", 11), text_color=C_MUTED,
+                      command=dlg.destroy).pack(pady=(0, 12), padx=30, fill="x")
+
+    def _member_delete(self, hp, nama):
+        m = self._members_dict().get(hp) or {}
+        if not messagebox.askyesno("Hapus Member",
+                                   f"Nama : {nama}\nNo HP : {hp}\n"
+                                   f"Saldo : {member_saldo_teks(m)}\n\nYakin hapus member ini?"):
+            return
+
+        def _mut(cfg):
+            members = cfg.get("members", {}) or {}
+            members.pop(hp, None)
+            cfg["members"] = members
+            return cfg
+
+        ConfigManager.update(_mut)
+        AuditLogger.log(action="member_deleted", username=self.current_user, status="success",
+                        details={"hp": hp, "nama": nama})
+        self._refresh_member_list()
+
+    def _member_topup_paket(self, grup):
+        """Paket isi ulang dari grup MEMBER (PS3 MEMBER / PS4 MEMBER / ...)."""
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        return member_grup_paket(grup_tarif, grup)
+
+    def _member_grup_tersedia(self):
+        """Daftar grup member yang benar-benar ada di config."""
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        out = []
+        for g in MEMBER_GRUP_LIST:
+            key = resolve_member_group(grup_tarif, g)
+            if key and key not in out:
+                out.append(key)
+        return out
+
+    def _member_topup(self, hp):
+        m = self._members_dict().get(hp)
+        if not isinstance(m, dict):
+            messagebox.showwarning("⚠ Tidak ada", "Member tidak ditemukan.")
+            return
+        grup_tarif = ConfigManager.load().get("grup_tarif", {}) or {}
+        grup_opsi = self._member_grup_tersedia()
+        if not grup_opsi:
+            messagebox.showwarning("⚠ Grup Member Kosong",
+                                    "Grup PS3/PS4/PS5/VIP MEMBER belum tersedia.\n"
+                                    "Tekan 🔄 Refresh di tab Member untuk membuatnya.")
+            return
+        # Default: grup member sesuai jenis member
+        grup_default = (resolve_member_group(grup_tarif, m.get("jenis", "VIP"))
+                        or member_group_name(m.get("jenis", "VIP")) or grup_opsi[0])
+        if grup_default not in grup_opsi:
+            grup_default = grup_opsi[0]
+
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("Isi Ulang Saldo Waktu")
+        dlg.geometry("520x500")
+        dlg.configure(fg_color=C_BG)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="ISI ULANG SALDO WAKTU",
+                     font=("Russo One", 14, "bold"), text_color=C_ACCENT).pack(pady=(14, 2))
+        ctk.CTkLabel(dlg, text=(f"Member : {m.get('nama', '')}   •   No HP : {hp}   •   "
+                                f"Jenis : {str(m.get('jenis', 'VIP')).upper()}"),
+                     font=("Consolas", 11), text_color=C_TEXT).pack(pady=(0, 8))
+
+        ctk.CTkLabel(dlg, text="Grup member tujuan (saldo masuk ke grup ini)",
+                     font=FONT_SMALL, text_color=C_ACCENT2).pack(anchor="w", padx=30)
+        grup_var = ctk.StringVar(value=grup_default)
+        grup_menu = ctk.CTkOptionMenu(dlg, values=grup_opsi, variable=grup_var,
+                                      fg_color=C_BTN, button_color=C_ACCENT2)
+        grup_menu.pack(fill="x", padx=30, pady=(0, 8))
+
+        lbl_info = ctk.CTkLabel(dlg, text="", font=("Consolas", 11), text_color=C_YELLOW,
+                                justify="left", anchor="w")
+        lbl_info.pack(fill="x", padx=30, pady=(0, 6))
+        lbl_saldo = ctk.CTkLabel(dlg, text="", font=("Consolas", 10), text_color=C_MUTED,
+                                 justify="left", anchor="w", wraplength=440)
+        lbl_saldo.pack(fill="x", padx=30, pady=(0, 8))
+
+        pakets = []
+        labels = []
+        pkt_var = ctk.StringVar(value="")
+        paket_menu = ctk.CTkOptionMenu(dlg, values=["—"], variable=pkt_var,
+                                       fg_color=C_BTN, button_color=C_ACCENT2)
+        paket_menu.pack(fill="x", padx=30, pady=(0, 10))
+
+        def _muat_paket(grup_terpilih):
+            nonlocal pakets, labels
+            pakets = self._member_topup_paket(grup_terpilih)
+            labels = [f"{p['nama']}  —  {fmt_rp(p['harga'])}  ({p['menit']} menit)" for p in pakets]
+            if not labels:
+                paket_menu.configure(values=["— belum ada paket —"])
+                pkt_var.set("— belum ada paket —")
+            else:
+                paket_menu.configure(values=labels)
+                pkt_var.set(labels[0])
+            member_baru = self._members_dict().get(hp) or {}
+            lbl_info.configure(text=f"Saldo {grup_terpilih}: "
+                                   f"{fmt_durasi(member_saldo_grup(member_baru).get(norm_grup(grup_terpilih), 0))}")
+            lbl_saldo.configure(text="Saldo member saat ini: " + member_saldo_teks(member_baru))
+
+        grup_menu.configure(command=lambda v: _muat_paket(v))
+        _muat_paket(grup_default)
+
+        def _proses():
+            grup_terpilih = norm_grup(grup_var.get())
+            try:
+                pkt = pakets[labels.index(pkt_var.get())]
+            except (ValueError, IndexError):
+                messagebox.showwarning("⚠ Paket", "Pilih paket isi ulang yang tersedia dulu.")
+                return
+            menit = int(pkt["menit"])
+            harga = int(pkt["harga"])
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            def _mut(cfg):
+                members = cfg.get("members", {}) or {}
+                mm = members.get(hp)
+                if isinstance(mm, dict):
+                    saldo = member_saldo_grup(mm)
+                    saldo[grup_terpilih] = saldo.get(grup_terpilih, 0) + menit
+                    mm["saldo_grup"] = saldo
+                    mm["saldo_menit"] = sum(saldo.values())
+                    mm["terakhir_aktif"] = now_str
+                    riw = mm.setdefault("riwayat_isi", [])
+                    riw.append({"tgl": now_str, "grup": grup_terpilih, "paket": pkt["nama"],
+                                "menit": menit, "harga": harga, "kasir": self.current_user})
+                    if len(riw) > 100:
+                        del riw[:-100]
+                cfg["members"] = members
+                return cfg
+
+            ConfigManager.update(_mut)
+            try:
+                nama_m = str(m.get('nama', '') or '').strip() or hp
+                self._catat_transaksi(
+                    "ISI ULANG MEMBER",
+                    f"{nama_m} · {pkt['nama']} ({grup_terpilih}) +{menit} mnt",
+                    {}, harga, source='tv', paid=True)
+                if self.riwayat_meta:
+                    self.riwayat_meta[-1]['member_hp'] = hp
+                    self.riwayat_meta[-1]['member_nama'] = nama_m
+                    self.riwayat_meta[-1]['member_grup'] = grup_terpilih
+                    self.riwayat_meta[-1]['topup'] = {"paket": pkt["nama"], "menit": menit,
+                                                     "harga": harga, "grup": grup_terpilih}
+                    self._save_riwayat()
+            except Exception as e:
+                _LOGGER.warning("Catat laporan isi ulang member gagal: %s", e)
+            AuditLogger.log(action="member_topup", username=self.current_user, status="success",
+                            details={"hp": hp, "grup": grup_terpilih, "paket": pkt["nama"],
+                                     "menit": menit, "harga": harga})
+            dlg.destroy()
+            messagebox.showinfo("✅ Berhasil",
+                                f"Isi ulang {pkt['nama']} ({grup_terpilih}) berhasil — +{menit} menit.")
+            self._refresh_member_list()
+
+        ctk.CTkButton(dlg, text="💰 Proses Isi Ulang", fg_color=C_GREEN, text_color="black",
+                      font=("Russo One", 12, "bold"), command=_proses).pack(pady=(8, 4), padx=30, fill="x")
+        ctk.CTkButton(dlg, text="Batal", fg_color="transparent", hover_color=C_BTN,
+                      border_width=1, border_color=C_BORDER, font=("Russo One", 11), text_color=C_MUTED,
+                      command=dlg.destroy).pack(pady=(0, 12), padx=30, fill="x")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── LOG APLIKASI (app.log — selalu ada di setiap run) ─────────────────────────

@@ -163,6 +163,47 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404, "Halaman QR tidak ditemukan")
             return
 
+        # Halaman login member via QR (scan dari TV) — served lokal sebagai
+        # cadangan bila halaman Firebase tidak terjangkau.
+        if qdir and path in ("/qr/member.html", "/member.html"):
+            full = os.path.join(qdir, "member.html")
+            if os.path.isfile(full):
+                size = os.path.getsize(full)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.log_access("qr/member.html served")
+                if not head_only:
+                    with open(full, "rb") as f:
+                        self.wfile.write(f.read())
+                return
+            self.log_access("qr/member.html MISSING")
+            self.send_error(404, "Halaman member tidak ditemukan")
+            return
+
+        # Gambar PNG QR sesi member — filename.png (prefix /qr/)
+        if path.startswith("/qr/") and path.lower().endswith(".png"):
+            fname = os.path.basename(unquote(path[len("/qr/"):]))
+            folder = os.path.join(self.media.qr_panggilan_dir or "", "")
+            full = os.path.join(folder, fname)
+            if fname and os.path.isfile(full):
+                size = os.path.getsize(full)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.log_access(f"qr/{fname} served")
+                if not head_only:
+                    with open(full, "rb") as f:
+                        self.wfile.write(f.read())
+                return
+            self.log_access(f"qr/{fname} MISSING")
+            self.send_error(404, "Gambar QR tidak ditemukan")
+            return
+
         if path == "/health":
             body = (
                 '{"ok":true,"running":true,"media":"%s"}'
@@ -270,6 +311,7 @@ class TvMediaServer:
         self.host = host
         self.debug_log = debug_log
         self.qr_page_dir = qr_page_dir or ""
+        self.qr_panggilan_dir = ""
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.running = False

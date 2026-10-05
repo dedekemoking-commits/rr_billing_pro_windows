@@ -324,6 +324,21 @@ class SupabaseQrSession:
             _LOGGER.warning("SupabaseQrSession.get_by_id error: %s", e)
         return {}
 
+    def insert(self, data: dict) -> dict:
+        """Insert satu baris sesi; return baris hasil insert (punya 'id')."""
+        url = f"{SUPABASE_URL}/rest/v1/{QR_SESSIONS_TABLE}"
+        try:
+            resp = self._session.post(url, json=data, timeout=12)
+            if resp.status_code in (200, 201):
+                rows = resp.json()
+                if isinstance(rows, list) and rows:
+                    if isinstance(rows[0], dict):
+                        rows[0]["_id"] = rows[0].get("id", "")
+                    return rows[0] if isinstance(rows[0], dict) else {}
+        except Exception as e:
+            _LOGGER.warning("SupabaseQrSession.insert error: %s", e)
+        return {}
+
     def update(self, row_id: str, data: dict) -> bool:
         url = f"{SUPABASE_URL}/rest/v1/{QR_SESSIONS_TABLE}?id=eq.{row_id}"
         try:

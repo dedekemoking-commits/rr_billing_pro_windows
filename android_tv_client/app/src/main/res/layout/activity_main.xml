@@ -113,6 +113,35 @@
             android:backgroundTint="#333333" />
 
         <TextView
+            android:id="@+id/tv_lock_bg"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="Background lockscreen (gambar bergerak):"
+            android:textColor="@color/text_muted"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/et_lock_bg_url"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="6dp"
+            android:hint="URL video MP4 (dari kasir)"
+            android:inputType="textUri"
+            android:textColor="@color/white"
+            android:textColorHint="@color/text_muted"
+            android:background="@drawable/bg_input" />
+
+        <Button
+            android:id="@+id/btn_lock_bg"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="10dp"
+            android:text="GANTI BACKGROUND LOCKSCREEN"
+            android:textSize="15sp"
+            android:backgroundTint="#1F6F4A" />
+
+        <TextView
             android:id="@+id/tv_status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

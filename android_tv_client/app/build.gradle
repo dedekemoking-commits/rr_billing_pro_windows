@@ -11,8 +11,8 @@ android {
         applicationId 'com.rrbillingpro.tvclient'
         minSdk 24
         targetSdk 34
-        versionCode 48
-        versionName '4.8'
+        versionCode 49
+        versionName '4.9'
     }
 
     buildTypes {
@@ -44,4 +44,7 @@ dependencies {
     // 1.4.1 = versi yang kompatibel dengan compileSdk 34 / AGP 8.5.
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
     implementation 'androidx.media3:media3-common:1.4.1'
+    // media3-ui: PlayerView untuk MP4 loop background lockscreen & panel kanan
+    // layar QR sesi member.
+    implementation 'androidx.media3:media3-ui:1.4.1'
 }

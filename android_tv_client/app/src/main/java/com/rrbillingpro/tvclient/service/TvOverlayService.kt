@@ -29,6 +29,7 @@ import com.rrbillingpro.tvclient.net.TimerEngine
 import com.rrbillingpro.tvclient.net.WebSocketManager
 import com.rrbillingpro.tvclient.overlay.OverlayWidget
 import com.rrbillingpro.tvclient.overlay.PinOverlay
+import com.rrbillingpro.tvclient.overlay.QrOverlay
 import com.rrbillingpro.tvclient.permission.OverlayPermission
 import com.rrbillingpro.tvclient.util.Prefs
 import org.json.JSONObject
@@ -47,6 +48,7 @@ class TvOverlayService : Service() {
     private var ws: WebSocketManager? = null
     private var overlay: OverlayWidget? = null
     private var pinOverlay: PinOverlay? = null
+    private var qrOverlay: QrOverlay? = null
     private var timer: TimerEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var screenWakeLock: PowerManager.WakeLock? = null
@@ -165,6 +167,7 @@ class TvOverlayService : Service() {
         stopTimerAndWs()
         overlay?.hide()
         pinOverlay?.hide()
+        qrOverlay?.hide()
         super.onDestroy()
         if (instance === this) instance = null
     }
@@ -366,6 +369,7 @@ class TvOverlayService : Service() {
 
         overlay = OverlayWidget(this)
         pinOverlay = PinOverlay(this)
+        qrOverlay = QrOverlay(this)
 
         timer = TimerEngine(
             onTick = { remaining -> updateTimerUi(remaining) },
@@ -484,6 +488,8 @@ class TvOverlayService : Service() {
                 lastTagihan = msg.tagihanTotal
                 lastMeja = msg.mejaId.ifBlank { lastMeja }
                 lastRental = msg.namaRental.ifBlank { lastRental }
+                // Sesi benar-benar berjalan -> layar QR member tidak perlu lagi.
+                qrOverlay?.hide()
                 // R3: lastPromoUrl TIDAK dihapus saat sesi mulai — promo tetap
                 // diputar 1x setiap TV bangun dari tidur walau ada sesi berjalan.
                 applyOverlayConfig(msg.overlayMode, msg.overlayLastMinutes)
@@ -513,6 +519,7 @@ class TvOverlayService : Service() {
                 setSessionScreenOn(false)
                 timer?.stop()
                 overlay?.hide()
+                qrOverlay?.hide()
                 setLocked(false, null)
             }
 
@@ -595,6 +602,32 @@ class TvOverlayService : Service() {
 
             Actions.HIDE_PIN -> {
                 pinOverlay?.hide()
+            }
+
+            Actions.SHOW_QR -> {
+                // Kasir menekan 👤 MEMBER: QR di kiri ¼ layar, panel kanan berisi
+                // video gambar bergerak + info rental. Sempre pastikan TV menyala.
+                if (msg.mediaUrl.isNotBlank()) {
+                    setSessionScreenOn(true)
+                    val bg = msg.bgUrl.ifBlank { Prefs.lockBgUrl(this) }
+                    qrOverlay?.show(msg.mediaUrl, msg.mejaId, msg.grup, lastRental, bg)
+                    updateNotification("Menunggu scan QR member")
+                }
+            }
+
+            Actions.HIDE_QR -> {
+                qrOverlay?.hide()
+            }
+
+            Actions.UPDATE_LOCK_BG -> {
+                // Kasir mengunggah gambar bergerak baru -> simpan untuk lockscreen
+                // dan panel kanan layar QR. JANGAN menutup overlay QR yang sedang
+                // tampil (hanya lockscreen yang perlu disegarkan).
+                if (msg.bgUrl.isNotBlank()) {
+                    Prefs.saveLockBg(this, msg.bgUrl)
+                    LockScreenActivity.updateBgUrl(msg.bgUrl)
+                    qrOverlay?.updateBgVideo(msg.bgUrl)
+                }
             }
 
             Actions.QUERY_SCREEN_STATE -> {

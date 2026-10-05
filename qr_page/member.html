@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<script>if(location.protocol==="http:"&&location.hostname!=='localhost'){location.replace("https://"+location.host+location.pathname+location.search);}</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Masuk Member</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #001A2E; color: #eaf6ff; padding-bottom: 24px; }
+  header { background: #00334d; padding: 18px 16px; text-align: center; }
+  header h1 { color: #00E5FF; font-size: 20px; }
+  header p { color: #9fb6c8; font-size: 13px; margin-top: 4px; }
+  main { padding: 16px; max-width: 520px; margin: 0 auto; }
+  .card { background: #0b2c42; border: 1px solid #14577a; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { color: #00E5FF; font-size: 15px; margin-bottom: 8px; }
+  label { display: block; font-size: 13px; color: #cfe6f5; margin: 10px 0 4px; }
+  input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #14577a;
+    background: #071e2f; color: #eaf6ff; font-size: 16px; }
+  input:focus { outline: none; border-color: #00E5FF; }
+  button.big { width: 100%; padding: 14px; margin-top: 12px; border: 0; border-radius: 10px;
+    background: #00E5FF; color: #001A2E; font-size: 17px; font-weight: 700; }
+  button.big:active { opacity: .8; }
+  button.big:disabled { background: #2a5a70; color: #7fa5b8; }
+  button.ghost { width: 100%; padding: 11px; margin-top: 8px; border: 1px solid #14577a; border-radius: 10px;
+    background: transparent; color: #9fb6c8; font-size: 14px; }
+  .status { padding: 16px; text-align: center; border-radius: 12px; margin-top: 10px; font-size: 15px; }
+  .err { color: #ff9999; background: #3a1116; border: 1px solid #6b2029; }
+  .ok { color: #8dffb0; background: #06402a; border: 1px solid #175c3d; }
+  .info { color: #cfe6f5; background: #08253a; border: 1px solid #14577a; }
+  .saldo-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0;
+    border-bottom: 1px dashed #14577a; font-size: 14px; }
+  .saldo-row:last-child { border-bottom: 0; }
+  .saldo-row b { color: #00E5FF; }
+  .pakai { background: #0e3d2a; border-radius: 8px; padding: 2px 8px; font-size: 12px; color: #8dffb0; }
+  .hidden { display: none !important; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid #14577a;
+    border-top-color: #00E5FF; border-radius: 50%; animation: sp 1s linear infinite; vertical-align: -2px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .ket { font-size: 12px; color: #7f9cb0; margin-top: 10px; text-align: center; }
+  #pinInput { letter-spacing: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>👤 MASUK SESI MEMBER</h1>
+  <p id="tvLabel">Memuat…</p>
+</header>
+<main>
+  <div class="card" id="card-1">
+    <h2>Langkah 1 — Nama Member</h2>
+    <label for="namaInput">Masukkan nama member terdaftar</label>
+    <input id="namaInput" type="text" autocomplete="off" autocapitalize="words"
+           placeholder="contoh: Budi" enterkeyhint="next">
+    <button class="big" id="btnCek" onclick="cekNama()">CEK SALDO</button>
+    <button class="ghost" onclick="keLangkah1()">Ganti nama</button>
+  </div>
+
+  <div class="card hidden" id="card-2">
+    <h2>Langkah 2 — Sisa Waktu Anda</h2>
+    <div id="daftarSaldo"></div>
+    <div class="status info hidden" id="saldoNote"></div>
+    <label for="pinInput">Masukkan PIN member (4–6 angka)</label>
+    <input id="pinInput" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"
+           placeholder="••••" enterkeyhint="go">
+    <button class="big" id="btnPin" onclick="kirimPin()">MULAI SESI</button>
+    <button class="ghost" onclick="keLangkah1()">Ganti nama</button>
+  </div>
+
+  <div id="status"></div>
+  <p class="ket" id="ket"></p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+var SUPABASE_URL = 'https://nqaucjpbnewckedqcezb.supabase.co';
+var SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xYXVjanBibmV3Y2tlZHFjZXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MjUyNzUsImV4cCI6MjEwNDEwMTI3NX0.xi-h-3E2Yww95HzXsNmmiOmdvMKi_TaFNw8Op7xryig';
+var TABLE = 'qr_sessions';
+
+var params = new URLSearchParams(location.search);
+var SID = params.get('s') || '';          // id dokumen sesi (jika QR dari media server lokal)
+var TV = params.get('tv') || '';
+var KODE = params.get('k') || '';
+var GRUP = params.get('g') || '';
+var NAMA = '';
+var_timer = null;
+var docAwal = null;
+
+var ST = {
+  AWAIT:'mem_await', SALDO:'mem_saldo', OK:'mem_ok', NOTFOUND:'mem_notfound',
+  AMBIGU:'mem_ambigu', BADPIN:'mem_badpin', NOSALDO:'mem_nosaldo', BUSY:'mem_busy',
+  CANCEL:'mem_cancel', EXPIRED:'mem_expired', BLOCKED:'mem_blocked'
+};
+
+function api() {
+  return supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function durasi(m){
+  m = Math.max(0, parseInt(m||0,10));
+  if (!m) return '0 menit';
+  var j = Math.floor(m/60), s = m%60;
+  if (j && s) return j+' jam '+s+' menit';
+  if (j) return j+' jam';
+  return s+' menit';
+}
+function statusBox(msg, cls) {
+  document.getElementById('status').innerHTML =
+    '<div class="status '+(cls||'info')+'">'+msg+'</div>';
+}
+function semua(cls, on) {
+  var el = document.getElementById(cls);
+  if (el) el.classList.toggle('hidden', !on);
+}
+
+async function cariSesi() {
+  var sb = api();
+  if (SID) {
+    var q1 = sb.from(TABLE).select('*').eq('id', SID).limit(1);
+    var r1 = await q1;
+    if (r1.data && r1.data.length) { docAwal = r1.data[0]; return docAwal; }
+  }
+  // fallback: cari lewat tv + kode (kalau halaman dibuka tanpa param sid)
+  if (TV && KODE) {
+    var q2 = sb.from(TABLE).select('*').eq('tv', TV).eq('kode', KODE)
+              .order('created', {ascending:false}).limit(1);
+    var r2 = await q2;
+    if (r2.data && r2.data.length) { docAwal = r2.data[0]; SID = docAwal.id; return docAwal; }
+  }
+  return null;
+}
+
+function reqFromDoc(doc) {
+  try { return (doc && doc.pin_user && String(doc.pin_user).charAt(0)==='{')
+            ? JSON.parse(doc.pin_user) : {}; } catch (e) { return {}; }
+}
+function jawabDariDoc(doc) {
+  try { return (doc && doc.pin && String(doc.pin).charAt(0)==='{')
+            ? JSON.parse(doc.pin) : {}; } catch (e) { return {}; }
+}
+
+async function cekNama() {
+  NAMA = document.getElementById('namaInput').value.trim();
+  if (!NAMA) { statusBox('Masukkan nama member terlebih dahulu.', 'err'); return; }
+  var btn = document.getElementById('btnCek');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Memeriksa…';
+  statusBox('Mencari nama member…', 'info');
+  var ok = await tulis({ n: NAMA });
+  btn.disabled = false; btn.textContent = 'CEK SALDO';
+  if (!ok) { statusBox('Gagal menghubungi kasir. Coba lagi ya.', 'err'); return; }
+  document.getElementById('ket').textContent = 'Menunggu respons kasir…';
+}
+
+async function kirimPin() {
+  var pin = document.getElementById('pinInput').value.trim();
+  if (!/^\d{4,6}$/.test(pin)) { statusBox('PIN harus 4–6 digit angka.', 'err'); return; }
+  var btn = document.getElementById('btnPin');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Memeriksa PIN…';
+  var ok = await tulis({ n: NAMA, p: pin });
+  btn.disabled = false; btn.textContent = 'MULAI SESI';
+  if (!ok) { statusBox('Gagal menghubungi kasir. Coba lagi ya.', 'err'); return; }
+}
+
+async function tulis(req) {
+  try {
+    var sb = api();
+    var upd = sb.from(TABLE).update({ pin_user: JSON.stringify(req) }).eq('id', SID);
+    var r = await upd;
+    return !r.error;
+  } catch (e) { return false; }
+}
+
+function keLangkah1() {
+  semua('card-1', true);
+  semua('card-2', false);
+  document.getElementById('status').innerHTML = '';
+  document.getElementById('ket').textContent = '';
+}
+
+function tampilSaldo(jawab) {
+  var html = '';
+  var saldo = jawab.saldo || {};
+  var pakai = (jawab.grup_member || '').toUpperCase();
+  var grupTv = (jawab.grup_tv || GRUP || '').toUpperCase();
+  var kunci = Object.keys(saldo);
+  if (!kunci.length) {
+    html = '<div class="saldo-row"><span>Belum ada saldo waktu</span></div>';
+  } else {
+    kunci.forEach(function(g) {
+      var aktif = pakai && (g.toUpperCase() === pakai);
+      html += '<div class="saldo-row"><span>'+esc(g)+(aktif?' <span class="pakai">dipakai</span>':'')+
+              '</span><b>'+durasi(saldo[g])+'</b></div>';
+    });
+  }
+  document.getElementById('daftarSaldo').innerHTML = html;
+  var note = document.getElementById('saldoNote');
+  if (!jawab.bisa) {
+    note.classList.remove('hidden');
+    note.className = 'status err';
+    note.innerHTML = esc(jawab.msg || 'Saldo tidak cukup untuk TV ini.');
+  } else {
+    note.className = 'status info hidden';
+    var g = jawab.grup_member ? esc(jawab.grup_member) : 'semua grup';
+    note.classList.remove('hidden');
+    note.innerHTML = 'Sesi akan memakai saldo <b>'+g+'</b> — sisa <b>'+durasi(jawab.menit)+
+                     '</b>.<br><span style="font-size:12px">TV grup '+(grupTv||'-')+
+                     (grupTv && g ? '' : ' (ruang generik)')+'</span>';
+  }
+  semua('card-1', false);
+  semua('card-2', true);
+  document.getElementById('pinInput').focus();
+}
+
+function tampilStatus(doc) {
+  var st = String(doc.status || '');
+  var jawab = jawabDariDoc(doc);
+  var req = reqFromDoc(doc);
+  var ket = document.getElementById('ket');
+  if (st === ST.OK) {
+    semua('card-1', false); semua('card-2', false);
+    var menit = jawab.menit || 0;
+    statusBox('✅ <b>Sesi dimulai!</b><br>'+esc(jawab.nama||'')+
+              ' · '+durasi(menit)+' berjalan di '+esc(TV||'TV')+'.<br>'+
+              '<span style="font-size:13px;opacity:.8">Silakan kembali ke TV dan enjoy!</span>', 'ok');
+    ket.textContent = 'Halaman ini boleh ditutup.';
+    stopPolling();
+    return true;
+  }
+  if (st === ST.NOTFOUND) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('❌ <b>ID tidak ditemukan</b><br><span style="font-size:13px">'+
+              'Nama tidak terdaftar. Periksa lagi atau hubungi kasir.</span>','err');
+    return true; }
+  if (st === ST.AMBIGU) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('⚠️ <b>Nama dipakai lebih dari satu member</b><br>'+
+              '<span style="font-size:13px">Silakan hubungi kasir untuk memakai PIN langsung.</span>','err');
+    return true; }
+  if (st === ST.BADPIN) {
+    document.getElementById('pinInput').value = '';
+    statusBox('❌ <b>PIN anda masukkan salah</b><br><span style="font-size:13px">Coba lagi.</span>','err');
+    var tries = parseInt(doc.tries||0,10);
+    ket.textContent = 'Percobaan ' + tries + ' dari 5.';
+    return true;
+  }
+  if (st === ST.NOSALDO) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('❌ <b>Saldo tidak cukup</b><br><span style="font-size:13px">'+
+              esc(jawab.msg || doc.reason || 'Isi ulang dulu di kasir.')+'</span>','err');
+    return true; }
+  if (st === ST.BUSY) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('⛔ <b>'+esc(jawab.msg || doc.reason || 'Member sedang dipakai')+'</b>','err');
+    return true; }
+  if (st === ST.CANCEL) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('ℹ️ Sesi dibatalkan kasir.<br><span style="font-size:13px">Silakan hubungi kasir lagi.</span>','err');
+    return true; }
+  if (st === ST.EXPIRED) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('⌛ <b>Waktu habis</b><br><span style="font-size:13px">QR tidak berlaku lagi. '+
+              'Minta kasir buka sesi baru.</span>','err');
+    return true; }
+  if (st === ST.BLOCKED) { stopPolling(); semua('card-1',false); semua('card-2',false);
+    statusBox('🔒 <b>PIN salah terlalu sering</b><br><span style="font-size:13px">Sesi dibatalkan.</span>','err');
+    return true; }
+  if (st === ST.SALDO) {
+    if (req && req.n) NAMA = req.n;
+    tampilSaldo(jawab);
+    statusBox('Saldo ditemukan ✅ Lanjutkan dengan PIN.', 'info');
+    ket.textContent = 'Menunggu PIN…';
+    return true;
+  }
+  return false;
+}
+
+function stopPolling() {
+  if (_timer) { clearInterval(_timer); _timer = null; }
+}
+
+async function poll() {
+  var doc = await cariSesi();
+  if (!doc) { statusBox('❌ QR tidak berlaku / sudah kedaluwarsa.<br>'+
+    '<span style="font-size:13px">Minta kasir membuka sesi baru.</span>','err'); stopPolling(); return; }
+  if (tampilStatus(doc)) { if (String(doc.status)!==ST.BADPIN) stopPolling(); }
+  else if (String(doc.status)===ST.AWAIT && !NAMA) {
+    // masih menunggu pelanggan mengetik nama
+  }
+}
+
+async function init() {
+  var doc = await cariSesi();
+  if (!doc) {
+    document.getElementById('tvLabel').textContent = TV ? TV : '-';
+    semua('card-1', false); semua('card-2', false);
+    statusBox('❌ QR tidak valid atau sudah kedaluwarsa.<br>'+
+              '<span style="font-size:13px">Silakan hubungi kasir.</span>','err');
+    return;
+  }
+  document.getElementById('tvLabel').textContent = (TV || doc.tv || 'TV') +
+    (GRUP ? ' · grup ' + GRUP : '');
+  var st = String(doc.status || '');
+  if (st && st !== ST.AWAIT) {
+    // sesi sudah berjalan/dibatalkan sebelum halaman dibuka — tampilkan hasilnya
+    if (!tampilStatus(doc)) {
+      semua('card-1', false); semua('card-2', false);
+      statusBox('ℹ️ Sesi ini sudah tidak aktif.<br>'+
+                '<span style="font-size:13px">Minta kasir membuka sesi baru.</span>','err');
+    }
+    return;
+  }
+  _timer = setInterval(poll, 2500);
+  poll();
+}
+
+document.addEventListener('DOMContentLoaded', init);
+document.getElementById('pinInput') &&
+  document.getElementById('pinInput').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') kirimPin();
+  });
+document.getElementById('namaInput') &&
+  document.getElementById('namaInput').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') cekNama();
+  });
+</script>
+</body>
+</html>

@@ -146,6 +146,39 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(200, ok, "HIDE_MEDIA terkirim" if ok else "TV tidak terhubung",
                           action="HIDE_MEDIA", meja_id=meja_id)
 
+        elif path == "/api/show-qr":
+            url = str(data.get("url", ""))
+            grup = str(data.get("grup", ""))
+            sisa = int(data.get("sisa_detik", 0) or 0)
+            bg = str(data.get("bg_url", "") or "")
+            send = getattr(self.hub, "send_show_qr", None)
+            if not callable(send):
+                self._respond(400, False, "Hub tidak mendukung SHOW_QR")
+                return
+            ok = send(meja_id, url, grup, sisa)
+            if ok and bg:
+                upd = getattr(self.hub, "send_update_lock_bg", None)
+                if callable(upd):
+                    upd(meja_id, bg)
+            self._respond(200, ok, "SHOW_QR terkirim" if ok else "TV tidak terhubung",
+                          action="SHOW_QR", meja_id=meja_id, url=url, grup=grup)
+
+        elif path == "/api/hide-qr":
+            send = getattr(self.hub, "send_hide_qr", None)
+            ok = bool(callable(send)) and send(meja_id)
+            self._respond(200, ok, "HIDE_QR terkirim" if ok else "TV tidak terhubung",
+                          action="HIDE_QR", meja_id=meja_id)
+
+        elif path == "/api/lock-bg":
+            bg = str(data.get("bg_url", ""))
+            send = getattr(self.hub, "send_update_lock_bg", None)
+            if not callable(send):
+                self._respond(400, False, "Hub tidak mendukung UPDATE_LOCK_BG")
+                return
+            ok = send(meja_id, bg)
+            self._respond(200, ok, "UPDATE_LOCK_BG terkirim" if ok else "TV tidak terhubung",
+                          action="UPDATE_LOCK_BG", meja_id=meja_id, bg_url=bg)
+
         else:
             self._respond(404, False, f"Not found: {path}")
 

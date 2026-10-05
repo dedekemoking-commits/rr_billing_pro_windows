@@ -22,6 +22,7 @@ object Prefs {
     private const val KEY_LOCK_TAGIHAN_TOTAL = "lock_tagihan_total"
     private const val KEY_LOCK_LOGO = "lock_logo"
     private const val KEY_LOCK_PROMO = "lock_promo"
+    private const val KEY_LOCK_BG = "lock_bg_video"
     private const val KEY_LAST_INPUT = "last_used_input"
 
 
@@ -98,6 +99,16 @@ object Prefs {
 
     fun getLastInput(ctx: Context): String = sp(ctx).getString(KEY_LAST_INPUT, "") ?: ""
 
+    /**
+     * URL MP4 loop untuk background lockscreen. Diisi kasir lewat
+     * Overlay → Upload Gambar Bergerak, lalu dikirim server sebagai
+     * UPDATE_LOCK_BG. Kosong = pakai gambar bawaan aplikasi.
+     */
+    fun lockBgUrl(ctx: Context): String = sp(ctx).getString(KEY_LOCK_BG, "") ?: ""
+
+    fun saveLockBg(ctx: Context, url: String) {
+        sp(ctx).edit().putString(KEY_LOCK_BG, url.trim()).apply()
+    }
     fun saveLastInput(ctx: Context, inputId: String) {
         sp(ctx).edit().putString(KEY_LAST_INPUT, inputId).apply()
     }

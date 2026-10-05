@@ -10,6 +10,8 @@ import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
+import com.rrbillingpro.tvclient.lockscreen.LockScreenActivity
 import com.rrbillingpro.tvclient.overlay.OverlayWidget
 import com.rrbillingpro.tvclient.permission.OverlayPermission
 import com.rrbillingpro.tvclient.service.TvOverlayService
@@ -46,6 +48,8 @@ class MainActivity : Activity(), TvOverlayService.StateListener {
         etMeja = findViewById(R.id.et_meja_id)
         tvStatus = findViewById(R.id.tv_status)
         tvNote = findViewById(R.id.tv_overlay_note)
+        val etLockBg = findViewById<EditText>(R.id.et_lock_bg_url)
+        etLockBg.setText(Prefs.lockBgUrl(this))
 
         etHost.setText(Prefs.host(this))
         etPort.setText(Prefs.port(this).toString())
@@ -59,6 +63,17 @@ class MainActivity : Activity(), TvOverlayService.StateListener {
         }
         findViewById<Button>(R.id.btn_overlay_perm).setOnClickListener {
             requestOverlayPermission()
+        }
+        findViewById<Button>(R.id.btn_lock_bg).setOnClickListener {
+            val url = etLockBg.text.toString().trim()
+            Prefs.saveLockBg(this, url)
+            LockScreenActivity.updateBgUrl(url)
+            Toast.makeText(
+                this,
+                if (url.isBlank()) "Background lockscreen dikosongkan (pakai bawaan)"
+                else "Background lockscreen diperbarui",
+                Toast.LENGTH_LONG
+            ).show()
         }
 
         requestNotificationPermission()

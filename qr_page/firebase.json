@@ -7,6 +7,10 @@
     "ignore": ["firebase.json", "firestore.rules", "README.md"],
     "rewrites": [
       {
+        "source": "/member.html",
+        "destination": "/member.html"
+      },
+      {
         "source": "**",
         "destination": "/call.html"
       }

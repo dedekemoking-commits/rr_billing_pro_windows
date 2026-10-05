@@ -2,6 +2,7 @@
 
 Mirror interface dari firebase_auth.FirebaseAuth agar bisa ditukar dengan alias.
 """
+import base64
 import json
 import logging
 import os
@@ -21,6 +22,20 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 AUTH_FILE = "rr_billing_auth_supabase.json"
 _INSTANCE: Optional["SupabaseAuth"] = None
 _INSTANCE_LOCK = threading.Lock()
+
+
+def _jwt_payload(token: str) -> dict:
+    """Decode payload JWT (tanpa verifikasi) — dipakai ambil email/user_metadata
+    dari accessToken Google. Return {} bila token bukan JWT valid."""
+    try:
+        parts = str(token or "").split(".")
+        if len(parts) < 2:
+            return {}
+        seg = parts[1]
+        seg += "=" * (-len(seg) % 4)
+        return json.loads(base64.urlsafe_b64decode(seg.encode("ascii")).decode("utf-8", "replace"))
+    except Exception:
+        return {}
 
 
 def _get_app_dir() -> str:
@@ -154,11 +169,51 @@ class SupabaseAuth:
         expires_in = int(data.get("expires_in", 3600) or 3600)
         self._expires_at = int(time.time()) + expires_in
         user = data.get("user") or {}
-        self._user_id = user.get("id", self._user_id)
-        self._email = user.get("email", self._email)
+        if not isinstance(user, dict):
+            user = {}
+        # ── Login Google via browser HANYA mengirim access_token (tanpa 'user'),
+        #    sehingga email sebelumnya kosong → akun jadi tak dikenal (username
+        #    acak seperti '_3') & lisensi tidak ketemu. Ambil profil dari token
+        #    atau dari endpoint /auth/v1/user. ──
+        if not (user.get("email") or "").strip():
+            user = self._profil_dari_token() or user
+        self._user_id = user.get("id") or user.get("sub") or self._user_id
+        email = str(user.get("email") or self._email or "").strip()
+        if email:
+            self._email = email
         meta = (user.get("user_metadata") or {}) if isinstance(user, dict) else {}
-        self._display_name = meta.get("full_name") or meta.get("name") or self._email
+        self._display_name = (meta.get("full_name") or meta.get("name")
+                              or str(user.get("name") or "") or self._email or "")
+        if not self._email:
+            _LOGGER.warning("Login berhasil tetapi email kosong — akun tidak bisa dicocokkan")
+        else:
+            _LOGGER.info("Auth session: email=%s display=%s", self._email, self._display_name)
         self._save_to_file()
+
+    def _profil_dari_token(self) -> dict:
+        """Ambil profil user dari access token: coba decode JWT, lalu GET /auth/v1/user."""
+        claims = _jwt_payload(self._access_token)
+        profil = {}
+        email = str(claims.get("email") or "").strip()
+        meta = claims.get("user_metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if email or meta:
+            profil = {
+                "id": claims.get("sub") or "",
+                "email": email,
+                "user_metadata": meta,
+            }
+        if email:
+            return profil
+        # Fallback: tanya Supabase (JWT bisa di-blacklist / tidak punya claim email)
+        try:
+            info = self._get_user_info()
+            if isinstance(info, dict) and (info.get("email") or info.get("user_metadata")):
+                return info
+        except Exception as e:
+            _LOGGER.debug("profil dari /auth/v1/user gagal: %s", e)
+        return profil
 
     def ensure_anonymous(self) -> bool:
         """Supabase tidak butuh anonymous token untuk anon-key; selalu True."""

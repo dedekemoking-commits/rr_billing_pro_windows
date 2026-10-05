@@ -21,6 +21,9 @@ object Actions {
     const val HIDE_MEDIA = "HIDE_MEDIA"
     const val SHOW_PIN = "SHOW_PIN"
     const val HIDE_PIN = "HIDE_PIN"
+    const val SHOW_QR = "SHOW_QR"
+    const val HIDE_QR = "HIDE_QR"
+    const val UPDATE_LOCK_BG = "UPDATE_LOCK_BG"
     const val PING = "PING"
     const val QUERY_SCREEN_STATE = "QUERY_SCREEN_STATE"
 }
@@ -69,6 +72,8 @@ data class ServerMessage(
     val pin: String = "",
     val reconnect: Boolean = false,
     val forceStart: Boolean = false,
+    val grup: String = "",
+    val bgUrl: String = "",
 ) {
     companion object {
         fun fromJson(raw: String): ServerMessage? {
@@ -131,6 +136,8 @@ data class ServerMessage(
                         pin = o.optString("pin", ""),
                         reconnect = o.optBoolean("reconnect", false),
                         forceStart = o.optBoolean("force_start", false),
+                        grup = o.optString("grup", ""),
+                        bgUrl = o.optString("bg_url", ""),
                     )
                 }
             } catch (e: Exception) {

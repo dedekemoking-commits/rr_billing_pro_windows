@@ -16,6 +16,8 @@ import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
 import com.rrbillingpro.tvclient.R
 import com.rrbillingpro.tvclient.model.BillLine
 import com.rrbillingpro.tvclient.model.LockDetail
@@ -38,12 +40,18 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
 
     private val TAG = "LockScreenActivity"
     private var locked = false
+    private var bgPlayer: ExoPlayer? = null
+    private var bgTexture: android.view.TextureView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instance = this
         setContentView(R.layout.activity_lock_screen)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemBars()
+
+        applyLockBg(Prefs.lockBgUrl(this))
 
         TvOverlayService.instance?.let { svc ->
             locked = svc.isLocked
@@ -91,7 +99,112 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
     override fun onDestroy() {
         TvOverlayService.instance?.removeListener(this)
         exitLockTaskMode()
+        releaseBgPlayer()
         super.onDestroy()
+    }
+
+    // ── Background gambar bergerak (MP4 loop dari kasir) ────────────────────
+    private fun applyLockBg(url: String) {
+        val box = findViewById<android.widget.FrameLayout>(R.id.fl_lock_video) ?: return
+        releaseBgPlayer()
+        if (url.isBlank()) {
+            bgTexture?.visibility = View.GONE
+            showPanelPesan("Kasir belum mengatur gambar bergerak")
+            Log.i(TAG, "Background lockscreen: pakai latar polos (tidak ada video)")
+            return
+        }
+        try {
+            val http = OkHttpClient.Builder().build()
+            val ds = OkHttpDataSource.Factory(http).setDefaultRequestProperties(
+                mapOf("Accept" to "*/*"))
+            val exo = ExoPlayer.Builder(this)
+                .setMediaSourceFactory(
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(ds))
+                .build()
+            exo.setMediaItem(androidx.media3.common.MediaItem.fromUri(url))
+            // Background lockscreen diputar terus (loop mulus) tanpa suara.
+            exo.repeatMode = androidx.media3.common.Player.REPEAT_MODE_ALL
+            exo.volume = 0f
+
+            // TextureView (BUKAN SurfaceView/PlayerView): SurfaceView tidak
+            // dirender di STB ini saat lockscreen memakai lock-task mode.
+            var tex = bgTexture
+            if (tex == null) {
+                tex = android.view.TextureView(this).apply {
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT)
+                    isOpaque = true
+                }
+                box.addView(tex, 0)
+                bgTexture = tex
+            }
+            hidePanelPesan()
+            tex.visibility = View.VISIBLE
+            exo.setVideoTextureView(tex)
+
+            exo.addListener(object : androidx.media3.common.Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    Log.i(TAG, "Background lockscreen: frame pertama tampil")
+                }
+
+                override fun onPlayerError(
+                    error: androidx.media3.common.PlaybackException
+                ) {
+                    Log.w(TAG, "Background video gagal: ${error.errorCodeName} ${error.message}")
+                    runOnUiThread { showPanelPesan("Video tidak dapat dimuat") }
+                }
+            })
+            exo.prepare()
+            exo.playWhenReady = true
+            bgPlayer = exo
+            Log.i(TAG, "Background lockscreen: player dibuat untuk $url")
+        } catch (e: Exception) {
+            Log.w(TAG, "Gagal pasang background video: ${e.message}")
+            showPanelPesan("Video tidak dapat dimuat")
+        }
+    }
+
+    /** Teks-info di panel kanan, dipakai saat belum ada / gagal memuat video. */
+    private fun showPanelPesan(pesan: String) {
+        val box = findViewById<android.widget.FrameLayout>(R.id.fl_lock_video) ?: return
+        val tv = findViewById<TextView>(R.id.tv_lock_video_info)
+        if (tv != null) {
+            tv.text = pesan
+            tv.visibility = View.VISIBLE
+        } else {
+            // layout versi lama (tanpa tv_lock_video_info) — buat view sendiri
+            val baru = TextView(this).apply {
+                text = pesan
+                setTextColor(0xFF7F9CB0.toInt())
+                textSize = 15f
+                gravity = android.view.Gravity.CENTER
+            }
+            box.addView(baru)
+            tagPanelPesan = baru
+        }
+    }
+
+    private fun hidePanelPesan() {
+        val tv = findViewById<TextView>(R.id.tv_lock_video_info)
+        tv?.visibility = View.GONE
+        tagPanelPesan?.let {
+            (it.parent as? android.view.ViewGroup)?.removeView(it)
+            tagPanelPesan = null
+        }
+    }
+
+    private var tagPanelPesan: View? = null
+
+    private fun releaseBgPlayer() {
+        val p = bgPlayer ?: return
+        bgPlayer = null
+        try {
+            p.stop()
+            p.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "release bg player gagal: ${e.message}")
+        }
     }
 
     private fun render(detail: LockDetail?) {
@@ -325,6 +438,16 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
 
         fun finishInstance() {
             instance?.runOnUiThread { instance?.finish() }
+        }
+
+        /**
+         * Kasir mengunggah gambar bergerak baru → lockscreen yang sedang tampil
+         * langsung memakai video baru (tanpa perlu menunggu lock berikutnya).
+         * URL kosong = kembali ke background bawaan aplikasi.
+         */
+        fun updateBgUrl(url: String) {
+            val act = instance ?: return
+            act.runOnUiThread { act.applyLockBg(url) }
         }
 
         fun updateDetail(detail: LockDetail?) {
