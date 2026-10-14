@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller cryptography
           pip install -r requirements.txt
-          pip install bspylgtv wakeonlan supabase sqlitedict
+          pip install wakeonlan supabase sqlitedict
         continue-on-error: false
 
       - name: Build exe with PyInstaller
