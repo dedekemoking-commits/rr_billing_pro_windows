@@ -6981,7 +6981,6 @@ class DialogTambahTV(ctk.CTkToplevel):
     def __init__(self, master, nomor_tv, on_confirm, on_close_cb, daftar_grup=None):
         super().__init__(master)
         self.title(f"Tambah TV #{nomor_tv}")
-        self.geometry("380x600")
         self.configure(fg_color=C_BG)
         self.transient(master)
         self.resizable(False, False)
@@ -6996,7 +6995,13 @@ class DialogTambahTV(ctk.CTkToplevel):
         self.tv_type_var = ctk.StringVar(value="Android TV")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build()
-        center_window(self, master, width=380, height=600)
+        # Auto-fit the dialog height so the content (e.g. the MAC field shown
+        # when "LG webOS" is selected) never clips the "Tambah TV" button at
+        # the bottom.
+        self.update_idletasks()
+        req_h = max(self.winfo_reqheight(), 600)
+        self.geometry(f"380x{req_h}")
+        center_window(self, master, width=380, height=req_h)
         self.after(50, self.grab_set)
 
     def _build(self):
