@@ -107,15 +107,82 @@ BLE_PRINT_RX_UUID = "49535343-8841-43f4-a8d4-ecbe34729bb3"
 BLE_PRINT_SVC_HINT = "49535343"          # prefiks service ISSC (Transparent UART)
 _BLE_PRINTER_HINTS = ("RPP", "POS58", "58MM", "MTP", "THERMAL", "PRINTER", "TSC")
 
-def _ble_escpos_bytes(text: str) -> bytes:
-    """Bangun byte ESC/POS teks: init + baris teks + feed + gunting kertas."""
+def _ble_escpos_bytes(text: str, raster: bytes = b"") -> bytes:
+    """Bangun byte ESC/POS: init + logo raster + baris teks + feed + cut."""
     data = bytearray()
     data += b"\x1b\x40"                  # ESC @ init
+    if raster:
+        data += raster
     for line in str(text).split("\n"):
         data += line.encode("cp437", errors="replace") + b"\n"
     data += b"\x1b\x64\x05"              # feed 5 baris
-    data += b"\x1d\x56\x42"              # GS V 66 — potong kertas
+    data += b"\x1d\x56\x42"              # GS V 66 - potong kertas
     return bytes(data)
+
+
+def _data_url_to_pil(data_url: str):
+    """Decode data-URL base64 menjadi objek PIL.Image. None bila gagal."""
+    try:
+        import base64 as _b64
+        from io import BytesIO as _Bio
+        from PIL import Image as _PIL
+    except Exception:
+        return None
+    s = str(data_url or "").strip()
+    if not s:
+        return None
+    try:
+        if "," in s and s.startswith("data:"):
+            s = s.split(",", 1)[1]
+        raw = _b64.b64decode(s)
+        img = _PIL.open(_Bio(raw))
+        img.load()
+        return img
+    except Exception:
+        return None
+
+
+def escpos_raster_bytes(img, lebar_px: int = 384) -> bytes:
+    """Ubah gambar menjadi bytes ESC/POS raster (GS v 0) untuk thermal 58mm."""
+    if img is None:
+        return b""
+    try:
+        from PIL import Image as _PIL
+    except Exception:
+        return b""
+    try:
+        im = img.convert("RGBA")
+        bg = _PIL.new("RGBA", im.size, (255, 255, 255, 255))
+        im = _PIL.alpha_composite(bg, im).convert("L")
+        w, h = im.size
+        if w <= 0 or h <= 0:
+            return b""
+        if w > lebar_px:
+            h = max(1, int(h * lebar_px / w))
+            im = im.resize((lebar_px, h), _PIL.LANCZOS)
+            w, h = im.size
+        byte_w = (w + 7) // 8
+        w_px = byte_w * 8
+        if w_px != w:
+            im = im.resize((w_px, h), _PIL.LANCZOS)
+        im = im.point(lambda p: 0 if p < 160 else 255)
+        px = im.load()
+        data = bytearray()
+        for y in range(h):
+            row = bytearray(byte_w)
+            for x in range(w_px):
+                if px[x, y] < 128:
+                    row[x >> 3] |= (0x80 >> (x & 7))
+            data += row
+        out = bytearray()
+        out += b"\x1d\x76\x30\x00"
+        out += bytes([byte_w & 0xFF, (byte_w >> 8) & 0xFF,
+                      h & 0xFF, (h >> 8) & 0xFF])
+        out += data
+        return bytes(out)
+    except Exception as e:
+        _LOGGER.debug("escpos_raster_bytes error: %s", e)
+        return b""
 
 def _ble_write_printer(addr: str, data: bytes):
     """Tulis byte ESC/POS ke printer BLE (chunk sesuai MTU, tanpa response)."""
@@ -1304,6 +1371,17 @@ def fmt_rp(n):
     return f"Rp {n:,.0f}".replace(",", ".")
 
 
+def urutkan_menu(menu):
+    """Urutkan dict menu F&B (nama -> harga) secara A-Z, case-insensitive."""
+    if not isinstance(menu, dict):
+        return {}
+    try:
+        kunci = sorted(menu.keys(), key=lambda s: (str(s).strip().lower(), str(s)))
+    except Exception:
+        kunci = list(menu.keys())
+    return {k: menu[k] for k in kunci}
+
+
 def _clamp_int(nilai, lo, hi, default):
     """Ambil nilai integer dalam rentang; apa pun yang rusak -> default."""
     try:
@@ -1845,7 +1923,7 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.32"
+APP_VERSION = "2.4.33"
 # Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
 # dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
 PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
@@ -8049,7 +8127,181 @@ def bulatkan_biaya_bebas(nominal):
     return int(((nilai + 500) // 1000) * 1000)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+def _struk_kiri_kanan(kiri, kanan, lebar=40):
+    """Satu baris struk thermal: teks kiri + nominal rata kanan."""
+    kiri = str(kiri or "")
+    kanan = str(kanan or "")
+    if not kanan:
+        return kiri[:lebar]
+    if len(kiri) + len(kanan) + 1 > lebar:
+        kiri = kiri[:max(0, lebar - len(kanan) - 1)]
+    return kiri + " " * max(1, lebar - len(kiri) - len(kanan)) + kanan
+
+
+def _struk_tengah(teks, lebar=40):
+    teks = str(teks or "")
+    return teks.center(lebar)[:lebar]
+
+
+def _angka_struk(nilai):
+    try:
+        return f"{int(round(float(nilai))):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _durasi_struk(menit):
+    try:
+        angka = int(round(float(menit)))
+    except (TypeError, ValueError):
+        angka = 0
+    if angka <= 0:
+        return "Bebas"
+    return fmt_durasi(angka).title()
+
+
+def _waktu_struk(waktu):
+    teks = str(waktu or "").strip()
+    if not teks:
+        return datetime.now().strftime("%d/%m/%Y %H.%M")
+    for pola in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(teks[:19], pola).strftime("%d/%m/%Y %H.%M")
+        except (TypeError, ValueError):
+            pass
+    return teks
+
+
+def bangun_struk_lines(trans, kasir=None, nama_rental=None, layout=None,
+                       alamat=None, telepon=None):
+    """Bangun struk thermal lengkap sesuai layout yang bisa diedit kasir."""
+    t = trans or {}
+    lay = layout or {}
+    try:
+        lebar = int(lay.get("lebar", 32) or 32)
+    except (TypeError, ValueError):
+        lebar = 32
+    lebar = max(32, min(32, lebar))
+    nama_rental = str(nama_rental or "").strip() or "RR Billing Pro"
+    kasir = str(kasir or t.get("kasir") or "-")
+    alamat = str(alamat or "").strip()
+    telepon = str(telepon or "").strip()
+
+    def _teks(kunci, default=""):
+        nilai = str(lay.get(kunci, default) or "")
+        return (nilai.replace("{nama_rental}", nama_rental)
+                     .replace("{kasir}", kasir)
+                     .replace("{alamat}", (alamat.splitlines()[0] if alamat else ""))
+                     .replace("{telepon}", telepon)
+                     .replace("{tanggal}", datetime.now().strftime("%d/%m/%Y"))
+                     .strip())
+
+    header1 = _teks("header1", "{nama_rental}") or nama_rental
+    header2 = _teks("header2", "")
+    footer1 = _teks("footer1", "TERIMA KASIH")
+    footer2 = _teks("footer2", "Silakan datang kembali")
+    tampil_paket = bool(lay.get("tampil_paket", True))
+    tampil_rincian = bool(lay.get("tampil_rincian", True))
+    tampil_kasir = bool(lay.get("tampil_kasir", True))
+    tampil_diskon = bool(lay.get("tampil_diskon", True))
+    tampil_pembulatan = bool(lay.get("tampil_pembulatan", True))
+    tampil_status = bool(lay.get("tampil_status", True))
+    tampil_alamat = bool(lay.get("tampil_alamat", True))
+
+    lines = [_struk_tengah(header1, lebar)]
+    if alamat and tampil_alamat:
+        for baris in alamat.splitlines():
+            baris = baris.strip()
+            if baris:
+                lines.append(_struk_tengah(baris, lebar))
+    if telepon:
+        if telepon.lower().startswith(("telp", "telpon", "telp.")):
+            lines.append(_struk_tengah(telepon, lebar))
+        else:
+            lines.append(_struk_tengah(f"Telp: {telepon}", lebar))
+    if header2:
+        lines.append(_struk_tengah(header2, lebar))
+    lines.append("")
+
+    waktu = _waktu_struk(t.get("waktu"))
+    menit = t.get("menit", t.get("durasi", 0))
+    metode = str(t.get("metode") or "CASH").strip().upper() or "CASH"
+    if tampil_kasir:
+        lines.append(f"Kasir: {kasir}")
+    lines.append(f"No. Unit: {t.get('pc') or t.get('kursi') or '-'}")
+    lines.append(f"Waktu: {waktu}")
+    lines.append(f"Durasi: {_durasi_struk(menit)}")
+    lines.append(f"Metode: {metode}")
+
+    paket_harga = int(t.get("paket_harga", 0) or 0)
+    pesanan_total = int(t.get("pesanan_total", 0) or 0)
+    total = int(t.get("harga", t.get("biaya", t.get("total", 0))) or 0)
+    if paket_harga <= 0 and total > pesanan_total:
+        paket_harga = total - pesanan_total
+
+    if tampil_paket:
+        lines.append("-" * lebar)
+        lines.append("RINCIAN RENTAL")
+        lines.append(_struk_kiri_kanan("Total Rental", fmt_rp(paket_harga), lebar))
+
+    items = t.get("pesanan_detail") or []
+    if tampil_rincian and items:
+        lines.append("-" * lebar)
+        lines.append("PESANAN F&B")
+        for it in items:
+            nama = str(it.get("nama") or "-")
+            qty = int(it.get("qty", 0) or 0)
+            sub = int(it.get("subtotal", 0) or 0)
+            kiri = f"{qty}x {nama}"
+            kanan = _angka_struk(sub)
+            batas = max(1, lebar - len(kanan) - 1)
+            if len(kiri) > batas:
+                potong = kiri[:batas]
+                if " " in potong:
+                    potong = potong.rsplit(" ", 1)[0]
+                lines.append(_struk_kiri_kanan(potong, kanan, lebar))
+                sisa = kiri[len(potong):].strip()
+                while sisa:
+                    lines.append("   " + sisa[:max(1, lebar - 3)])
+                    sisa = sisa[max(1, lebar - 3):].strip()
+            else:
+                lines.append(_struk_kiri_kanan(kiri, kanan, lebar))
+        lines.append(_struk_kiri_kanan("Total F&B", fmt_rp(pesanan_total), lebar))
+    elif pesanan_total > 0:
+        lines.append(_struk_kiri_kanan("Total F&B", fmt_rp(pesanan_total), lebar))
+
+    subtotal = int(t.get("subtotal", 0) or 0)
+    if subtotal <= 0:
+        subtotal = paket_harga + pesanan_total
+    diskon_amount = int(t.get("diskon_amount", t.get("diskon", 0)) or 0)
+    total_sebelum = int(t.get("total_sebelum_pembulatan", 0) or 0)
+    pembulatan = int(t.get("pembulatan", 0) or 0)
+    if total_sebelum <= 0:
+        total_sebelum = max(0, subtotal - diskon_amount)
+    if pembulatan == 0 and total > total_sebelum:
+        pembulatan = total - total_sebelum
+
+    if tampil_diskon and diskon_amount > 0:
+        if str(t.get("diskon_mode", "")) == "persen" and t.get("diskon_nilai"):
+            lines.append(_struk_kiri_kanan(f"Diskon ({t.get('diskon_nilai')}%)", f"-{fmt_rp(diskon_amount)}", lebar))
+        else:
+            lines.append(_struk_kiri_kanan("Diskon", f"-{fmt_rp(diskon_amount)}", lebar))
+    if tampil_pembulatan and pembulatan:
+        lines.append(_struk_kiri_kanan("Pembulatan", f"+{fmt_rp(pembulatan)}", lebar))
+    lines.append("-" * lebar)
+    lines.append(_struk_kiri_kanan("GRAND TOTAL", fmt_rp(total), lebar))
+    if tampil_status:
+        lines.append(_struk_kiri_kanan("Status", "LUNAS" if t.get("paid", True) else "TAGIHAN", lebar))
+    lines.append("")
+    if footer1:
+        lines.append(_struk_tengah(footer1, lebar))
+    if footer2:
+        lines.append(_struk_tengah(footer2, lebar))
+    lines.append("")
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────
 #  DIALOG TAMBAH PESANAN (makanan/minuman saat sesi TV berjalan)
 # ═══════════════════════════════════════════════════════════════════════════════
 class DialogTambahPesanan(ctk.CTkToplevel):
@@ -9256,7 +9508,7 @@ class KartuTV(tk.Canvas):
                  get_semua_kartu, nama_grup="Reguler", is_first=False,
                  get_daftar_grup=None, on_ganti_grup=None, on_hapus=None,
                  role="admin", plug=None, tv_type="android", mac="",
-hdmi_port=0, **kwargs):
+hdmi_port=0, on_relayout=None, **kwargs):
         super().__init__(master, highlightthickness=0, bd=0,
                           bg=C_BG, **kwargs)
         self.role         = role or "admin"
@@ -9280,6 +9532,7 @@ hdmi_port=0, **kwargs):
         self.get_daftar_grup  = get_daftar_grup or (lambda: [nama_grup])
         self.on_ganti_grup    = on_ganti_grup
         self.on_hapus         = on_hapus
+        self.on_relayout      = on_relayout
         self.is_first     = is_first
         self.is_on        = False
         self.connected    = True
@@ -9324,6 +9577,7 @@ hdmi_port=0, **kwargs):
         self._warning_blink_on = False
         self._timer_paused = False
         self._timer_was_running = False
+        self._expanded = False
 
         self._ids = {}
         self._btn_states = {}
@@ -9348,6 +9602,7 @@ hdmi_port=0, **kwargs):
         self.after(3000, self._online_checker)
         self.after(2000, self._refresh_client_badge)
         self.after(2000, self._tv_power_checker)
+        self.bind("<Button-1>", self._toggle_expand)
  
         self.bind("<Configure>", self._on_card_resize)
 
@@ -9467,6 +9722,10 @@ hdmi_port=0, **kwargs):
             fill=C_YELLOW, anchor="center", tags="lbl_estimasi")
         y += 16
 
+        # Tinggi kartu saat kolaps: sampai baris estimasi + padding, sebelum
+        # baris tombol. Areal tombol baru tampil setelah kartu diklik.
+        collapsed_h = y + 4
+
         # ── Button Row 1 ────────────────────────────────────────────────────
         btn_h, gap_b = 30, 4
         n_btn, btn_cols = 5, 5
@@ -9517,8 +9776,9 @@ hdmi_port=0, **kwargs):
         btn_defs3 = [
             ("video", "VIDEO", "black", "white", self._buka_media_video),
             ("gambar", "GAMBAR", "black", "white", self._buka_media_gambar),
-            ("logo", "LOGO", "black", "white", self._ganti_logo_kartu),
+            ("batal", "BATAL", C_RED, "white", self._klik_batal),
             ("qr", "QR", "black", "white", self._buka_qr_kartu),
+            ("logo", "LOGO", "black", "white", self._ganti_logo_kartu),
             ("memberqr", "MEMBER", "black", "white", self._member_qr_mulai_dari_kartu),
         ]
         n_btn3 = len(btn_defs3)
@@ -9531,19 +9791,24 @@ hdmi_port=0, **kwargs):
         # Banner pending member-QR (hanya tampil saat kasir menunggu scan)
         self._ids['lbl_member_qr'] = self.create_text(
             W//2, y+8, text="", font=("Courier New", 10, "bold"),
-            fill=C_YELLOW, anchor="center", tags="lbl_member_qr")
+            fill=C_YELLOW, anchor="center", tags=("lbl_member_qr", "btnarea"))
         y += 18
         # Kasir tidak boleh mengubah IP TV / media promosi / logo
         if self.role != "admin":
             for k in ("ip", "video", "gambar", "logo"):
                 self._disable_btn(k)
+        self._update_batal_btn()
         self._update_paid_badge()
 
-        # Update card background height
+        # Update card background height. Tinggi yang tampil mengikuti mode
+        # kolaps (tombol disembunyikan) atau expand (semua tombol terlihat).
         total_h = y
+        shown_h = total_h if self._expanded else collapsed_h
         self._ids['_card_h'] = total_h
-        self.configure(height=total_h, width=W)
-        self._ids['bg'] = self.create_rectangle(0, 0, W, total_h, fill=C_CARD, outline=C_BORDER, width=1, tags="bg")
+        self._ids['_card_h_kolaps'] = collapsed_h
+        self._ids['_card_h_shown'] = shown_h
+        self.configure(height=shown_h, width=W)
+        self._ids['bg'] = self.create_rectangle(0, 0, W, shown_h, fill=C_CARD, outline=C_BORDER, width=1, tags="bg")
         self.tag_lower(self._ids['bg'])
         self._redraw_bg()
 
@@ -9559,17 +9824,116 @@ hdmi_port=0, **kwargs):
             self.itemconfig(self._ids['lbl_timer'], text="00:00", fill=C_MUTED)
         else:
             self._update_timer_display()
+        self._apply_btn_area_visibility(request_layout=False)
 
     def _redraw_bg(self):
         W = self._card_w
-        h = self._ids.get('_card_h', 200)
+        h = self._ids.get('_card_h_shown', self._ids.get('_card_h', 200))
         self.coords(self._ids['bg'], 0, 0, W, h)
         self.tag_lower(self._ids['bg'])
 
+    def _toggle_expand(self, event=None):
+        """Klik kartu membuka areal tombol; klik area kosong menutupnya."""
+        if event is not None:
+            try:
+                tags = self.gettags("current") or ()
+            except Exception:
+                tags = ()
+            if "lbl_grup" in tags or any(t.startswith("btn_") for t in tags):
+                return
+        self._expanded = not self._expanded
+        self._apply_btn_area_visibility()
+
+    def _apply_btn_area_visibility(self, request_layout=True):
+        """Terapkan tinggi kartu dan tampilkan/sembunyikan areal tombol."""
+        if 'bg' not in self._ids:
+            return
+        shown_h = (self._ids.get('_card_h', 200) if self._expanded
+                   else self._ids.get('_card_h_kolaps', 200))
+        self._ids['_card_h_shown'] = shown_h
+        try:
+            self.itemconfig("btnarea",
+                            state=("normal" if self._expanded else "hidden"))
+        except Exception:
+            pass
+        try:
+            self.coords(self._ids['bg'], 0, 0, self._card_w, shown_h)
+            self.tag_lower(self._ids['bg'])
+        except Exception:
+            pass
+        try:
+            self.configure(height=shown_h)
+        except Exception:
+            pass
+        if request_layout:
+            cb = getattr(self, "on_relayout", None)
+            if callable(cb):
+                cb()
+
+    def _update_batal_btn(self):
+        """BATAL hanya aktif selama 10 menit pertama sejak sesi dimulai."""
+        if 'btn_batal' not in self._ids:
+            return
+        aktif = False
+        try:
+            if not self.sesi_kosong() and self.waktu_mulai is not None:
+                aktif = (datetime.now() - self.waktu_mulai).total_seconds() <= 600
+        except Exception:
+            aktif = False
+        if aktif:
+            self._enable_btn("batal", C_RED, "white")
+        else:
+            self._disable_btn("batal")
+
+    def _klik_batal(self):
+        """Batalkan sesi baru (<=10 menit) tanpa biaya dan tanpa struk."""
+        if self.sesi_kosong() or self.waktu_mulai is None:
+            return
+        try:
+            lewat = (datetime.now() - self.waktu_mulai).total_seconds()
+        except Exception:
+            lewat = 999
+        if lewat > 600:
+            self._update_batal_btn()
+            messagebox.showinfo(
+                "Batal Sesi",
+                "Tombol BATAL hanya berlaku selama 10 menit pertama.\n"
+                "Gunakan tombol SELESAI untuk mengakhiri sesi ini.",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "Batalkan Sesi",
+                f"Batalkan sesi {self.label_tv}?\n\n"
+                "Sesi akan dihentikan, TV dimatikan, dan transaksi sesi ini "
+                "dibatalkan tanpa biaya.",
+                parent=self):
+            return
+        app = self.winfo_toplevel()
+        try:
+            if hasattr(app, "_batalkan_transaksi_sesi"):
+                app._batalkan_transaksi_sesi(self)
+        except Exception as e:
+            print(f"[BATAL] gagal void transaksi {self.label_tv}: {e}")
+        # Netralkan pemotongan saldo member saat _reset_sesi.
+        if self.is_bebas:
+            self.menit_dipakai_awal = 0
+            self.waktu_mulai = datetime.now()
+        else:
+            self.sisa_waktu = int(getattr(self, "sisa_waktu_awal", 0) or 0)
+        try:
+            self._ws_send_stop()
+        except Exception:
+            pass
+        try:
+            self._tv_sleep_now(2, alasan="Sesi dibatalkan kasir (sleep 2 dtk)")
+        except Exception:
+            pass
+        self._reset_sesi()
+
     def _draw_canvas_btn(self, key, x, y, w, h, text, bg, fg, font, cmd):
-        rect = self.create_rectangle(x, y, x+w, y+h, fill=bg, outline=fg, width=1, tags=f"btn_{key}")
+        rect = self.create_rectangle(x, y, x+w, y+h, fill=bg, outline=fg, width=1, tags=(f"btn_{key}", "btnarea"))
         txt_id = self.create_text(x+w//2, y+h//2, text=text, font=font,
-                                  fill=self._btn_text_color(bg, fg), tags=(f"btn_{key}", f"btn_{key}_txt"))
+                                  fill=self._btn_text_color(bg, fg), tags=(f"btn_{key}", f"btn_{key}_txt", "btnarea"))
         self._ids[f'btn_{key}'] = rect
         self._ids[f'btn_{key}_txt'] = txt_id
         self._btn_states[key] = "normal"
@@ -11511,13 +11875,8 @@ hdmi_port=0, **kwargs):
             except Exception:
                 pass
 
-        # Popup cetak struk setelah sesi baru dimulai (konfirmasi pembayaran)
-        # SKIP untuk Main Bebas — langsung mulai tanpa popup
-        if not previous_session and not self.is_bebas:
-            try:
-                self._buka_print_struk(self._trans_struk())
-            except Exception:
-                pass
+        # Struk tidak lagi dibuka otomatis saat sesi baru dimulai. Kasir dapat
+        # mencetak manual lewat tombol SELESAI / menu cetak struk.
 
     # ── Timer paket berwaktu (mundur) ───────────────────────────────────────
     # Decrement sisa_waktu kini dikelola TimerService (thread background);
@@ -11581,6 +11940,7 @@ hdmi_port=0, **kwargs):
     def _tick_bebas(self):
         if self._timer_paused or not self.is_bebas or self.waktu_mulai is None:
             return
+        self._update_batal_btn()
         try:
             total_detik, total_berjalan = self._hitung_bebas()
             h, rem = divmod(total_detik, 3600)
@@ -11651,6 +12011,7 @@ hdmi_port=0, **kwargs):
             # Toast sisa waktu untuk webOS TV
             if getattr(self, "tv_type", "android") == "webos":
                 self._webos_toast_sisa_waktu()
+        self._update_batal_btn()
 
     # ── Timer habis handler (called from TimerService) ──────────────────────
     def _timer_habis(self):
@@ -12055,23 +12416,83 @@ hdmi_port=0, **kwargs):
         self._buka_print_struk(trans)
 
     def _trans_struk(self):
-        """Data transaksi untuk popup cetak struk (panggil SEBELUM sesi direset)."""
+        """Data transaksi lengkap untuk popup cetak struk (panggil SEBELUM reset)."""
         try:
             menit = self._total_menit_terpakai() or 0
         except Exception:
             menit = self.menit_dipakai_awal
-        # Untuk Main Bebas, hitung total = waktu berjalan + pesanan
+        if not self.is_bebas:
+            try:
+                menit = int(round(int(getattr(self, "sisa_waktu_awal", 0) or 0) / 60))
+            except (TypeError, ValueError):
+                menit = 0
+        menu_makanan = self.get_makanan_data() or {}
+        menu_minuman = self.get_minuman_data() or {}
+        all_menu = {**menu_makanan, **menu_minuman}
+        pesanan = dict(self.pesanan_aktif or {})
+        detail = []
+        makanan_total = 0
+        minuman_total = 0
+        for nm, qty in urutkan_menu(pesanan).items():
+            try:
+                qty = int(qty)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty <= 0:
+                continue
+            harga_item = int(all_menu.get(nm, 0) or 0)
+            subtotal_item = harga_item * qty
+            if nm in menu_makanan:
+                kategori = "Makanan"
+                makanan_total += subtotal_item
+            elif nm in menu_minuman:
+                kategori = "Minuman"
+                minuman_total += subtotal_item
+            else:
+                kategori = "Lainnya"
+            detail.append({
+                "nama": str(nm), "qty": qty, "harga": harga_item,
+                "subtotal": subtotal_item, "kategori": kategori,
+            })
+        pesanan_total = sum(it["subtotal"] for it in detail) or int(self.biaya_pesanan or 0)
         if self.is_bebas:
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             biaya_waktu = bulatkan_biaya_bebas(tarif_menit * menit)
-            harga = int(self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan) or 0)
+            subtotal = int(biaya_waktu + self.biaya_pesanan)
+            paket_harga = int(biaya_waktu)
         else:
-            harga = int(self._total_setelah_diskon() or 0)
+            subtotal = int(self.paket_harga_tetap + self.biaya_pesanan)
+            paket_harga = int(self.paket_harga_tetap)
+        diskon_amount = 0
+        if self.diskoni > 0:
+            if self.diskoni_mode == "persen":
+                diskon_amount = subtotal * int(self.diskoni) // 100
+            else:
+                diskon_amount = int(self.diskoni)
+            diskon_amount = max(0, min(subtotal, diskon_amount))
+        total_sebelum = max(0, subtotal - diskon_amount)
+        harga = int(self._total_setelah_diskon(subtotal) or 0)
         return {
             "pc": getattr(self, "label_tv", None) or "-",
             "paket": self.paket_aktif or "Main Bebas",
             "menit": int(menit or 0),
+            "metode": "CASH",
+            "waktu": datetime.now().strftime("%d/%m/%Y %H.%M"),
             "harga": harga,
+            "paket_harga": paket_harga,
+            "pesanan": pesanan,
+            "pesanan_detail": detail,
+            "pesanan_total": int(pesanan_total),
+            "makanan_total": int(makanan_total),
+            "minuman_total": int(minuman_total),
+            "subtotal": subtotal,
+            "diskon_amount": diskon_amount,
+            "diskon_nilai": int(self.diskoni or 0),
+            "diskon_mode": self.diskoni_mode,
+            "total_sebelum_pembulatan": total_sebelum,
+            "pembulatan": max(0, harga - total_sebelum),
+            "paid": bool(self.paid),
+            "kasir": self.winfo_toplevel().current_user if hasattr(self.winfo_toplevel(), "current_user") else "",
         }
 
     def _buka_print_struk(self, trans):
@@ -12257,11 +12678,14 @@ hdmi_port=0, **kwargs):
             self._disable_btn("pause")
             self.itemconfig(self._ids['btn_pause_txt'], text="PAUSE")
         self._update_paid_badge()
+        self._update_batal_btn()
+        self._last_transaction_item = None
+        self._last_riwayat_idx = None
+        self._last_cloud_id = None
         app = self.winfo_toplevel()
         if hasattr(app, '_refresh_dashboard_total_pesanan'):
             app._refresh_dashboard_total_pesanan()
 
-    # ── Tombol PINDAH TV ────────────────────────────────────────────────────
     def _klik_pindah(self):
         if self.sesi_kosong():
             return
@@ -13408,13 +13832,8 @@ on_hapus=None, nama_grup=None, **kwargs):
         except Exception:
             pass
 
-        # Popup cetak struk setelah sesi baru dimulai (konfirmasi pembayaran)
-        # SKIP untuk Main Bebas — langsung mulai tanpa popup
-        if not previous_session and not self.is_bebas:
-            try:
-                self._buka_print_struk(self._trans_struk())
-            except Exception:
-                pass
+        # Struk tidak lagi dibuka otomatis saat sesi baru dimulai. Kasir dapat
+        # mencetak manual lewat tombol SELESAI / menu cetak struk.
 
     def _tick_waktu(self):
         if self._timer_paused:
@@ -13569,23 +13988,85 @@ on_hapus=None, nama_grup=None, **kwargs):
             ).lift()
 
     def _trans_struk(self):
-        """Data transaksi untuk popup cetak struk (panggil SEBELUM sesi direset)."""
+        """Data transaksi lengkap untuk popup cetak struk (panggil SEBELUM reset)."""
         menit = int(getattr(self, "menit_dipakai_awal", 0) or 0)
         if self.is_bebas:
             try:
                 menit = self._total_menit_terpakai() or 0
             except Exception:
                 menit = getattr(self, "menit_dipakai_awal", 0)
+        else:
+            try:
+                menit = int(round(int(getattr(self, "sisa_waktu_awal", 0) or 0) / 60))
+            except (TypeError, ValueError):
+                menit = 0
+        menu_makanan = self.get_makanan_data() or {}
+        menu_minuman = self.get_minuman_data() or {}
+        all_menu = {**menu_makanan, **menu_minuman}
+        pesanan = dict(self.pesanan_aktif or {})
+        detail = []
+        makanan_total = 0
+        minuman_total = 0
+        for nm, qty in urutkan_menu(pesanan).items():
+            try:
+                qty = int(qty)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty <= 0:
+                continue
+            harga_item = int(all_menu.get(nm, 0) or 0)
+            subtotal_item = harga_item * qty
+            if nm in menu_makanan:
+                kategori = "Makanan"
+                makanan_total += subtotal_item
+            elif nm in menu_minuman:
+                kategori = "Minuman"
+                minuman_total += subtotal_item
+            else:
+                kategori = "Lainnya"
+            detail.append({
+                "nama": str(nm), "qty": qty, "harga": harga_item,
+                "subtotal": subtotal_item, "kategori": kategori,
+            })
+        pesanan_total = sum(it["subtotal"] for it in detail) or int(self.biaya_pesanan or 0)
+        if self.is_bebas:
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             biaya_waktu = bulatkan_biaya_bebas(tarif_menit * menit)
-            harga = int(self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan) or 0)
+            subtotal = int(biaya_waktu + self.biaya_pesanan)
+            paket_harga = int(biaya_waktu)
         else:
-            harga = int(self._total_setelah_diskon() or 0)
+            subtotal = int(self.paket_harga_tetap + self.biaya_pesanan)
+            paket_harga = int(self.paket_harga_tetap)
+        diskon_amount = 0
+        if self.diskoni > 0:
+            if self.diskoni_mode == "persen":
+                diskon_amount = subtotal * int(self.diskoni) // 100
+            else:
+                diskon_amount = int(self.diskoni)
+            diskon_amount = max(0, min(subtotal, diskon_amount))
+        total_sebelum = max(0, subtotal - diskon_amount)
+        harga = int(self._total_setelah_diskon(subtotal) or 0)
         return {
             "pc": getattr(self, "label_kursi", None) or "-",
             "paket": self.paket_aktif or "Main Bebas",
-            "menit": int(menit or 0),
+            "menit": menit,
+            "metode": "CASH",
+            "waktu": datetime.now().strftime("%d/%m/%Y %H.%M"),
             "harga": harga,
+            "paket_harga": paket_harga,
+            "pesanan": pesanan,
+            "pesanan_detail": detail,
+            "pesanan_total": int(pesanan_total),
+            "makanan_total": int(makanan_total),
+            "minuman_total": int(minuman_total),
+            "subtotal": subtotal,
+            "diskon_amount": diskon_amount,
+            "diskon_nilai": int(self.diskoni or 0),
+            "diskon_mode": self.diskoni_mode,
+            "total_sebelum_pembulatan": total_sebelum,
+            "pembulatan": max(0, harga - total_sebelum),
+            "paid": bool(self.paid),
+            "kasir": self.winfo_toplevel().current_user if hasattr(self.winfo_toplevel(), "current_user") else "",
         }
 
     def _buka_print_struk(self, trans):
@@ -14900,6 +15381,25 @@ class AutoRentApp(ctk.CTk):
             label_widget.configure(text="Belum ada QR pembayaran", text_color=C_MUTED)
         except Exception:
             pass
+
+    def _profil_rental_struk(self) -> dict:
+        try:
+            cfg = ConfigManager.load()
+            uname = getattr(self, "current_user", None) or ""
+            profil = cfg.get("profil_rental", {}) or {}
+            data = profil.get(uname, {}) if uname else {}
+            if not isinstance(data, dict):
+                data = {}
+            return {
+                "nama_rental": str(data.get("nama_rental", "") or "").strip() or "RR Billing Pro",
+                "alamat": str(data.get("alamat", "") or "").strip(),
+                "no_hp": str(data.get("no_hp") or data.get("hp") or "").strip(),
+            }
+        except Exception:
+            return {"nama_rental": "RR Billing Pro", "alamat": "", "no_hp": ""}
+
+    def _nama_rental_struk(self) -> str:
+        return self._profil_rental_struk().get("nama_rental", "RR Billing Pro")
 
     def _simpan_profil_rental(self, data: dict) -> None:
         """Simpan profil rental user aktif; LIFETIME -> broadcast UPDATE_RENTAL
@@ -20000,6 +20500,28 @@ class AutoRentApp(ctk.CTk):
         dlg.focus_set()
 
 
+    def _dash_row_metrics(self, cards, num_cols, gap):
+        """Posisi Y tiap baris + total tinggi dashboard kartu TV.
+
+        Tinggi baris = kartu TERTINGGI di baris itu, sehingga kartu yang
+        membuka/menutup areal tombol tidak menimpa kartu di baris bawahnya.
+        """
+        row_h = {}
+        for idx, (_wid, kartu) in enumerate(cards):
+            row = idx // num_cols
+            try:
+                h = kartu.winfo_reqheight()
+            except Exception:
+                h = 0
+            if h > row_h.get(row, 0):
+                row_h[row] = h
+        row_y = {}
+        y = 0
+        for row in sorted(row_h.keys()):
+            row_y[row] = y
+            y += row_h[row] + gap
+        return row_y, y
+
     def _layout_dash_columns(self):
         canvas = self._scroll_canvas_dash
         if not canvas:
@@ -20019,19 +20541,17 @@ class AutoRentApp(ctk.CTk):
             except Exception: pass
         self.update_idletasks()
         # Pass 2: hitung scrollregion dan posisikan kartu yg terlihat
+        row_y, bottom_y = self._dash_row_metrics(cards, num_cols, gap)
         max_x = 0
-        max_y = 0
         for idx, (wid, kartu) in enumerate(cards):
             col = idx % num_cols
             row = idx // num_cols
             card_x = col * (col_w + gap)
-            card_y = row * (kartu.winfo_reqheight() + gap)
+            card_y = row_y.get(row, 0)
             canvas.coords(wid, card_x, card_y)
             rx = card_x + col_w
-            ry = card_y + kartu.winfo_reqheight()
             if rx > max_x: max_x = rx
-            if ry > max_y: max_y = ry
-        canvas.configure(scrollregion=(0, 0, max_x + gap, max_y + gap))
+        canvas.configure(scrollregion=(0, 0, max_x + gap, bottom_y + gap))
         self.after_idle(self._update_visible_dash_cards)
 
     def _update_visible_dash_cards(self):
@@ -20049,12 +20569,14 @@ class AutoRentApp(ctk.CTk):
         view_top = canvas.canvasy(0)
         view_bot = view_top + canvas.winfo_height()
         margin = 100
+        row_y, _bottom_y = self._dash_row_metrics(cards, num_cols, gap)
         for idx, (wid, kartu) in enumerate(cards):
             col = idx % num_cols
             row = idx // num_cols
             card_x = col * (col_w + gap)
-            card_y = row * (kartu.winfo_reqheight() + gap)
-            in_view = card_y < view_bot + margin and card_y + kartu.winfo_reqheight() > view_top - margin
+            card_y = row_y.get(row, 0)
+            h = kartu.winfo_reqheight()
+            in_view = card_y < view_bot + margin and card_y + h > view_top - margin
             if in_view:
                 try: canvas.coords(wid, card_x, card_y)
                 except Exception: pass
@@ -20759,6 +21281,7 @@ class AutoRentApp(ctk.CTk):
                         get_daftar_grup=self.daftar_nama_grup,
                         on_ganti_grup=self._on_kartu_ganti_grup,
                         on_hapus=self._hapus_tv,
+                        on_relayout=self._debounced_layout_dash,
                         nama_grup=nama_grup,
                         is_first=(self.jumlah_tv == 1),
                         role=self.current_role,
@@ -22461,6 +22984,12 @@ class AutoRentApp(ctk.CTk):
         threading.Thread(target=self._upsert_tx_cloud_from_index, args=(idx,), daemon=True).start()
         AuditLogger.log(action="payment_toggle", username=self.current_user or "", status="success",
                         details={"transaction_index": idx, "new_status": "paid" if paid else "unpaid"})
+        if paid:
+            try:
+                trans = self._trans_struk_dari_riwayat(idx)
+                self.after(80, lambda t=trans: self._print_receipt(t))
+            except Exception as e:
+                _LOGGER.warning("Gagal membuka struk Tandai Lunas: %s", e)
 
     def _set_transaksi_paid(self, item_id, paid):
         """Sinkron status bayar dari kartu TV/PC ke baris riwayat terkait."""
@@ -22768,6 +23297,87 @@ class AutoRentApp(ctk.CTk):
         self._last_catat_idx = len(self.riwayat_transaksi) - 1
         self._last_catat_cloud_id = cloud_id
         return item_id
+
+    def _batalkan_transaksi_sesi(self, kartu):
+        """Batalkan transaksi sesi yang baru dimulai tanpa biaya.
+
+        Baris riwayat tidak dihapus (agar sinkron cloud tetap konsisten),
+        tetapi totalnya dijadikan 0 dan ditandai DIBATALKAN. Stok pesanan
+        yang sudah terlanjur dipotong dikembalikan.
+        """
+        try:
+            idx = self._resolve_session_idx(kartu)
+            if idx is None or idx < 0 or idx >= len(self.riwayat_meta):
+                return False
+            meta = self.riwayat_meta[idx] or {}
+            if meta.get("dibatalkan"):
+                return True
+            row = list(self.riwayat_transaksi[idx]) if idx < len(self.riwayat_transaksi) else []
+            while len(row) < 8:
+                row.append("")
+            waktu = row[0] or datetime.now().strftime("%Y-%m-%d %H:%M")
+            kasir = row[1] or self.current_user or ""
+            label = row[2] or getattr(kartu, "label_tv", "-")
+            pesanan = dict(getattr(kartu, "pesanan_aktif", {}) or {})
+            if pesanan:
+                delta = {}
+                for nm, qty in pesanan.items():
+                    try:
+                        qty = int(qty)
+                    except (TypeError, ValueError):
+                        qty = 0
+                    if qty > 0:
+                        delta[str(nm)] = -qty
+                if delta:
+                    self._stok_terapkan(delta)
+            row_baru = (waktu, kasir, label, "DIBATALKAN", "-", "-", "Rp 0", "BATAL")
+            self.riwayat_transaksi[idx] = row_baru
+            meta.update({
+                "paket_harga": 0,
+                "pesanan_total": 0,
+                "total": 0,
+                "paket_raw": "DIBATALKAN",
+                "menit": 0,
+                "diskon_amount": 0,
+                "total_sebelum_pembulatan": 0,
+                "pembulatan": 0,
+                "diskoni": 0,
+                "diskoni_mode": "nominal",
+                "paid": True,
+                "pesanan": {},
+                "dibatalkan": True,
+            })
+            item_id = self._tree_item_for_idx(idx)
+            if item_id is not None and hasattr(self, "tree") and self.tree.exists(item_id):
+                try:
+                    self.tree.item(item_id, values=row_baru, tags=("paid",))
+                except Exception:
+                    pass
+            if hasattr(self, "_refresh_riwayat_summary"):
+                self._refresh_riwayat_summary()
+            if hasattr(self, "_refresh_dashboard_total_pesanan"):
+                self._refresh_dashboard_total_pesanan()
+            if hasattr(self, "_refresh_warnet_footer"):
+                self._refresh_warnet_footer()
+            if hasattr(self, "_save_riwayat"):
+                self._save_riwayat()
+            try:
+                threading.Thread(
+                    target=self._upsert_tx_cloud_from_index,
+                    args=(idx,), daemon=True).start()
+            except Exception:
+                pass
+            try:
+                AuditLogger.log(action="session_cancelled",
+                                username=self.current_user or "",
+                                status="success",
+                                details={"unit": label, "transaction_index": idx})
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            _LOGGER.warning("Gagal membatalkan transaksi sesi: %s", e)
+            return False
 
     def _bersihkan_riwayat(self):
         # Hanya admin yang boleh membersihkan seluruh riwayat
@@ -23722,7 +24332,7 @@ class AutoRentApp(ctk.CTk):
             ("3", "Opsi Developer → Stay awake",
              "Aktifkan 'Stay awake' (Tetap terjaga saat charging)"),
             ("4", "Tap 'Pair device with pairing code'",
-             "Catat IP Address, Port Pairing (6466), dan Kode PIN 6 digit"),
+             "Catat IP Address, Port Pairing, dan Kode PIN 6 digit"),
         ]
         for no, judul, sub in langkah_tv:
             row = ctk.CTkFrame(tv_f, fg_color=C_CARD, corner_radius=8)
@@ -23802,7 +24412,7 @@ class AutoRentApp(ctk.CTk):
 
         tips = [
             ("🌐", "Satu jaringan", "PC dan TV harus terhubung ke jaringan LAN/Wi-Fi yang sama"),
-            ("🧱", "Firewall", "Pastikan firewall tidak memblokir port 6466 (API) dan 6467 (Pairing)"),
+            ("🧱", "Firewall", "Pastikan firewall mengizinkan koneksi desktop ke TV di jaringan yang sama"),
             ("⏳", "Stay awake", "Aktifkan 'Stay awake' di Opsi Developer agar TV tidak tidur saat pairing"),
             ("🔄", "Pairing ulang", "Jika pairing gagal, tutup dialog dan ulangi dari awal — pastikan PIN benar"),
         ]
@@ -24311,69 +24921,128 @@ class AutoRentApp(ctk.CTk):
             return bool(addr) and ESCPOS_AVAILABLE, ptype, addr
         return False, ptype, ""
 
+    def _logo_struk_b64(self) -> str:
+        """Data-URL logo rental yang dicetak di struk ("" = belum ada)."""
+        try:
+            ps = ConfigManager.get("printer_settings", {}) or {}
+        except Exception:
+            return ""
+        return str(ps.get("logo_b64", "") or "").strip()
+
+    def _simpan_logo_struk(self, b64: str):
+        """Simpan (atau hapus, kalau b64 kosong) logo struk di config."""
+        cfg = ConfigManager.load()
+        ps = cfg.get("printer_settings", {}) or {}
+        ps["logo_b64"] = str(b64 or "")
+        cfg["printer_settings"] = ps
+        ConfigManager.save(cfg)
+
+    def _tampilkan_preview_logo_struk(self, label_widget):
+        """Tampilkan thumbnail logo struk di sebuah label CTk."""
+        b64 = self._logo_struk_b64()
+        if not b64:
+            try:
+                label_widget.configure(image=ctk.CTkImage(), text="")
+            except Exception:
+                pass
+            return
+        img = _data_url_to_pil(b64)
+        if img is None:
+            return
+        try:
+            th = img.convert("RGBA")
+            th.thumbnail((200, 80))
+            cimg = ctk.CTkImage(light_image=th, dark_image=th, size=th.size)
+            label_widget.configure(image=cimg, text="")
+        except Exception:
+            try:
+                label_widget.configure(text=f"Logo: {len(b64) // 1024} KB")
+            except Exception:
+                pass
+
+    def _pilih_logo_struk(self, label_status=None, preview_label=None):
+        """Pilih file gambar logo -> disimpan & dicetak di struk."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self, title="Pilih Logo untuk Dicetak di Struk",
+            filetypes=[("Gambar", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                       ("Semua file", "*.*")])
+        if not path:
+            return ""
+        b64 = logo_gambar_b64(path, label_widget=label_status, tampil_error=True)
+        if not b64:
+            return ""
+        self._simpan_logo_struk(b64)
+        if preview_label is not None:
+            self._tampilkan_preview_logo_struk(preview_label)
+        return b64
+
     def _print_receipt(self, trans: dict = None):
-        """Show dialog with receipt formatted for thermal printer (40 columns)."""
+        """Show dialog with complete receipt formatted for thermal printer."""
+        layout = (ConfigManager.get("printer_settings", {}) or {}).get("layout", {}) or {}
+        profil = self._profil_rental_struk()
+        lines = bangun_struk_lines(
+            trans, kasir=self.current_user,
+            nama_rental=profil.get("nama_rental"), layout=layout,
+            alamat=profil.get("alamat"), telepon=profil.get("no_hp"))
+        logo_b64 = ""
+        raster = b""
+        if layout.get("tampil_logo", True):
+            logo_b64 = self._logo_struk_b64()
+            if logo_b64:
+                raster = escpos_raster_bytes(_data_url_to_pil(logo_b64))
+        tinggi_txt = max(210, min(390, len(lines) * 15))
+        tinggi_dlg = tinggi_txt + 132
         dlg = ctk.CTkToplevel(self)
         dlg.title("🖨 Cetak Struk")
         dlg.configure(fg_color=C_BG)
-        dlg.geometry("480x600")
+        dlg.geometry(f"430x{tinggi_dlg}")
+        dlg.minsize(400, 330)
         dlg.transient(self)
         dlg.grab_set()
+        if logo_b64:
+            logo_img = _data_url_to_pil(logo_b64)
+            if logo_img is not None:
+                try:
+                    th = logo_img.convert("RGBA")
+                    th.thumbnail((200, 70))
+                    cimg = ctk.CTkImage(light_image=th, dark_image=th, size=th.size)
+                    lbl_logo = ctk.CTkLabel(dlg, text="", image=cimg)
+                    lbl_logo.pack(pady=(10, 0))
+                except Exception:
+                    pass
         txt = ctk.CTkTextbox(dlg, fg_color=C_CARD, text_color=C_TEXT,
-                              font=("Courier New", 10), wrap="none",
-                              width=440, height=400)
-        txt.pack(padx=20, pady=(16, 8), fill="both", expand=True)
-        # Build receipt content (40 cols)
-        lines = []
-        lines.append("=" * 40)
-        lines.append("      RR BILLING PRO")
-        lines.append("      STRUK TRANSAKSI")
-        lines.append("=" * 40)
-        now = datetime.now().strftime("%d/%m/%Y %H:%M")
-        lines.append(f"Tanggal : {now}")
-        lines.append(f"Kasir   : {self.current_user or '-'}")
-        if trans:
-            pc = trans.get("pc", trans.get("kursi", "-"))
-            paket = trans.get("paket", "-")
-            durasi = trans.get("durasi", trans.get("menit", 0))
-            harga = trans.get("harga", trans.get("biaya", 0))
-            lines.append("-" * 40)
-            lines.append(f"PC/Kursi: {pc}")
-            lines.append(f"Paket   : {paket}")
-            lines.append(f"Durasi  : {durasi} menit")
-            lines.append(f"Total   : Rp {harga:,.0f}".replace(",", "."))
-        lines.append("-" * 40)
-        lines.append("      TERIMA KASIH")
-        lines.append("      Silakan datang kembali")
-        lines.append("=" * 40)
-        txt.insert("1.0", "\n".join(lines))
+                              font=("Courier New", 9), wrap="none",
+                              width=390, height=tinggi_txt)
+        txt.pack(padx=20, pady=(14, 8), fill="both", expand=True)
+        isi_struk = "\n".join(lines)
+        txt.insert("1.0", isi_struk)
         txt.configure(state="disabled")
         btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
         btn_row.pack(fill="x", padx=20, pady=(0, 16))
+
         def _cetak():
             printer_cfg = ConfigManager.get("printer_settings", {})
             printer_type = printer_cfg.get("type", "file")
             address = printer_cfg.get("address", "")
-            if printer_type == "bluetooth":
+            if printer_type in ("bluetooth", "usb", "network") and (printer_type == "bluetooth" or ESCPOS_AVAILABLE):
                 threading.Thread(target=self._print_via_escpos,
-                                 args=("\n".join(lines), printer_type, address),
-                                 daemon=True).start()
-            elif printer_type in ("usb", "network") and ESCPOS_AVAILABLE:
-                threading.Thread(target=self._print_via_escpos,
-                                 args=("\n".join(lines), printer_type, address),
+                                 args=(isi_struk, printer_type, address),
+                                 kwargs={"raster": raster},
                                  daemon=True).start()
             else:
-                self._print_to_file("\n".join(lines))
+                self._print_to_file(isi_struk, logo_b64=logo_b64)
             messagebox.showinfo("Cetak", "Struk dikirim ke printer / file.")
-        ctk.CTkButton(btn_row, text="🖨  Cetak via Bluetooth", width=180, height=36,
+
+        ctk.CTkButton(btn_row, text="🖨  Cetak Struk", width=150, height=36,
                       fg_color=C_ACCENT2, hover_color="#5A0FCC",
                       font=("Russo One", 10, "bold"), text_color="white",
                       command=_cetak).pack(side="left", padx=4)
-        ctk.CTkButton(btn_row, text="💾  Cetak ke File", width=140, height=36,
+        ctk.CTkButton(btn_row, text="💾  Simpan ke File", width=140, height=36,
                       fg_color=C_BTN, hover_color=C_ACCENT2,
                       border_width=1, border_color=C_ACCENT2,
                       font=("Russo One", 10, "bold"), text_color=C_ACCENT2,
-                      command=lambda: (self._print_to_file("\n".join(lines)),
+                      command=lambda: (self._print_to_file(isi_struk, logo_b64=logo_b64),
                                        messagebox.showinfo("Cetak", "Struk disimpan di folder receipts/"))).pack(side="left", padx=4)
         ctk.CTkButton(btn_row, text="✖ Tutup", width=80, height=36,
                       fg_color=C_BTN, hover_color=C_RED,
@@ -24381,7 +25050,82 @@ class AutoRentApp(ctk.CTk):
                       font=("Russo One", 10, "bold"), text_color=C_MUTED,
                       command=dlg.destroy).pack(side="right", padx=4)
 
-    def _print_via_escpos(self, text: str, ptype: str, address: str):
+    def _trans_struk_dari_riwayat(self, idx):
+        """Bangun data struk dari baris riwayat (untuk cetak ulang / Tandai Lunas)."""
+        if idx is None or not (0 <= idx < len(self.riwayat_meta)):
+            return {}
+        meta = self.riwayat_meta[idx] or {}
+        row = self.riwayat_transaksi[idx] if 0 <= idx < len(self.riwayat_transaksi) else ()
+        pesanan = meta.get("pesanan") or {}
+        menu_makanan = self.menu_makanan or {}
+        menu_minuman = self.menu_minuman or {}
+        all_menu = {**menu_makanan, **menu_minuman}
+        detail = []
+        makanan_total = 0
+        minuman_total = 0
+        for nm, qty in (pesanan.items() if isinstance(pesanan, dict) else []):
+            try:
+                qty = int(qty)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty <= 0:
+                continue
+            harga_item = int(all_menu.get(nm, 0) or 0)
+            subtotal_item = harga_item * qty
+            if nm in menu_makanan:
+                kategori = "Makanan"
+                makanan_total += subtotal_item
+            elif nm in menu_minuman:
+                kategori = "Minuman"
+                minuman_total += subtotal_item
+            else:
+                kategori = "Lainnya"
+            detail.append({"nama": str(nm), "qty": qty, "harga": harga_item,
+                           "subtotal": subtotal_item, "kategori": kategori})
+        total = int(meta.get("total", 0) or 0)
+        pesanan_total = int(meta.get("pesanan_total", sum(it["subtotal"] for it in detail)) or 0)
+        paket_harga = int(meta.get("paket_harga", 0) or 0)
+        if paket_harga <= 0:
+            paket_harga = max(0, total - pesanan_total)
+        diskon_amount = int(meta.get("diskon_amount", 0) or 0)
+        diskoni = int(meta.get("diskoni", 0) or 0)
+        if diskon_amount <= 0 and diskoni > 0:
+            subtotal_mentah = paket_harga + pesanan_total
+            if meta.get("diskoni_mode") == "persen":
+                diskon_amount = subtotal_mentah * diskoni // 100
+            else:
+                diskon_amount = diskoni
+            diskon_amount = max(0, min(subtotal_mentah, diskon_amount))
+        total_sebelum = int(meta.get("total_sebelum_pembulatan", 0) or 0)
+        if total_sebelum <= 0:
+            total_sebelum = max(0, paket_harga + pesanan_total - diskon_amount)
+        pembulatan = int(meta.get("pembulatan", 0) or 0)
+        if pembulatan <= 0:
+            pembulatan = max(0, total - total_sebelum)
+        return {
+            "pc": row[2] if len(row) > 2 else "-",
+            "paket": meta.get("paket_raw") or (row[3] if len(row) > 3 else "-"),
+            "menit": meta.get("menit", 0),
+            "harga": total,
+            "paket_harga": paket_harga,
+            "pesanan": pesanan,
+            "pesanan_detail": detail,
+            "pesanan_total": pesanan_total,
+            "makanan_total": makanan_total,
+            "minuman_total": minuman_total,
+            "subtotal": paket_harga + pesanan_total,
+            "diskon_amount": diskon_amount,
+            "diskon_nilai": diskoni,
+            "diskon_mode": meta.get("diskoni_mode", "nominal"),
+            "total_sebelum_pembulatan": total_sebelum,
+            "pembulatan": pembulatan,
+            "paid": bool(meta.get("paid", True)),
+            "waktu": row[0] if len(row) > 0 else "",
+            "metode": str(meta.get("metode") or "CASH"),
+            "kasir": str(meta.get("kasir") or self.current_user or ""),
+        }
+
+    def _print_via_escpos(self, text: str, ptype: str, address: str, raster: bytes = b""):
         """Print receipt via python-escpos / Bluetooth BLE (RPP02N)."""
         try:
             if ptype == "bluetooth":
@@ -24402,7 +25146,7 @@ class AutoRentApp(ctk.CTk):
                             print(f"[PRINT] Printer BLE disimpan: {mac}", flush=True)
                         except Exception:
                             pass
-                    _ble_write_printer(mac, _ble_escpos_bytes(text))
+                    _ble_write_printer(mac, _ble_escpos_bytes(text, raster=raster))
                     print(f"[PRINT] BLE terkirim ke {mac}", flush=True)
                     return
                 except ImportError:
@@ -24425,24 +25169,200 @@ class AutoRentApp(ctk.CTk):
                     p = Usb(0x0416, 0x5011)
             else:
                 return
-            p.text(text + "\n\n")
-            p.cut()
+            try:
+                if raster:
+                    try:
+                        p._raw(raster)
+                    except Exception:
+                        pass
+                p.text(text + "\n\n")
+                time.sleep(0.4)
+                p.cut()
+            finally:
+                try:
+                    p.close()
+                except Exception:
+                    pass
         except Exception as e:
             _LOGGER.warning("ESC/POS print error: %s", e)
             self._print_to_file(text)
 
-    def _print_to_file(self, text: str):
-        """Fallback: save receipt to text file."""
+    def _print_to_file(self, text: str, logo_b64: str = ""):
+        """Fallback: save receipt to text file (+ logo png bila ada)."""
         try:
             receipt_dir = app_path("receipts")
             os.makedirs(receipt_dir, exist_ok=True)
-            fname = f"struk_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            fname = f"struk_{stamp}.txt"
             fpath = os.path.join(receipt_dir, fname)
             with open(fpath, "w", encoding="utf-8") as f:
                 f.write(text)
             print(f"[PRINT] Receipt saved to {fpath}")
+            if logo_b64:
+                img = _data_url_to_pil(logo_b64)
+                if img is not None:
+                    lpath = os.path.join(receipt_dir, f"logo_struk_{stamp}.png")
+                    img.save(lpath)
+                    print(f"[PRINT] Logo receipt saved to {lpath}")
         except Exception as e:
             _LOGGER.error("Print to file error: %s", e)
+
+    def _edit_print_layout(self):
+        """Dialog edit layout struk: header, footer, lebar, logo & bagian tampil."""
+        ps = ConfigManager.get("printer_settings", {}) or {}
+        layout = dict(ps.get("layout", {}) or {})
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Edit Print / Layout Struk")
+        dlg.configure(fg_color=C_BG)
+        center_window(dlg, self, width=660, height=780)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="LAYOUT STRUK",
+                     font=("Russo One", 14, "bold"), text_color=C_ACCENT).pack(pady=(16, 2))
+        ctk.CTkLabel(dlg, text="Placeholder: {nama_rental} {kasir} {alamat} {telepon} {tanggal}",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 8))
+
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color=C_BG)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        entries = {}
+
+        def _field(kunci, label, default=""):
+            ctk.CTkLabel(scroll, text=label, font=FONT_LABEL,
+                         text_color=C_MUTED, anchor="w").pack(fill="x", padx=4, pady=(6, 2))
+            ent = ctk.CTkEntry(scroll, fg_color=C_BTN, text_color=C_TEXT,
+                               border_color=C_BORDER, font=FONT_BODY, height=32)
+            ent.pack(fill="x", padx=4)
+            ent.insert(0, str(layout.get(kunci, default) or ""))
+            entries[kunci] = ent
+
+        _field("header1", "Header 1 (nama toko)", "{nama_rental}")
+        _field("header2", "Header 2 (opsional)", "")
+        _field("footer1", "Footer 1", "TERIMA KASIH")
+        _field("footer2", "Footer 2", "Silakan datang kembali")
+
+        ctk.CTkLabel(scroll, text="Lebar kertas (kolom)", font=FONT_LABEL,
+                     text_color=C_MUTED, anchor="w").pack(fill="x", padx=4, pady=(8, 2))
+        lebar_var = ctk.StringVar(value="32")
+        ctk.CTkOptionMenu(scroll, values=["32"], variable=lebar_var,
+                          fg_color=C_BTN, button_color=C_ACCENT2,
+                          button_hover_color=C_ACCENT, text_color=C_TEXT,
+                          font=FONT_BODY, dropdown_fg_color=C_CARD,
+                          dropdown_text_color=C_TEXT).pack(anchor="w", padx=4, pady=(0, 4))
+        ctk.CTkLabel(scroll, text="32 kolom = printer thermal 58mm (area cetak 48mm)",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(anchor="w", padx=4)
+
+        opsi = [
+            ("tampil_paket", "Tampilkan paket & durasi", True),
+            ("tampil_rincian", "Tampilkan rincian makanan/minuman", True),
+            ("tampil_kasir", "Tampilkan nama kasir", True),
+            ("tampil_diskon", "Tampilkan diskon", True),
+            ("tampil_pembulatan", "Tampilkan pembulatan", True),
+            ("tampil_status", "Tampilkan status LUNAS/TAGIHAN", True),
+            ("tampil_logo", "Cetak logo rental di atas struk", True),
+            ("tampil_alamat", "Tampilkan alamat rental", True),
+        ]
+        vars_opsi = {}
+        ctk.CTkLabel(scroll, text="Bagian yang dicetak", font=FONT_LABEL,
+                     text_color=C_MUTED, anchor="w").pack(fill="x", padx=4, pady=(10, 2))
+        for kunci, label, default in opsi:
+            var = ctk.BooleanVar(value=bool(layout.get(kunci, default)))
+            cb = ctk.CTkCheckBox(scroll, text=label, variable=var,
+                                 font=FONT_BODY, text_color=C_TEXT,
+                                 fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                                 checkmark_color="white")
+            cb.pack(anchor="w", padx=8, pady=3)
+            vars_opsi[kunci] = var
+
+        ctk.CTkLabel(dlg, text="PREVIEW", font=FONT_LABEL,
+                     text_color=C_MUTED, anchor="w").pack(fill="x", padx=20, pady=(2, 2))
+        prev = ctk.CTkTextbox(dlg, fg_color=C_CARD, text_color=C_TEXT,
+                              font=("Courier New", 9), wrap="none",
+                              width=380, height=200)
+        prev.pack(padx=20, pady=(0, 8), fill="both", expand=True)
+
+        def _layout_sekarang():
+            data = {
+                "header1": entries["header1"].get().strip(),
+                "header2": entries["header2"].get().strip(),
+                "footer1": entries["footer1"].get().strip(),
+                "footer2": entries["footer2"].get().strip(),
+                "lebar": int(lebar_var.get() or 32),
+                **{k: bool(v.get()) for k, v in vars_opsi.items()},
+            }
+            return data
+
+        def _refresh_preview():
+            try:
+                profil = self._profil_rental_struk()
+                contoh = {
+                    "pc": "TV 1", "paket": "1 Jam", "menit": 60, "metode": "CASH",
+                    "waktu": datetime.now().strftime("%d/%m/%Y %H.%M"),
+                    "harga": 28000, "paket_harga": 15000,
+                    "pesanan_total": 13000, "makanan_total": 13000, "minuman_total": 0,
+                    "pesanan_detail": [{"nama": "Indomie Goreng", "qty": 1,
+                                        "harga": 13000, "subtotal": 13000,
+                                        "kategori": "Makanan"}],
+                    "subtotal": 28000, "diskon_amount": 0, "diskon_nilai": 0,
+                    "diskon_mode": "nominal", "total_sebelum_pembulatan": 28000,
+                    "pembulatan": 0, "paid": True,
+                }
+                lines = bangun_struk_lines(
+                    contoh, kasir=self.current_user,
+                    nama_rental=profil.get("nama_rental"), layout=_layout_sekarang(),
+                    alamat=profil.get("alamat"), telepon=profil.get("no_hp"))
+                prev.delete("1.0", "end")
+                prev.insert("1.0", "\n".join(lines))
+            except Exception as e:
+                print(f"[PRINT PREVIEW] {e}")
+
+        for ent in entries.values():
+            ent.bind("<KeyRelease>", lambda e: _refresh_preview())
+            ent.bind("<FocusOut>", lambda e: _refresh_preview())
+        for var in vars_opsi.values():
+            var.trace_add("write", lambda *a: _refresh_preview())
+        lebar_var.trace_add("write", lambda *a: _refresh_preview())
+        _refresh_preview()
+
+        def _simpan():
+            cfg = ConfigManager.load()
+            ps2 = cfg.get("printer_settings", {}) or {}
+            ps2["layout"] = _layout_sekarang()
+            cfg["printer_settings"] = ps2
+            ConfigManager.save(cfg)
+            messagebox.showinfo("Tersimpan", "Layout struk berhasil disimpan.", parent=dlg)
+            dlg.destroy()
+
+        def _reset():
+            defaults = {
+                "header1": "{nama_rental}", "header2": "",
+                "footer1": "TERIMA KASIH", "footer2": "Silakan datang kembali",
+            }
+            for k, v in defaults.items():
+                entries[k].delete(0, "end")
+                entries[k].insert(0, v)
+            lebar_var.set("32")
+            for k, var in vars_opsi.items():
+                var.set(True)
+            _refresh_preview()
+
+        btn = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkButton(btn, text="Simpan Layout", width=150, height=36,
+                      fg_color=C_ACCENT2, hover_color=C_ACCENT,
+                      font=("Russo One", 10, "bold"), text_color="white",
+                      command=_simpan).pack(side="left", padx=4)
+        ctk.CTkButton(btn, text="Default", width=100, height=36,
+                      fg_color=C_BTN, hover_color=C_ACCENT2,
+                      border_width=1, border_color=C_ACCENT2,
+                      font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                      command=_reset).pack(side="left", padx=4)
+        ctk.CTkButton(btn, text="Batal", width=90, height=36,
+                      fg_color=C_RED, hover_color="#7A1A1A",
+                      font=("Russo One", 9, "bold"), text_color="white",
+                      command=dlg.destroy).pack(side="right", padx=4)
 
     def _publish_member_summary_bg(self):
         """Publikasikan jumlah member ke web_members/summary (thread-safe)."""
@@ -25058,6 +25978,11 @@ class AutoRentApp(ctk.CTk):
         printer_cfg = ConfigManager.get("printer_settings", {})
         pr_type = printer_cfg.get("type", "file")
         pr_addr = printer_cfg.get("address", "")
+        pr_layout = printer_cfg.get("layout", {}) or {}
+        pr_layout_label = (
+            f"Layout: 32 kolom • "
+            f"Header: {pr_layout.get('header1', '{nama_rental}') or '{nama_rental}'} • "
+            f"Footer: {pr_layout.get('footer1', 'TERIMA KASIH') or '-'}")
 
         pr_row1 = ctk.CTkFrame(printer_card, fg_color="transparent")
         pr_row1.pack(fill="x", padx=20, pady=(0, 8))
@@ -25087,10 +26012,12 @@ class AutoRentApp(ctk.CTk):
 
         def _save_printer_settings():
             cfg_save = ConfigManager.load()
-            cfg_save["printer_settings"] = {
+            ps_lama = cfg_save.get("printer_settings", {}) or {}
+            ps_lama.update({
                 "type": pr_type_var.get(),
                 "address": pr_addr_entry.get().strip(),
-            }
+            })
+            cfg_save["printer_settings"] = ps_lama
             ConfigManager.save(cfg_save)
             messagebox.showinfo("✅ Tersimpan", "Pengaturan printer berhasil disimpan.")
 
@@ -25099,27 +26026,40 @@ class AutoRentApp(ctk.CTk):
             ps = cfg_test.get("printer_settings", {})
             ptype = ps.get("type", "file")
             addr = ps.get("address", "")
+            layout = ps.get("layout", {}) or {}
+            lebar = 32
+            nama_rental = self._nama_rental_struk()
+            header1 = str(layout.get("header1", "{nama_rental}") or "").replace(
+                "{nama_rental}", nama_rental).strip() or nama_rental
             test_lines = []
-            test_lines.append("=" * 40)
-            test_lines.append("   TEST PRINT RR BILLING PRO")
-            test_lines.append("=" * 40)
+            test_lines.append(_struk_tengah(header1, lebar))
+            test_lines.append(_struk_tengah("TEST PRINT", lebar))
+            test_lines.append("")
             test_lines.append(f"Tipe  : {ptype}")
             test_lines.append(f"Alamat: {addr or '-'}")
             test_lines.append(f"Waktu : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-            test_lines.append("-" * 40)
+            test_lines.append("-" * lebar)
             test_lines.append("Jika terbaca, printer berfungsi!")
-            test_lines.append("=" * 40)
+            test_lines.append("-" * lebar)
             test_text = "\n".join(test_lines)
+            logo_b64 = ""
+            raster = b""
+            if layout.get("tampil_logo", True):
+                logo_b64 = self._logo_struk_b64()
+                if logo_b64:
+                    raster = escpos_raster_bytes(_data_url_to_pil(logo_b64))
             if ptype == "bluetooth":
                 threading.Thread(target=self._print_via_escpos,
                                  args=(test_text, ptype, addr),
+                                 kwargs={"raster": raster},
                                  daemon=True).start()
             elif ptype in ("usb", "network") and ESCPOS_AVAILABLE:
                 threading.Thread(target=self._print_via_escpos,
                                  args=(test_text, ptype, addr),
+                                 kwargs={"raster": raster},
                                  daemon=True).start()
             else:
-                self._print_to_file(test_text)
+                self._print_to_file(test_text, logo_b64=logo_b64)
             messagebox.showinfo("Test Print", "Test print dikirim. Periksa printer / folder receipts/.")
 
         def _cari_printer_bt():
@@ -25162,6 +26102,73 @@ class AutoRentApp(ctk.CTk):
                       border_width=1, border_color=C_ACCENT2,
                       font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
                       command=_test_print).pack(side="left", padx=4)
+
+        pr_row4 = ctk.CTkFrame(printer_card, fg_color="transparent")
+        pr_row4.pack(fill="x", padx=20, pady=(0, 16))
+        ctk.CTkButton(pr_row4, text="✏️ Edit Print / Layout", height=32, width=170,
+                      fg_color=C_BTN, hover_color=C_ACCENT2,
+                      border_width=1, border_color=C_ACCENT2,
+                      font=("Russo One", 9, "bold"), text_color=C_ACCENT2,
+                      command=self._edit_print_layout).pack(side="left", padx=4)
+        ctk.CTkLabel(pr_row4, text=pr_layout_label, font=FONT_SMALL,
+                     text_color=C_MUTED).pack(side="left", padx=8)
+
+        # ── LOGO YANG DICETAK DI STRUK ────────────────────────────────────
+        logo_box = ctk.CTkFrame(printer_card, fg_color=C_CARD, corner_radius=10)
+        logo_box.pack(fill="x", padx=20, pady=(0, 14))
+        ctk.CTkLabel(logo_box, text="🖼  LOGO YANG DICETAK DI STRUK",
+                     font=FONT_SUB, text_color=C_ACCENT2).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(logo_box,
+                     text="Logo rental dicetak di atas struk (printer thermal 58mm). "
+                          "Ukuran ideal <= 400px, format PNG.",
+                     font=FONT_SMALL, text_color=C_MUTED, justify="left",
+                     wraplength=520).pack(anchor="w", padx=12, pady=(0, 6))
+
+        logo_prev = ctk.CTkLabel(logo_box, text="", width=200, height=80,
+                                 fg_color=C_BTN, corner_radius=8)
+        logo_prev.pack(side="left", padx=12, pady=(0, 10))
+        lbl_logo_status = ctk.CTkLabel(logo_box, text="", font=FONT_SMALL,
+                                       text_color=C_MUTED, justify="left")
+        lbl_logo_status.pack(side="left", padx=12, pady=(0, 10))
+
+        def _hapus_logo_struk():
+            if not self._logo_struk_b64():
+                messagebox.showinfo("ℹ Info", "Belum ada logo struk yang terpasang.",
+                                    parent=printer_card)
+                return
+            if not messagebox.askyesno("Hapus Logo", "Hapus logo yang dicetak di struk?",
+                                       parent=printer_card):
+                return
+            self._simpan_logo_struk("")
+            self._tampilkan_preview_logo_struk(logo_prev)
+            lbl_logo_status.configure(text="Logo struk dihapus.", text_color=C_MUTED)
+
+        def _upload_logo_struk():
+            b64 = self._pilih_logo_struk(label_status=lbl_logo_status,
+                                          preview_label=logo_prev)
+            if b64:
+                lbl_logo_status.configure(
+                    text=f"✔ Logo terpasang ({len(b64) // 1024} KB) — dicetak di struk.",
+                    text_color=C_GREEN)
+
+        logo_btn_row = ctk.CTkFrame(logo_box, fg_color="transparent")
+        logo_btn_row.pack(side="left", padx=12, pady=(0, 10))
+        ctk.CTkButton(logo_btn_row, text="📁 Upload Logo", height=32, width=130,
+                      fg_color=C_ACCENT2, font=("Russo One", 9, "bold"),
+                      text_color="white",
+                      command=_upload_logo_struk).pack(side="left", padx=4)
+        ctk.CTkButton(logo_btn_row, text="✕ Hapus", height=32, width=90,
+                      fg_color=C_BTN, hover_color=C_RED,
+                      border_width=1, border_color=C_RED,
+                      font=("Russo One", 9, "bold"), text_color=C_RED,
+                      command=_hapus_logo_struk).pack(side="left", padx=4)
+
+        if self._logo_struk_b64():
+            self._tampilkan_preview_logo_struk(logo_prev)
+            lbl_logo_status.configure(
+                text="✔ Logo struk aktif (dicetak di atas struk).", text_color=C_GREEN)
+        else:
+            lbl_logo_status.configure(text="Belum ada logo struk.", text_color=C_MUTED)
 
         if self.current_role == "admin":
             user_card = ctk.CTkFrame(scroll, fg_color=C_PANEL, corner_radius=14)
