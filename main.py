@@ -13,6 +13,7 @@ import openpyxl.utils
 from datetime import datetime, timedelta, date
 import os
 import shutil
+import filecmp
 import json
 import hashlib
 import bcrypt  # ← Password hashing with salt
@@ -1923,10 +1924,10 @@ def logo_gambar_b64(path: str, label_widget=None, tampil_error: bool = False) ->
         return ""
 
 DEFAULT_PORT = 5555
-APP_VERSION = "2.4.33"
-# Video promosi bawaan — disembunyikan (hidden attribute) supaya tidak bisa
-# dihapus/diganti; satu-satunya video yang diputar user NON-LIFETIME.
-PROMO_VIDEO_DEFAULT = "rr_promo_1785840135101.mp4"
+APP_VERSION = "2.4.34"
+# Video pembuka bawaan untuk TV bangun — disembunyikan (hidden attribute)
+# supaya tidak bisa dihapus/diganti; juga jadi promo default NON-LIFETIME.
+PROMO_VIDEO_DEFAULT = "rr_opening_tv.mp4"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -14696,6 +14697,7 @@ class AutoRentApp(ctk.CTk):
                 self.tv_media_server.qr_panggilan_dir = os.path.join(APP_BASE_DIR, "qr_panggilan")
                 self.tv_media_server.start()
                 self._ensure_default_promo()
+                self._ensure_default_media_lain()
                 self._set_media_default_promo()
                 # Watchdog port HDMI: TV yang jatuh ke Home Android saat
                 # masih disewa dikembalikan ke portnya (lewat ADB, karena
@@ -14806,13 +14808,25 @@ class AutoRentApp(ctk.CTk):
             promo_url = ""
             default_path = os.path.join(ms.media_dir, PROMO_VIDEO_DEFAULT)
             if os.path.isfile(default_path):
-                promo_url = base + quote(PROMO_VIDEO_DEFAULT)
+                try:
+                    versi = int(os.path.getmtime(default_path))
+                except Exception:
+                    versi = 0
+                promo_url = f"{base}{quote(PROMO_VIDEO_DEFAULT)}?v={versi}"
             return logo_url, promo_url
         logo_url = self._tv_logo_url()
         promo_url = ""
         cur = getattr(ms, 'current_media', None) or {}
         if cur.get("type") == "video" and cur.get("filename"):
             promo_url = base + quote(cur["filename"])
+        if not promo_url:
+            default_path = os.path.join(ms.media_dir, PROMO_VIDEO_DEFAULT)
+            if os.path.isfile(default_path):
+                try:
+                    versi = int(os.path.getmtime(default_path))
+                except Exception:
+                    versi = 0
+                promo_url = f"{base}{quote(PROMO_VIDEO_DEFAULT)}?v={versi}"
         return logo_url, promo_url
 
     def _promo_default_media_url(self) -> str:
@@ -15027,9 +15041,7 @@ class AutoRentApp(ctk.CTk):
         return os.path.join(ms.media_dir, self.LAST_TIME_IMAGE_NAMA)
 
     def _tv_last_time_image_url(self) -> str:
-        """URL gambar lockscreen Last Time (kosong bila belum di-upload)."""
-        if not self._fitur_premium():
-            return ""
+        """URL gambar lockscreen Last Time (default bundle untuk semua lisensi)."""
         path = self._last_time_image_path()
         if not path or not os.path.isfile(path):
             return ""
@@ -15313,6 +15325,39 @@ class AutoRentApp(ctk.CTk):
             print(f"[MEDIA] PERINGATAN: default promo {PROMO_VIDEO_DEFAULT} tidak ada di bundle")
         except Exception as e:
             print(f"[MEDIA] ensure default promo gagal: {e}")
+
+    def _ensure_default_media_lain(self) -> None:
+        """Pastikan video lockscreen, gambar Last Time, dan logo lock bawaan
+        tersedia di media_promo untuk semua lisensi. User BULANAN selalu
+        memakai versi bundle; media custom premium tidak ditimpa."""
+        try:
+            media_dir = os.path.join(APP_BASE_DIR, "media_promo")
+            meipass = getattr(sys, "_MEIPASS", "")
+            timpa = not self._fitur_premium()
+            for nama in (self.BG_GERAK_NAMA, self.LAST_TIME_IMAGE_NAMA,
+                         "logo_lock.png"):
+                dest = os.path.join(media_dir, nama)
+                sumber = (os.path.join(meipass, "media_promo", nama)
+                          if meipass else "")
+                if not sumber or not os.path.isfile(sumber):
+                    if not os.path.isfile(dest):
+                        print(f"[MEDIA] PERINGATAN: default media {nama} "
+                              f"tidak ada di bundle")
+                    continue
+                if os.path.isfile(dest):
+                    if not timpa:
+                        continue
+                    try:
+                        if filecmp.cmp(sumber, dest, shallow=False):
+                            continue
+                    except Exception:
+                        pass
+                os.makedirs(media_dir, exist_ok=True)
+                shutil.copyfile(sumber, dest)
+                print(f"[MEDIA] Default lockscreen diperbarui dari bundle: "
+                      f"{nama} ({os.path.getsize(dest)} byte)")
+        except Exception as e:
+            print(f"[MEDIA] ensure default media lain gagal: {e}")
 
     def _set_media_default_promo(self) -> None:
         """Sembunyikan video promosi bawaan; user NON-PREMIUM (BULANAN) dikunci
@@ -17637,15 +17682,31 @@ class AutoRentApp(ctk.CTk):
             pass
 
     def _media_state_extra(self, meja_id: str) -> list:
-        """TIDAK lagi mengirim ulang SHOW_MEDIA saat client reconnect.
+        """Kirim background lockscreen default saat client reconnect.
 
-        Dulu media diputar ulang pada SETIAP reconnect WS (blip jaringan,
-        restart app TV, restart kasir) — membuat video promo "selalu play"
-        di waktu yang salah. Sejak R3, media saat TV bangun dari tidur
-        diputar oleh APK sendiri (onScreenWake: 1x per ACTION_SCREEN_ON,
-        URL terakhir yang diterima). Di sini selalu kosong.
+        User BULANAN tidak bisa upload background, jadi video default bundle
+        harus selalu dipasang di TV. User premium/trial yang sudah punya
+        background custom (tercatat di config) tidak ditimpa.
         """
-        return []
+        try:
+            sent = getattr(self, "_lock_bg_sent_once", None)
+            if sent is None:
+                sent = set()
+                self._lock_bg_sent_once = sent
+            if meja_id in sent:
+                return []
+            if self._fitur_premium():
+                cfg = ConfigManager.load()
+                if str(cfg.get("tv_lock_bg_url", "") or "").strip():
+                    return []
+            url = self._tv_bg_gerak_url()
+            if not url:
+                return []
+            sent.add(meja_id)
+            return [{"action": "UPDATE_LOCK_BG", "meja_id": meja_id,
+                     "bg_url": url}]
+        except Exception:
+            return []
 
     def _lakukan_aktivasi(self):
         kode = self.entry_kode.get().strip()
