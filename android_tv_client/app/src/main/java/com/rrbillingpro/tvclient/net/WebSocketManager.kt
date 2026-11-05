@@ -1,9 +1,11 @@
 package com.rrbillingpro.tvclient.net
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.rrbillingpro.tvclient.model.Actions
 import com.rrbillingpro.tvclient.model.ServerMessage
+import com.rrbillingpro.tvclient.util.NetUtil
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -22,6 +24,7 @@ class WebSocketManager(
     private val host: String,
     private val port: Int,
     private val mejaId: String,
+    private val appContext: Context,
     private val onMessage: (ServerMessage) -> Unit,
     private val onStatusChanged: (Boolean) -> Unit,
 ) {
@@ -54,6 +57,19 @@ class WebSocketManager(
         }
     }
 
+    /** Paksa putus & sambung ulang socket. Koneksi baru memicu REGISTER
+     *  sehingga server mengirim ulang snapshot state (START/STOP/LOCK). */
+    fun forceReconnect() {
+        if (closedByUser) return
+        val socket = webSocket
+        webSocket = null
+        try { socket?.close(1000, "resync") } catch (_: Exception) {}
+        setConnected(false)
+        attempt = 0
+        reconnectHandler.removeCallbacksAndMessages(null)
+        connect()
+    }
+
     fun stop() {
         closedByUser = true
         reconnectHandler.removeCallbacksAndMessages(null)
@@ -68,6 +84,14 @@ class WebSocketManager(
 
     private fun connect() {
         if (closedByUser || webSocket != null) return
+        // Belum dipasangkan dengan kasir (URL server kosong): jangan crash dan
+        // jangan loop reconnect — service tetap hidup & promo lokal tetap
+        // berjalan. Manager baru dibuat setelah pairing mengisi URL.
+        if (host.isBlank() || port <= 0) {
+            android.util.Log.w("RRTVService",
+                "URL server kosong — WebSocket tidak dijalankan (belum pairing)")
+            return
+        }
         val url = "ws://$host:$port"
         val request = Request.Builder().url(url).build()
         try {
@@ -85,12 +109,14 @@ class WebSocketManager(
             }
             attempt = 0
             setConnected(true)
-            // Registrasi meja ke server kasir
+            // Registrasi meja ke server kasir (ip dipakai kasir untuk
+            // menandai mode pairing hanya pada TV yang sedang di-pair).
             val reg = JSONObject()
                 .put("type", "REGISTER")
                 .put("meja_id", mejaId)
                 .put("device", "android_tv")
                 .put("nama", mejaId)
+                .put("ip", NetUtil.localIpv4(appContext))
             ws.send(reg.toString())
         }
 
@@ -112,28 +138,33 @@ class WebSocketManager(
             if (ws !== webSocket) return
             webSocket = null
             setConnected(false)
-            scheduleReconnect()
+            scheduleReconnect("ditutup server: $reason")
         }
 
         override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
             if (ws !== webSocket) return
             webSocket = null
             setConnected(false)
-            scheduleReconnect()
+            scheduleReconnect("gagal: ${t.message ?: t.javaClass.simpleName}")
         }
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(alasan: String = "") {
         if (closedByUser) return
         reconnectHandler.removeCallbacksAndMessages(null)
         val delayMs = minOf(10_000L, 2_000L * (1L shl minOf(attempt, 3)))
         attempt += 1
+        android.util.Log.w("RRTVService",
+            "WebSocket putus ($alasan) — coba lagi dalam ${delayMs / 1000} dtk")
         reconnectHandler.postDelayed({ connect() }, delayMs)
     }
 
     private fun setConnected(value: Boolean) {
         if (connected == value) return
         connected = value
+        android.util.Log.i("RRTVService",
+            if (value) "WebSocket tersambung ke $host:$port"
+            else "WebSocket terputus dari $host:$port")
         mainHandler.post { onStatusChanged(value) }
     }
 }

@@ -197,7 +197,11 @@ class QrOverlay(private val context: Context) {
             root = container
             Log.i("QrOverlay", "QR overlay tampil (meja=$mejaId grup=$grup)")
             if (qrUrl.isNotBlank()) loadQrImage(qrView, qrUrl)
-            if (bgUrl.isNotBlank()) startLoopVideo(videoBox, bgUrl, promo)
+            // v4.13: video bg bisa datang murni dari adb push (bgUrl kosong).
+            if (bgUrl.isNotBlank() ||
+                com.rrbillingpro.tvclient.util.Prefs.adaMediaLokal(context, "lockscreen.mp4")) {
+                startLoopVideo(videoBox, bgUrl, promo)
+            }
         } catch (e: Exception) {
             root = null
             if (attempt >= 2) {
@@ -248,17 +252,37 @@ class QrOverlay(private val context: Context) {
     /** Putar MP4 loop (gambar bergerak) di panel kanan. */
     private fun startLoopVideo(box: FrameLayout, url: String, target: ImageView) {
         try {
-            val http = OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
-                .build()
-            val ds = OkHttpDataSource.Factory(http).setDefaultRequestProperties(
-                mapOf("Accept" to "*/*"))
+            // v4.13: gambar bergerak dari adb push (lockscreen.mp4) didahulukan
+            // — URL hanya cadangan streaming.
+            val lokal = com.rrbillingpro.tvclient.util.Prefs.mediaFile(
+                box.context, "lockscreen.mp4")
+            val adaLokal = lokal.exists() && lokal.length() > 0
+            if (!adaLokal && url.isBlank()) return
+            val sumber: android.net.Uri = if (adaLokal) {
+                Log.i("QrOverlay", "Video bg LOKAL ${lokal.absolutePath}")
+                android.net.Uri.fromFile(lokal)
+            } else {
+                Log.i("QrOverlay", "Video bg STREAM $url")
+                android.net.Uri.parse(url)
+            }
+            // v4.14: OkHttpDataSource TIDAK bisa membaca URI file:// (aset
+            // lokal hasil adb push) — file:// pakai sumber data default,
+            // http(s) tetap lewat OkHttp (timeout ketat).
+            val mediaSourceFactory =
+                androidx.media3.exoplayer.source.DefaultMediaSourceFactory(box.context)
+            if (sumber.scheme != "file") {
+                val http = OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(10, TimeUnit.SECONDS)
+                    .build()
+                mediaSourceFactory.setDataSourceFactory(
+                    OkHttpDataSource.Factory(http).setDefaultRequestProperties(
+                        mapOf("Accept" to "*/*")))
+            }
             val exo = ExoPlayer.Builder(box.context)
-                .setMediaSourceFactory(
-                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(ds))
+                .setMediaSourceFactory(mediaSourceFactory)
                 .build()
-            exo.setMediaItem(MediaItem.fromUri(url))
+            exo.setMediaItem(MediaItem.fromUri(sumber))
             // Satu putaran penuh → langsung diulang dari frame pertama, tanpa jeda.
             // REPEAT_MODE_ONE (bukan REPEAT_MODE_ALL) = ulangi video ini saja;
             // jeda antar putaran dibuat 0 (lihat VIDEO_RESTART_DELAY_MS).
@@ -328,7 +352,6 @@ class QrOverlay(private val context: Context) {
     fun updateBgVideo(url: String) {
         val box = videoBox ?: return
         val target = promoView ?: return
-        if (url.isBlank()) return
         mainHandler.post {
             try {
                 stopVideo()

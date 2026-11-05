@@ -38,7 +38,7 @@ object OverlayPermission {
             Process.myUid(),
             context.packageName,
         )
-        return mode == AppOpsManager.MODE_ALLOWED || mode == AppOpsManager.MODE_DEFAULT
+        return mode == AppOpsManager.MODE_ALLOWED
     }
 
     /**

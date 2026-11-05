@@ -8,6 +8,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
@@ -26,6 +28,7 @@ import com.rrbillingpro.tvclient.service.TvOverlayService
 import com.rrbillingpro.tvclient.util.Prefs
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 
 /**
  * Lockscreen fullscreen:
@@ -39,14 +42,20 @@ import okhttp3.Request
 class LockScreenActivity : Activity(), TvOverlayService.StateListener {
 
     private val TAG = "LockScreenActivity"
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var locked = false
     private var bgPlayer: ExoPlayer? = null
     private var bgTexture: android.view.TextureView? = null
+    private var bgImage: ImageView? = null
+    private var bgLoadToken = 0
+    private var currentBgKey: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
+        Log.i(TAG, "onCreate: instance dipasang")
         setContentView(R.layout.activity_lock_screen)
+        bgImage = findViewById(R.id.iv_lock_image)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemBars()
@@ -58,19 +67,60 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             svc.addListener(this)
             render(svc.currentLockDetail)
         }
-        // Tabrak state layar mati-dan-nyala: jika service belum siap, pakai Prefs.
-        if (!locked && Prefs.isLocked(this)) {
-            locked = true
-            render(Prefs.lockDetail(this))
-        }
+        Log.i(TAG, "onCreate: svc.isLocked=$locked")
 
+        // Prefs adalah status lokal yang bisa usang (mis. START/STOP/LOCK
+        // terlewat saat TV tidur). Service & snapshot server adalah sumber
+        // kebenaran — jangan hidupkan lock dari Prefs lagi.
         if (!locked) {
-            // Tidak ada sesi terkunci -> kembali ke aplikasi di bawah (game).
-            moveTaskToBack(true)
-            finish()
+            // Tidak ada sesi terkunci -> jangan biarkan app tampil: arahkan
+            // ke Home Android asli (bukan memantul ke lockscreen ini).
+            kembaliKeHome("onCreate: tidak terkunci")
         } else {
             enterLockTaskMode()
         }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        val svc = TvOverlayService.instance
+        val stillLocked = svc?.isLocked ?: false
+        Log.i(TAG, "onNewIntent: svc.isLocked=$stillLocked")
+        if (!stillLocked) kembaliKeHome("onNewIntent: tidak terkunci")
+    }
+
+    /**
+     * Tutup lockscreen secara paksa: lepas Lock Task, turunkan task, lalu
+     * finish. Forward finish kedua lewat handler karena saat transisi
+     * (promo dibuka / TV bangun) finish() kadang ditelan sistem sehingga
+     * lockscreen tetap nempel dan muncul lagi di depan.
+     */
+    private fun closeSelf(alasan: String) {
+        Log.i(TAG, "closeSelf: $alasan")
+        try { stopLockTask() } catch (_: Exception) {}
+        try { moveTaskToBack(true) } catch (_: Exception) {}
+        try { finish() } catch (_: Exception) {}
+        val act = this
+        mainHandler.postDelayed({
+            if (!act.isFinishing && !act.isDestroyed) {
+                try { act.finishAndRemoveTask() } catch (_: Exception) {}
+                try { act.finish() } catch (_: Exception) {}
+            }
+        }, 1500)
+    }
+
+    /**
+     * v4.15: activity ini tampil padahal TV tidak terkunci (mis. tombol HOME
+     * remote ditekan / sistem memanggilnya sebagai Home default). Arahkan ke
+     * Home Android asli supaya app tidak nyangkut di layar; jalur UNLOCK dari
+     * kasir tetap closeSelf() agar kembali ke game/HDMI.
+     */
+    private fun kembaliKeHome(alasan: String) {
+        try {
+            com.rrbillingpro.tvclient.util.HomeAndroid.bukaHomeAndroid(applicationContext)
+        } catch (_: Exception) {
+        }
+        closeSelf(alasan)
     }
 
     override fun onResume() {
@@ -80,48 +130,171 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
         if (svc != null) {
             locked = svc.isLocked
             render(svc.currentLockDetail)
+            Log.i(TAG, "onResume: svc.isLocked=$locked")
             if (!locked) {
-                moveTaskToBack(true)
-                finish()
+                kembaliKeHome("onResume: tidak terkunci")
                 return
             }
-        } else if (Prefs.isLocked(this)) {
-            locked = true
-            render(Prefs.lockDetail(this))
         } else {
-            moveTaskToBack(true)
-            finish()
+            kembaliKeHome("onResume: service tidak ada")
             return
         }
         if (locked) enterLockTaskMode()
     }
 
+    override fun onPause() {
+        Log.i(TAG, "onPause")
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        Log.i(TAG, "onDestroy")
         TvOverlayService.instance?.removeListener(this)
         exitLockTaskMode()
-        releaseBgPlayer()
+        releaseBgMedia()
+        if (instance === this) instance = null
         super.onDestroy()
     }
 
-    // ── Background gambar bergerak (MP4 loop dari kasir) ────────────────────
+    // ── Background lockscreen: gambar (JPG/PNG) atau video (MP4) ────────────
     private fun applyLockBg(url: String) {
         val box = findViewById<android.widget.FrameLayout>(R.id.fl_lock_video) ?: return
-        releaseBgPlayer()
-        if (url.isBlank()) {
-            bgTexture?.visibility = View.GONE
-            showPanelPesan("Kasir belum mengatur gambar bergerak")
-            Log.i(TAG, "Background lockscreen: pakai latar polos (tidak ada video)")
+        currentBgKey = url
+        releaseBgMedia()
+        // Media lokal hasil upload kasir didahulukan. Kalau ada beberapa
+        // variasi (mis. lockscreen.mp4 lama + lockscreen.jpg baru), pakai
+        // file yang paling baru supaya upload terakhir selalu menang.
+        val lokal = pilihMediaLokal()
+        if (lokal != null) {
+            if (isImageFile(lokal)) {
+                Log.i(TAG, "Background lockscreen: LOKAL gambar ${lokal.absolutePath}")
+                muatGambarLokal(lokal)
+            } else {
+                Log.i(TAG, "Background lockscreen: LOKAL video ${lokal.absolutePath}")
+                putarVideo(android.net.Uri.fromFile(lokal), "lokal ${lokal.absolutePath}")
+            }
             return
         }
+        if (url.isBlank()) {
+            showPanelPesan("Kasir belum mengatur gambar lockscreen")
+            Log.i(TAG, "Background lockscreen: pakai latar polos (tidak ada media)")
+            return
+        }
+        if (isImageUrl(url)) {
+            Log.i(TAG, "Background lockscreen: STREAM gambar $url")
+            muatGambarUrl(url)
+        } else {
+            Log.i(TAG, "Background lockscreen: STREAM video $url")
+            putarVideo(android.net.Uri.parse(url), "stream $url")
+        }
+    }
+
+    private fun pilihMediaLokal(): File? {
+        val names = listOf("lockscreen.jpg", "lockscreen.png", "lockscreen.mp4")
+        return names.map { Prefs.mediaFile(this, it) }
+            .filter { it.exists() && it.length() > 0 }
+            .maxByOrNull { it.lastModified() }
+    }
+
+    private fun isImageFile(file: File): Boolean = when (file.extension.lowercase()) {
+        "jpg", "jpeg", "png" -> true
+        else -> false
+    }
+
+    private fun isImageUrl(url: String): Boolean {
+        val path = url.substringBefore('?').lowercase()
+        return path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".png")
+    }
+
+    private fun muatGambarLokal(file: File) {
+        val token = ++bgLoadToken
+        Thread {
+            val bmp = try { decodeSampled(file.readBytes()) } catch (e: Exception) {
+                Log.w(TAG, "Gagal baca gambar lokal: ${e.message}")
+                null
+            }
+            runOnUiThread {
+                if (token != bgLoadToken || isFinishing || isDestroyed) {
+                    bmp?.recycle()
+                    return@runOnUiThread
+                }
+                if (bmp == null) {
+                    showPanelPesan("Gambar tidak dapat dimuat")
+                } else {
+                    tampilkanGambar(bmp)
+                }
+            }
+        }.start()
+    }
+
+    private fun muatGambarUrl(url: String) {
+        val token = ++bgLoadToken
+        Thread {
+            try {
+                val client = OkHttpClient()
+                val req = Request.Builder().url(url).build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        runOnUiThread {
+                            if (token == bgLoadToken) {
+                                showPanelPesan("Gambar gagal dimuat (HTTP ${resp.code})")
+                            }
+                        }
+                        return@use
+                    }
+                    val bmp = decodeSampled(resp.body?.bytes())
+                    runOnUiThread {
+                        if (token != bgLoadToken || isFinishing || isDestroyed) {
+                            bmp?.recycle()
+                            return@runOnUiThread
+                        }
+                        if (bmp == null) {
+                            showPanelPesan("Gambar tidak dapat dimuat")
+                        } else {
+                            tampilkanGambar(bmp)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Gagal muat gambar $url: ${e.message}")
+                runOnUiThread {
+                    if (token == bgLoadToken) showPanelPesan("Gambar tidak dapat dimuat")
+                }
+            }
+        }.start()
+    }
+
+    private fun tampilkanGambar(bmp: Bitmap) {
+        val iv = bgImage
+        if (iv == null) {
+            bmp.recycle()
+            showPanelPesan("Gambar tidak dapat dimuat")
+            return
+        }
+        bgTexture?.visibility = View.GONE
+        hidePanelPesan()
+        iv.visibility = View.VISIBLE
+        iv.setImageBitmap(bmp)
+    }
+
+    private fun putarVideo(sumber: android.net.Uri, label: String) {
         try {
-            val http = OkHttpClient.Builder().build()
-            val ds = OkHttpDataSource.Factory(http).setDefaultRequestProperties(
-                mapOf("Accept" to "*/*"))
+            // v4.14: OkHttpDataSource TIDAK bisa membaca URI file:// (aset
+            // lokal hasil adb push) — dulu inilah sebab background lockscreen
+            // gagal ("Source error") saat CLI offline walau lockscreen.mp4 ada.
+            // file:// pakai sumber data default; http(s) tetap lewat OkHttp.
+            val mediaSourceFactory =
+                androidx.media3.exoplayer.source.DefaultMediaSourceFactory(this)
+            if (sumber.scheme != "file") {
+                val http = OkHttpClient.Builder().build()
+                mediaSourceFactory.setDataSourceFactory(
+                    OkHttpDataSource.Factory(http).setDefaultRequestProperties(
+                        mapOf("Accept" to "*/*")))
+            }
             val exo = ExoPlayer.Builder(this)
-                .setMediaSourceFactory(
-                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(ds))
+                .setMediaSourceFactory(mediaSourceFactory)
                 .build()
-            exo.setMediaItem(androidx.media3.common.MediaItem.fromUri(url))
+            exo.setMediaItem(androidx.media3.common.MediaItem.fromUri(sumber))
             // Background lockscreen diputar terus (loop mulus) tanpa suara.
             exo.repeatMode = androidx.media3.common.Player.REPEAT_MODE_ALL
             exo.volume = 0f
@@ -136,10 +309,11 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT)
                     isOpaque = true
                 }
-                box.addView(tex, 0)
+                boxAddVideo(tex)
                 bgTexture = tex
             }
             hidePanelPesan()
+            bgImage?.visibility = View.GONE
             tex.visibility = View.VISIBLE
             exo.setVideoTextureView(tex)
 
@@ -158,11 +332,16 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             exo.prepare()
             exo.playWhenReady = true
             bgPlayer = exo
-            Log.i(TAG, "Background lockscreen: player dibuat untuk $url")
+            Log.i(TAG, "Background lockscreen: player dibuat untuk $label")
         } catch (e: Exception) {
             Log.w(TAG, "Gagal pasang background video: ${e.message}")
             showPanelPesan("Video tidak dapat dimuat")
         }
+    }
+
+    private fun boxAddVideo(tex: android.view.TextureView) {
+        val box = findViewById<android.widget.FrameLayout>(R.id.fl_lock_video) ?: return
+        box.addView(tex, 0)
     }
 
     /** Teks-info di panel kanan, dipakai saat belum ada / gagal memuat video. */
@@ -196,7 +375,16 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
 
     private var tagPanelPesan: View? = null
 
+    private fun releaseBgMedia() {
+        bgLoadToken++
+        releaseBgPlayer()
+        bgTexture?.visibility = View.GONE
+        bgImage?.setImageDrawable(null)
+        bgImage?.visibility = View.GONE
+    }
+
     private fun releaseBgPlayer() {
+        bgTexture?.visibility = View.GONE
         val p = bgPlayer ?: return
         bgPlayer = null
         try {
@@ -211,6 +399,19 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
         val d = detail ?: LockDetail("MEJA", "-", "Rp 0", "Rp 0")
         findViewById<TextView>(R.id.tv_meja).text = d.meja
         findViewById<TextView>(R.id.tv_timer).text = "00:00:00"
+        findViewById<TextView>(R.id.tv_lock_title)?.text =
+            d.pesan.ifBlank { "WAKTU SEWA HABIS" }
+        val notice = findViewById<TextView>(R.id.tv_lock_notice)
+        if (notice != null) {
+            notice.text = d.notice
+            notice.visibility = if (d.notice.isBlank()) View.GONE else View.VISIBLE
+        }
+
+        // Lockscreen Last Time memakai gambar khusus bila kasir sudah upload;
+        // jika tidak, tetap memakai background lockscreen biasa.
+        val lastTimeImg = d.lastTimeImageUrl.trim()
+        val desiredBg = lastTimeImg.ifBlank { Prefs.lockBgUrl(this) }
+        if (desiredBg != currentBgKey) applyLockBg(desiredBg)
 
         loadLogo(d.logoUrl)
 
@@ -260,12 +461,23 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
 
     private fun addBillRow(parent: LinearLayout, label: String, value: String,
                            bold: Boolean = false, lunas: Boolean = true) {
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            // Panel bill hanya ~25% lebar layar TV; tanpa setBaselineAligned(false)
+            // baris ikut mewarisi baseline TextView pertama sehingga tinggi baris
+            // membesar tak proporsional saat label membungkus.
+            isBaselineAligned = false
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
         row.addView(TextView(this).apply {
             text = label
             setTextColor(getColor(R.color.text_muted))
             textSize = 15f
             if (bold) setTypeface(typeface, Typeface.BOLD)
+            // Label panjang ("Makanan & Minuman") tidak boleh membungkus satu
+            // huruf per baris di kolom sempit.
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         row.addView(TextView(this).apply {
@@ -274,6 +486,8 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             setTextColor(getColor(if (bold) R.color.neon_yellow else if (lunas) R.color.neon_green else R.color.neon_red))
             textSize = 15f
             if (bold) setTypeface(typeface, Typeface.BOLD)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
         })
         parent.addView(row, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -299,6 +513,21 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
      */
     private fun loadLogo(url: String) {
         val iv = findViewById<ImageView>(R.id.iv_logo) ?: return
+        // v4.13: logo dari adb push (logo.png) didahulukan — URL & cache hanya
+        // cadangan. Ganti logo = timpa file yang sama, tidak ada unduhan.
+        val lokal = com.rrbillingpro.tvclient.util.Prefs.mediaFile(this, "logo.png")
+        if (lokal.exists() && lokal.length() > 0) {
+            Thread {
+                val bmp = decodeSampled(lokal.readBytes())
+                if (bmp != null) {
+                    cachedLogo = bmp
+                    runOnUiThread { iv.setImageBitmap(bmp) }
+                } else {
+                    Log.w(TAG, "loadLogo: decode gagal untuk ${lokal.absolutePath}")
+                }
+            }.start()
+            return
+        }
         val cached = cachedLogo
         if (url.isBlank()) {
             if (cached != null) {
@@ -395,11 +624,9 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
 
     // ── Listener dari service (UNLOCK_SCREEN dari kasir) ────────────────────
     override fun onLockChanged(locked: Boolean) {
-        runOnUiThread {
-            if (!locked) {
-                moveTaskToBack(true)
-                finish()
-            }
+        Log.i(TAG, "onLockChanged: locked=$locked")
+        if (!locked) {
+            runOnUiThread { closeSelf("onLockChanged: kasir unlock") }
         }
     }
 
@@ -436,8 +663,19 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
             context.startActivity(i)
         }
 
+        /** True bila activity lockscreen masih hidup (tidak finishing/destroyed). */
+        fun isAlive(): Boolean {
+            val act = instance ?: return false
+            return try { !act.isFinishing && !act.isDestroyed } catch (_: Exception) { false }
+        }
+
         fun finishInstance() {
-            instance?.runOnUiThread { instance?.finish() }
+            val act = instance
+            if (act == null) {
+                Log.i("LockScreenActivity", "finishInstance: instance null (tidak ada activity hidup)")
+                return
+            }
+            act.runOnUiThread { act.closeSelf("finishInstance dari service") }
         }
 
         /**
@@ -469,8 +707,12 @@ class LockScreenActivity : Activity(), TvOverlayService.StateListener {
         instance = this
     }
 
+    // Catatan: JANGAN mengosongkan `instance` di onStop(). Activity sering
+    // hanya "tertutup" sebentar oleh MediaActivity/promo atau transisi sleep;
+    // kalau instance dibuang di sini, UNLOCK_SCREEN dari kasir tidak punya
+    // target dan lockscreen lama tetap nempel sampai TV dibangunkan lagi.
     override fun onStop() {
-        if (instance === this) instance = null
+        Log.i(TAG, "onStop (instance tetap disimpan untuk finishInstance)")
         super.onStop()
     }
 }

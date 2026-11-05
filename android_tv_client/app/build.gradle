@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId 'com.rrbillingpro.tvclient'
-        minSdk 24
+        minSdk 26
         targetSdk 34
-        versionCode 49
-        versionName '4.9'
+        versionCode 65
+        versionName '4.25'
     }
 
     buildTypes {
@@ -34,17 +34,11 @@ android {
 
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    // OkHttpDataSource: source HTTP ExoPlayer memakai OkHttp — jauh lebih
-    // andal daripada DefaultHttpDataSource (HttpURLConnection) yang sering
-    // HANG di Android 11 (spinner buffering selamanya, tanpa error).
     implementation 'androidx.media3:media3-datasource-okhttp:1.4.1'
-    // ExoPlayer (media3): player paling tahan banting di Android TV —
-    // dipakai Netflix/YouTube; HTTP source toleran ke server media kasir
-    // (HEAD/Range/206), retry otomatis, dan memberi kode error yang jelas.
-    // 1.4.1 = versi yang kompatibel dengan compileSdk 34 / AGP 8.5.
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
     implementation 'androidx.media3:media3-common:1.4.1'
-    // media3-ui: PlayerView untuk MP4 loop background lockscreen & panel kanan
-    // layar QR sesi member.
     implementation 'androidx.media3:media3-ui:1.4.1'
+
+    implementation platform('com.google.firebase:firebase-bom:33.1.2')
+    implementation 'com.google.firebase:firebase-firestore'
 }

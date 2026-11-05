@@ -45,13 +45,28 @@
 
             <TextView
                 android:id="@+id/tv_lock_title"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
+                android:gravity="center"
                 android:text="WAKTU SEWA HABIS"
                 android:textColor="@color/neon_red"
                 android:textSize="24sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_lock_notice"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:paddingLeft="8dp"
+                android:paddingRight="8dp"
+                android:text="Silahkan tambah sesi waktu anda."
+                android:textColor="@color/neon_yellow"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/tv_meja"
@@ -108,6 +123,14 @@
             android:layout_height="match_parent"
             android:layout_weight="3"
             android:background="#FF000000">
+
+            <ImageView
+                android:id="@+id/iv_lock_image"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop"
+                android:visibility="gone"
+                android:contentDescription="Gambar lockscreen" />
 
             <TextView
                 android:id="@+id/tv_lock_video_info"

@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Layar setup: IP server kasir + meja_id -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scroll_setup"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/bg_dark">
+    android:background="@color/bg_dark"
+    android:descendantFocusability="afterDescendants"
+    android:focusable="true"
+    android:focusableInTouchMode="true"><!--
+        focusableInTouchMode: tanpa ini EditText pertama langsung grab focus
+        saat activity dibuka, sehingga remote TV tidak bisa menggulir ke panel
+        izin di bawah lipatan layar (butuh ~13x D-pad). ScrollView yang punya
+        focus awal menerima D-pad sebagai navigasi scroll.
+    -->
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -111,6 +120,50 @@
             android:text="IZIN OVERLAY"
             android:textSize="16sp"
             android:backgroundTint="#333333" />
+
+        <!-- ══ PANEL KELENGKAPAN IZIN & SETTING ══ -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:text="KELENGKAPAN IZIN &amp; SETTING TV"
+            android:textColor="@color/neon_cyan"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_izin_ringkas"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Memeriksa kelengkapan…"
+            android:textColor="@color/text_muted"
+            android:textSize="13sp" />
+
+        <LinearLayout
+            android:id="@+id/ll_izin_daftar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical" />
+
+        <Button
+            android:id="@+id/btn_cek_izin"
+            android:layout_width="match_parent"
+            android:layout_height="50dp"
+            android:layout_marginTop="10dp"
+            android:text="🔄 PERIKSA ULANG IZIN"
+            android:textSize="14sp"
+            android:backgroundTint="#2A5C8A" />
+
+        <TextView
+            android:id="@+id/tv_izin_panduan"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text=""
+            android:textColor="@color/neon_yellow"
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/tv_lock_bg"

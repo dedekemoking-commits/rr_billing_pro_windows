@@ -19,13 +19,38 @@ object Actions {
     const val UPDATE_RENTAL = "UPDATE_RENTAL"
     const val SHOW_MEDIA = "SHOW_MEDIA"
     const val HIDE_MEDIA = "HIDE_MEDIA"
+
+    /**
+     * Banner pesan singkat dari kasir (v4.17), mis. "Mohon Jangan Ribut".
+     * Field: `pesan` (teks) + `durasi` (detik, default 5). Overlay atas
+     * transparan, hilang sendiri — game/HDMI di belakang tetap jalan.
+     */
+    const val SHOW_MESSAGE = "SHOW_MESSAGE"
     const val SHOW_PIN = "SHOW_PIN"
     const val HIDE_PIN = "HIDE_PIN"
     const val SHOW_QR = "SHOW_QR"
     const val HIDE_QR = "HIDE_QR"
     const val UPDATE_LOCK_BG = "UPDATE_LOCK_BG"
+    const val OVERLAY_STYLE = "OVERLAY_STYLE"
+    const val OVERLAY_SETTINGS = "OVERLAY_SETTINGS"
+    const val SLEEP_TV = "SLEEP_TV"
+    const val PICK_MEDIA = "PICK_MEDIA"
+    const val DELETE_MEDIA = "DELETE_MEDIA"
     const val PING = "PING"
     const val QUERY_SCREEN_STATE = "QUERY_SCREEN_STATE"
+
+    /** Monitoring jarak jauh dari APK RR Monitor (via kasir/Firestore). */
+    const val REPORT_LOGS = "REPORT_LOGS"
+    const val RECONNECT_WS = "RECONNECT_WS"
+    const val RESTART_CLIENT = "RESTART_CLIENT"
+
+    /**
+     * Mode pairing sedang berjalan di kasir untuk IP tertentu. Selama aktif,
+     * TV tidak boleh mengirim power key / memutar promo / membuka lockscreen,
+     * karena dialog kode pairing sistem Android TV langsung hilang begitu
+     * window atau layar berubah.
+     */
+    const val PAIRING_MODE = "PAIRING_MODE"
 }
 
 data class BillLine(
@@ -47,6 +72,12 @@ data class LockDetail(
     val minuman: List<BillLine> = emptyList(),
     val logoUrl: String = "",
     val promoUrl: String = "",
+    /** Judul lockscreen; server memakai "LAST TIME HABIS" saat Last Time selesai. */
+    val pesan: String = "WAKTU SEWA HABIS",
+    /** Pesan tambahan di bawah judul (mis. "Silahkan tambah sesi waktu anda."). */
+    val notice: String = "",
+    /** Gambar khusus lockscreen Last Time (kosong = pakai background biasa). */
+    val lastTimeImageUrl: String = "",
 )
 
 /**
@@ -74,6 +105,40 @@ data class ServerMessage(
     val forceStart: Boolean = false,
     val grup: String = "",
     val bgUrl: String = "",
+    val pairing: Boolean = false,
+    val targetIp: String = "",
+    // Main Bebas: detik sejak sesi mulai (dari kasir, bukan dihitung TV)
+    val isBebas: Boolean = false,
+    val elapsedDetik: Int = -1,
+    val bebasStartDurasi: Int = 5,
+    val bebasInterval: Int = 60,
+    val bebasDurasi: Int = 10,
+    val popupDetik: Int = 0,
+    val countdown: Int = 0,
+    // Gaya popup dari kasir. Nilai -1 / "" = pakai nilai tersimpan di TV.
+    val bgAlpha: Int = -1,
+    val accent: String = "",
+    val radius: Int = -1,
+    val timerSize: Int = -1,
+    val scale: Int = -1,
+    val posY: Int = -1,
+    /**
+     * Port HDMI pilihan kasir per TV (v4.13):
+     *   1..4 = pindah otomatis setelah promo selesai
+     *   0    = belum diisi -> app TIDAK menyentuh input
+     *  -1    = "Jangan pakai" -> TV yang mengatur inputnya sendiri
+     * Int.MIN_VALUE = field TIDAK dikirim (kasir lama) -> Prefs tidak diubah.
+     */
+    val hdmiPort: Int = Int.MIN_VALUE,
+    /** Id input firmware untuk port di atas (hasil peta otomatis kasir). */
+    val hdmiInputHint: String = "",
+    /** Nama file aset lokal di folder media (v4.13) — mis. promo.mp4. */
+    val local: String = "",
+    /** Durasi tampil banner SHOW_MESSAGE (detik) — default 5, batas 3-300. */
+    val durasi: Int = 5,
+    val noWake: Boolean = false,
+    /** True saat kasir memberi tambahan waktu Last Time (popup wajib tampil). */
+    val isLastTime: Boolean = false,
 ) {
     companion object {
         fun fromJson(raw: String): ServerMessage? {
@@ -116,6 +181,9 @@ data class ServerMessage(
                         } ?: emptyList(),
                         logoUrl = d.optString("logo_url", ""),
                         promoUrl = d.optString("promo_url", ""),
+                        pesan = d.optString("pesan", "WAKTU SEWA HABIS"),
+                        notice = d.optString("notice", ""),
+                        lastTimeImageUrl = d.optString("last_time_image_url", ""),
                     ) else null
 
                     ServerMessage(
@@ -138,6 +206,27 @@ data class ServerMessage(
                         forceStart = o.optBoolean("force_start", false),
                         grup = o.optString("grup", ""),
                         bgUrl = o.optString("bg_url", ""),
+                        pairing = o.optBoolean("pairing", false),
+                        targetIp = o.optString("ip", ""),
+                        isBebas = o.optBoolean("is_bebas", o.optBoolean("isBebas", false)),
+                        elapsedDetik = o.optInt("elapsed_detik", -1),
+                        bebasStartDurasi = o.optInt("bebas_start_durasi", 5).coerceAtLeast(0),
+                        bebasInterval = o.optInt("bebas_interval", 60).coerceAtLeast(1),
+                        bebasDurasi = o.optInt("bebas_durasi", 10).coerceAtLeast(1),
+                        popupDetik = o.optInt("popup_detik", 0).coerceIn(0, 60),
+                        countdown = o.optInt("countdown", 0).coerceAtLeast(0),
+                        bgAlpha = o.optInt("bg_alpha", -1),
+                        accent = o.optString("accent", ""),
+                        radius = o.optInt("radius", -1),
+                        timerSize = o.optInt("timer_size", -1),
+                        scale = o.optInt("scale", -1),
+                        posY = o.optInt("pos_y", -1),
+                        hdmiPort = o.optInt("hdmi_port", Int.MIN_VALUE),
+                        hdmiInputHint = o.optString("hdmi_input_hint", ""),
+                        local = o.optString("local", ""),
+                        durasi = o.optInt("durasi", 5),
+                        noWake = o.optBoolean("no_wake", false),
+                        isLastTime = o.optBoolean("is_last_time", false),
                     )
                 }
             } catch (e: Exception) {

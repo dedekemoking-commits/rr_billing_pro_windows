@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <queries>
+        <package android:name="com.billingps.tvclient" />
+    </queries>
+
     <!-- Koneksi WebSocket ke server kasir -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -25,7 +29,37 @@
     <!-- Autostart service saat STB dinyalakan -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Pilih video dari penyimpanan TV / USB -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!--
+        Android 11+ (package visibility): tanpa deklarasi <queries> ini,
+        resolveActivity/startActivity untuk HOME & passthrough content URI
+        bisa "tidak menemukan" target padahal ada — TV jatuh ke launcher.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="content" />
+        </intent>
+        <intent>
+            <action android:name="android.media.tv.action.VIEW_INPUT" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.GET_CONTENT" />
+            <data android:mimeType="video/*" />
+        </intent>
+    </queries>
+
     <application
+        android:name=".RRBillingApplication"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.RRBillingTV"
@@ -74,6 +108,13 @@
             android:theme="@style/Theme.RRBillingTV.Fullscreen"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- Pilih video promo/lockscreen dari MediaStore / USB / Photo Picker -->
+        <activity
+            android:name=".media.MediaPickerActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.RRBillingTV.Fullscreen" />
+
         <!-- Foreground Service: WebSocket + timer + overlay + lock -->
         <service
             android:name=".service.TvOverlayService"
@@ -97,13 +138,16 @@
             </intent-filter>
         </receiver>
 
-        <!-- Autostart service saat boot -->
+        <!-- Autostart service saat boot / setelah APK di-update -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <!-- Setelah app di-update via adb/deploy: service hidup lagi
+                     tanpa perlu menunggu reboot TV. -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
     </application>
