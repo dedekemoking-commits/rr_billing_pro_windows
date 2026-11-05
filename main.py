@@ -841,7 +841,8 @@ class WarnetSocketServer:
                         tarif_menit = hitung_tarif_per_menit(kursi.get_paket_data())
                         total_detik = kursi.menit_dipakai_awal * 60 + int(
                             (datetime.now() - kursi.waktu_mulai).total_seconds())
-                        biaya_waktu = tarif_menit * (max(total_detik, 0) / 60)
+                        biaya_waktu = bulatkan_biaya_bebas(
+                            tarif_menit * (max(total_detik, 0) / 60))
                         billing_status["total_biaya"] = int(
                             kursi._total_setelah_diskon(biaya_waktu + kursi.biaya_pesanan))
                     elif kursi.paket_harga_tetap > 0 or kursi.biaya_pesanan > 0:
@@ -2488,6 +2489,7 @@ class TimerService:
                         "paket": kartu.paket_aktif,
                         "sisa_waktu": kartu.sisa_waktu,
                         "is_bebas": kartu.is_bebas,
+                        "is_last_time": bool(getattr(kartu, "is_last_time", False)),
                         "waktu_mulai": kartu.waktu_mulai.isoformat() if kartu.waktu_mulai else None,
                         "biaya_pesanan": kartu.biaya_pesanan,
                         "paket_harga_tetap": kartu.paket_harga_tetap,
@@ -2548,6 +2550,7 @@ class TimerService:
                         kartu.paket_aktif = s["paket"]
                         kartu.sisa_waktu = s["sisa_waktu"]
                         kartu.is_bebas = s.get("is_bebas", False)
+                        kartu.is_last_time = bool(s.get("is_last_time", False))
                         kartu.biaya_pesanan = s.get("biaya_pesanan", 0)
                         kartu.paket_harga_tetap = s.get("paket_harga_tetap", 0)
                         kartu.pesanan_aktif = dict(s.get("pesanan_aktif", {}))
@@ -2566,6 +2569,18 @@ class TimerService:
                         kartu.is_on = True
                         kartu.paid = s.get("paid", True)
                         restored_count += 1
+            # Sesi aktif yang dipulihkan membatalkan lock lama untuk meja itu.
+            hub = getattr(app, 'tv_ws_hub', None)
+            if hub is not None:
+                for kartu in getattr(app, '_semua_kartu_tv', []):
+                    if not getattr(kartu, 'paket_aktif', None):
+                        continue
+                    label = getattr(kartu, 'label_tv', '')
+                    try:
+                        if label and hub.is_locked(label):
+                            hub.remove_locked_state(label)
+                    except Exception:
+                        pass
             for kartu in getattr(app, '_semua_kartu_warnet', []):
                 key = str(getattr(kartu, '_pc_id', None) or kartu.nomor)
                 if key in warnet_state:
@@ -3376,8 +3391,9 @@ class DialogOverlaySetting(ctk.CTkToplevel):
       2. Auto Cut    — auto mati TV yang nyala tanpa sesi aktif
       3. Gaya popup  — transparansi, warna, ukuran, posisi (live ke TV)
       4. Main Bebas  — popup tampil berapa lama setiap berapa menit
-      5. LG webOS     — toast message
-      6. Background lockscreen — video loop
+      5. Last Time   — durasi tambahan & gambar lockscreen saat habis
+      6. LG webOS    — toast message
+      7. Background lockscreen — video loop
 
     Auto Cut punya tombol simpan sendiri (bukan ikut tombol Simpan utama)
     karena ia mengatur siklus auto-mati TV idle, bukan tampilan popup — dan
@@ -3403,6 +3419,7 @@ class DialogOverlaySetting(ctk.CTkToplevel):
     def __init__(self, master, mode="always", last_minutes=5, on_save=None,
                  webos_toast_enabled=True, webos_toast_minutes=None,
                  style=None, bebas_interval=60, bebas_durasi=30,
+                 last_time_minutes=5,
                  on_send_style=None, on_send_bebas=None,
                  auto_cut_enabled=True, auto_cut_first_minutes=10,
                  auto_cut_minutes=5, on_save_auto_cut=None):
@@ -3437,6 +3454,7 @@ class DialogOverlaySetting(ctk.CTkToplevel):
                              auto_cut_minutes)
         self._build_gaya_popup(body)
         self._build_main_bebas(body, bebas_interval, bebas_durasi)
+        self._build_last_time(body, last_time_minutes)
         self._build_webos(body, webos_toast_enabled, webos_toast_minutes)
         self._build_background(body)
         self._build_buttons(body)
@@ -3567,7 +3585,7 @@ class DialogOverlaySetting(ctk.CTkToplevel):
                   else f"✅ Tersimpan — {first} menit / {ulang} menit"),
             text_color=C_YELLOW if not self.auto_cut_var.get() else C_GREEN)
 
-    # ── Section 2: Gaya popup (live ke TV) ──────────────────────────────────
+    # ── Section 3: Gaya popup (live ke TV) ──────────────────────────────────
     def _build_gaya_popup(self, parent):
         ctk.CTkFrame(parent, height=2, fg_color=C_MUTED).pack(fill="x", padx=20, pady=(10, 6))
         ctk.CTkLabel(parent, text="—— 🎨 TAMPILAN POPUP ——", font=FONT_SUB,
@@ -3773,7 +3791,7 @@ class DialogOverlaySetting(ctk.CTkToplevel):
             self.lbl_style_status.configure(
                 text="⚠ Belum ada TV terhubung", text_color=C_YELLOW)
 
-    # ── Section 3: Main Bebas ───────────────────────────────────────────────
+    # ── Section 4: Main Bebas ───────────────────────────────────────────────
     def _build_main_bebas(self, parent, interval, durasi):
         ctk.CTkFrame(parent, height=2, fg_color=C_MUTED).pack(fill="x", padx=20, pady=(10, 6))
         ctk.CTkLabel(parent, text="—— ⏱ MAIN BEBAS ——", font=FONT_SUB,
@@ -3839,7 +3857,64 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         except Exception as e:
             self.lbl_bebas_info.configure(text=f"✖ Gagal: {e}", text_color=C_RED)
 
-    # ── Section 4: LG webOS ─────────────────────────────────────────────────
+    # ── Section 5: Last Time ────────────────────────────────────────────────
+    def _build_last_time(self, parent, minutes):
+        ctk.CTkFrame(parent, height=2, fg_color=C_MUTED).pack(fill="x", padx=20, pady=(10, 6))
+        ctk.CTkLabel(parent, text="—— ⏱ LAST TIME ——", font=FONT_SUB,
+                     text_color=C_MUTED).pack(pady=(2, 2))
+        ctk.CTkLabel(parent,
+                     text="Tambahan waktu saat kasir menekan tombol Last Time\n"
+                          "di popup sesi habis (untuk save game / selesaikan match).",
+                     font=FONT_SMALL, text_color=C_MUTED).pack(pady=(0, 6))
+
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=26, pady=3)
+        ctk.CTkLabel(row, text="Durasi Last Time (menit):", font=FONT_BODY,
+                     text_color=C_TEXT).pack(side="left")
+        self.last_time_minutes_var = tk.StringVar(
+            value=str(_clamp_int(minutes, 1, 240, 5)))
+        self.entry_last_time = ctk.CTkEntry(
+            row, textvariable=self.last_time_minutes_var, width=60, height=30,
+            font=("Consolas", 12, "bold"))
+        self.entry_last_time.pack(side="left", padx=8)
+
+        self.lbl_last_time_image = ctk.CTkLabel(
+            parent, text="", font=FONT_SMALL, text_color=C_MUTED, justify="left")
+        self.lbl_last_time_image.pack(pady=(4, 4))
+        ctk.CTkButton(parent, text="🖼  Upload Gambar Lockscreen Last Time", height=34,
+                      fg_color=C_BTN, hover_color=C_ACCENT2, border_width=1,
+                      border_color=C_ACCENT2, font=FONT_SUB, text_color=C_ACCENT2,
+                      command=self._upload_last_time_image).pack(padx=26, fill="x")
+        self._refresh_last_time_image_status()
+
+    def _last_time_nilai(self):
+        return _clamp_int(self.last_time_minutes_var.get(), 1, 240, 5)
+
+    def _upload_last_time_image(self):
+        master = self.master
+        fn = getattr(master, "_buka_upload_last_time_image", None)
+        if callable(fn):
+            fn(parent=self)
+            self._refresh_last_time_image_status()
+
+    def _refresh_last_time_image_status(self):
+        master = self.master
+        path = ""
+        fn = getattr(master, "_last_time_image_path", None)
+        if callable(fn):
+            try:
+                path = fn() or ""
+            except Exception:
+                path = ""
+        if path and os.path.isfile(path):
+            self.lbl_last_time_image.configure(
+                text=f"✅ Gambar aktif: {os.path.basename(path)}", text_color=C_GREEN)
+        else:
+            self.lbl_last_time_image.configure(
+                text="Belum ada gambar khusus Last Time (memakai latar lockscreen biasa).",
+                text_color=C_MUTED)
+
+    # ── Section 6: LG webOS ─────────────────────────────────────────────────
     def _build_webos(self, parent, enabled, minutes):
         ctk.CTkFrame(parent, height=2, fg_color=C_MUTED).pack(fill="x", padx=20, pady=(10, 6))
         ctk.CTkLabel(parent, text="—— LG webOS ——", font=FONT_SUB,
@@ -3867,7 +3942,7 @@ class DialogOverlaySetting(ctk.CTkToplevel):
             cb.pack(side="left", padx=4)
         self._on_webos_toast_toggle()
 
-    # ── Section 5: Background lockscreen ────────────────────────────────────
+    # ── Section 7: Background lockscreen ────────────────────────────────────
     def _build_background(self, parent):
         ctk.CTkFrame(parent, height=2, fg_color=C_MUTED).pack(fill="x", padx=20, pady=(8, 6))
         ctk.CTkLabel(parent, text="—— BACKGROUND LOCKSCREEN ——", font=FONT_SUB,
@@ -3954,9 +4029,10 @@ class DialogOverlaySetting(ctk.CTkToplevel):
         if not webos_toast_minutes:
             webos_toast_minutes = [10, 5, 3, 1]
         iv, dur = self._bebas_nilai()
+        last_time_minutes = self._last_time_nilai()
         if callable(self.on_save):
             self.on_save(mode, minutes, webos_toast_enabled, webos_toast_minutes,
-                         dict(self._style), iv, dur)
+                         dict(self._style), iv, dur, last_time_minutes)
         self.destroy()
 class DialogDeployClient(ctk.CTkToplevel):
     """Dialog untuk deploy/update client app ke PC warnet via SSH.
@@ -6864,11 +6940,12 @@ class DialogSesiHabis(ctk.CTkToplevel):
 
 Dulu sesi habis langsung: TV dimatikan paksa (webOS) atau kasir cukup
     klik OK lalu TV tidur (Android). Sekarang kasir yang memutuskan:
-      - 🔓 Buka Kunci Layar: SATU-SATUNYA tombol pilihan. TV sudah berada di
-                              lockscreen sejak waktu habis, jadi kasir cukup
-                              membuka layar; sesi BELUM ditutup dan masih
+      - 🔓 Buka Kunci Layar: buka lockscreen; sesi BELUM ditutup dan masih
                               bisa ditambah paket atau ditutup lewat tombol
                               Selesai di kartu.
+      - ⏱ Last Time        : beri tambahan waktu terbatas (diatur di
+                              Pengaturan Overlay) agar pelanggan bisa
+                              menyimpan game/menyelesaikan pertandingan.
       - ⏻ Matikan TV       : perilaku lama — tutup sesi, TV tidur, print struk.
 
     Tombol "Kunci Layar TV" dan "Tambah Sesi Waktu" dihapus 14 Okt 2026:
@@ -6884,13 +6961,14 @@ Dulu sesi habis langsung: TV dimatikan paksa (webOS) atau kasir cukup
     TIMEOUT_MS = 45000
 
     def __init__(self, master, on_pilih, label_tv="", rincian="",
-                 sisa_label_tv=0, timeout_ms=None):
+                 sisa_label_tv=0, timeout_ms=None, last_time_minutes=5):
         super().__init__(master)
         self.on_pilih = on_pilih
         self._selesai = False
+        self.last_time_minutes = _clamp_int(last_time_minutes, 1, 240, 5)
         self.timeout_ms = int(timeout_ms if timeout_ms is not None else self.TIMEOUT_MS)
         self.title("Waktu Sewa Habis")
-        center_window(self, master, width=470, height=420)
+        center_window(self, master, width=470, height=520)
         self.configure(fg_color=C_BG)
         self.transient(master)
         self.resizable(False, False)
@@ -6907,32 +6985,32 @@ Dulu sesi habis langsung: TV dimatikan paksa (webOS) atau kasir cukup
 
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
         btn_f.pack(pady=(2, 8))
-        # Empat tindakan. Yang menambah adalah "Buka Kunci Layar" (14 Okt 2026):
-        # sebelumnya hanya ada Kunci / Tambah / Matikan, sehingga kasir tidak
-        # pernah punya cara melepas kunci TV kecuali lewat Tambah Sesi Waktu
-        # atau Matikan TV — tombol yang-available saja terlihat "tidak
-        # berfungsi". Buka Kunci mengirim UNLOCK_SCREEN (sudah didukung hub
-        # TvWsHub.send_unlock_screen + client LockScreenActivity.finishInstance).
-        # Hanya SATU tombol pilihan: "Buka Kunci".
-        # Alasannya (permintaan 14 Okt 2026): TV sudah berada di lockscreen
-        # sejak waktu habis. Jadi "Kunci Layar" tidak ada gunanya (mengirim
-        # ulang kunci yang sama) dan "Tambah Sesi Waktu" juga redundan karena
-        # sama-sama membuka layar — kasir cukup buka kunci dulu, baru memilih
-        # paket dari kartu. Satu tombol, tidak ambigu.
-        ctk.CTkButton(btn_f, text="🔓  Buka Kunci Layar", width=330, height=62,
+        # Buka Kunci melepas lockscreen tanpa menutup sesi. Last Time memberi
+        # tambahan waktu singkat agar pelanggan bisa save game/menyelesaikan
+        # pertandingan; durasinya diatur di Pengaturan Overlay TV.
+        ctk.CTkButton(btn_f, text="🔓  Buka Kunci Layar", width=330, height=54,
                       fg_color=C_GREEN, hover_color="#2F7A2F", text_color="white",
                       font=("Russo One", 12, "bold"),
-                      command=lambda: self._finish("buka")).pack(side="left", padx=5)
+                      command=lambda: self._finish("buka")).pack(pady=(0, 6))
+
+        ctk.CTkButton(btn_f, text=f"⏱  Last Time (+{self.last_time_minutes} menit)",
+                      width=330, height=54,
+                      fg_color=C_ORANGE, hover_color="#B87400", text_color="black",
+                      font=("Russo One", 12, "bold"),
+                      command=lambda: self._finish("last_time")).pack()
 
         ctk.CTkLabel(self,
                      text="⚠️  TV sedang terkunci (waktu sewa habis).\n\n"
                           "🔓 Buka Kunci Layar\n"
-                          "     Layar TV terbuka, sesi TETAP berjalan.\n"
-                          "     Setelah itu pilih tindakan di kartu TV:\n"
-                          "     tambah paket, atau tekan Selesai untuk\n"
-                          "     mencetak struk dan menutup sesi.",
+                          "     Layar TV terbuka, sesi TETAP berjalan.\n\n"
+                          "⏱ Last Time\n"
+                          f"     Beri tambahan {self.last_time_minutes} menit agar\n"
+                          "     pelanggan bisa menyimpan game. Saat habis,\n"
+                          "     lockscreen Last Time tampil lagi.\n\n"
+                          "⏻ Matikan TV & Tutup Sesi\n"
+                          "     Akhiri sesi dan cetak struk.",
                      font=("Courier New", 9), text_color=C_MUTED,
-                     wraplength=420, justify="left").pack(pady=(0, 8))
+                     wraplength=420, justify="left").pack(pady=(4, 8))
 
         ctk.CTkButton(self, text="⏻  Matikan TV & Tutup Sesi", height=40,
                       fg_color=C_RED, hover_color="#7A1A1A", text_color="white",
@@ -7953,6 +8031,22 @@ def hitung_tarif_per_menit(paket_data):
         if hasil is not None:
             return hasil
     return 0
+
+
+def bulatkan_biaya_bebas(nominal):
+    """Bulatkan biaya waktu Main Bebas ke ribuan terdekat.
+
+    Di bawah Rp 500 menjadi Rp 0, mulai Rp 500 menjadi Rp 1.000, dan
+    seterusnya. Hanya komponen waktu yang dibulatkan; biaya pesanan
+    ditambahkan setelahnya agar tagihan F&B tidak ikut berubah.
+    """
+    try:
+        nilai = float(nominal or 0)
+    except (TypeError, ValueError):
+        return 0
+    if nilai <= 0:
+        return 0
+    return int(((nilai + 500) // 1000) * 1000)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -9193,6 +9287,9 @@ hdmi_port=0, **kwargs):
         self.paket_aktif   = None
         self.sisa_waktu    = 0
         self.is_bebas      = False
+        self.is_last_time  = False
+        self._waktu_habis  = False
+        self._last_time_done = False
         self.menit_dipakai_awal = 0
         self.waktu_mulai   = None
         self.pesanan_aktif = {}
@@ -9450,6 +9547,19 @@ hdmi_port=0, **kwargs):
         self.tag_lower(self._ids['bg'])
         self._redraw_bg()
 
+        # Timer: idle "00:00"; pause & waktu habis tetap tampil walau kartu
+        # di-repaint (resize/expand). Flag dipertahankan sampai sesi direset.
+        if getattr(self, '_billing_paused', False):
+            self.itemconfig(self._ids['lbl_timer'], text="II PAUSED", fill=C_YELLOW)
+        elif getattr(self, '_waktu_habis', False):
+            teks = ("LAST TIME HABIS" if getattr(self, '_last_time_done', False)
+                    else "WAKTU HABIS \u23f9")
+            self.itemconfig(self._ids['lbl_timer'], text=teks, fill=C_RED)
+        elif self.sesi_kosong():
+            self.itemconfig(self._ids['lbl_timer'], text="00:00", fill=C_MUTED)
+        else:
+            self._update_timer_display()
+
     def _redraw_bg(self):
         W = self._card_w
         h = self._ids.get('_card_h', 200)
@@ -9678,14 +9788,15 @@ hdmi_port=0, **kwargs):
         app = self.winfo_toplevel()
         return getattr(app, 'tv_ws_hub', None)
 
-    def _ws_send_start(self, sisa_detik):
+    def _ws_send_start(self, sisa_detik, is_last_time=False):
         hub = self._hub()
         if not hub:
             return
         try:
             lunas, tagihan = self._split_payment()
             hub.send_start_timer(self.label_tv, sisa_detik, self._total_setelah_diskon(),
-                                 lunas_total=lunas, tagihan_total=tagihan)
+                                 lunas_total=lunas, tagihan_total=tagihan,
+                                 is_last_time=is_last_time)
         except Exception as e:
             print(f"[TV WS HUB] send_start error {self.label_tv}: {e}")
         # Paket sah dibuka → batalkan hitungan auto-off & kembali ke 10 menit.
@@ -9713,7 +9824,8 @@ hdmi_port=0, **kwargs):
         try:
             lunas, tagihan = self._split_payment()
             hub.send_sync_timer(self.label_tv, self.sisa_waktu, self._total_setelah_diskon(),
-                                lunas_total=lunas, tagihan_total=tagihan)
+                                lunas_total=lunas, tagihan_total=tagihan,
+                                is_last_time=bool(getattr(self, "is_last_time", False)))
         except Exception as e:
             print(f"[TV WS HUB] send_sync_timer error {self.label_tv}: {e}")
 
@@ -10883,6 +10995,8 @@ hdmi_port=0, **kwargs):
             self.after_cancel(self._timer_job)
             self._timer_job = None
         self._billing_paused = False
+        self._waktu_habis = False
+        self._last_time_done = False
         self._enable_btn("selesai", C_BTN, C_RED)
         self._enable_btn("shop", "black", "white")
         self._enable_btn("pause", "black", "white")
@@ -11114,6 +11228,9 @@ hdmi_port=0, **kwargs):
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
+        # Paket berbayar baru membatalkan mode Last Time (TV); sisa waktunya
+        # tetap dihitung sebagai tambahan seperti sesi normal.
+        self.is_last_time = False
         # ── Sesi member (saldo waktu per grup): waktu sudah dibayar saat isi
         # ulang, jadi harga paket 0. Saldo dipotong saat sesi SELESAI. ──
         if member:
@@ -11190,6 +11307,8 @@ hdmi_port=0, **kwargs):
             self.after_cancel(self._timer_job)
 
         self._billing_paused = False
+        self._waktu_habis = False
+        self._last_time_done = False
         self._enable_btn("selesai", C_BTN, C_RED)
         self._enable_btn("shop", "black", "white")
         self._enable_btn("pause", "black", "white")
@@ -11436,7 +11555,8 @@ hdmi_port=0, **kwargs):
         """
         total_detik = _elapsed_bebas_kartu(self)
         tarif_menit = self._tarif_bebas(total_detik)
-        biaya_waktu_berjalan = tarif_menit * (total_detik / 60)
+        biaya_waktu_berjalan = bulatkan_biaya_bebas(
+            tarif_menit * (total_detik / 60))
         total_berjalan = self._total_setelah_diskon(
             biaya_waktu_berjalan + self.biaya_pesanan)
         return total_detik, total_berjalan
@@ -11465,10 +11585,10 @@ hdmi_port=0, **kwargs):
             total_detik, total_berjalan = self._hitung_bebas()
             h, rem = divmod(total_detik, 3600)
             m, s   = divmod(rem, 60)
-            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill="black")
+            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill=C_YELLOW)
             self.itemconfig(self._ids['lbl_estimasi'],
                 text=f"Total berjalan: {fmt_rp(total_berjalan)}",
-                fill="black"
+                fill=C_YELLOW
             )
         except Exception as e:
             # Jangan sampai display rusak mematikan rantai timer — poller
@@ -11492,16 +11612,26 @@ hdmi_port=0, **kwargs):
             total_detik = self.menit_dipakai_awal * 60 + int((datetime.now() - self.waktu_mulai).total_seconds()) if self.waktu_mulai else 0
             h, rem = divmod(total_detik, 3600)
             m, s   = divmod(rem, 60)
-            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill="black")
+            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill=C_YELLOW)
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             menit_berjalan = total_detik / 60
-            biaya_waktu_berjalan = tarif_menit * menit_berjalan
+            biaya_waktu_berjalan = bulatkan_biaya_bebas(tarif_menit * menit_berjalan)
             total_berjalan = self._total_setelah_diskon(biaya_waktu_berjalan + self.biaya_pesanan)
             self.itemconfig(self._ids['lbl_estimasi'],
                 text=f"Total berjalan: {fmt_rp(total_berjalan)}",
-                fill="black"
+                fill=C_YELLOW
             )
             self._ws_send_total(total_berjalan)
+        elif getattr(self, "is_last_time", False):
+            h, rem = divmod(self.sisa_waktu, 3600)
+            m, s   = divmod(rem, 60)
+            self.itemconfig(self._ids['bg'], fill="white")
+            self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}",
+                            fill=C_YELLOW)
+            self.itemconfig(self._ids['lbl_estimasi'],
+                            text="LAST TIME — silahkan selesaikan permainan",
+                            fill=C_YELLOW)
+            self._ws_send_sync()
         else:
             h, rem = divmod(self.sisa_waktu, 3600)
             m, s   = divmod(rem, 60)
@@ -11524,8 +11654,15 @@ hdmi_port=0, **kwargs):
 
     # ── Timer habis handler (called from TimerService) ──────────────────────
     def _timer_habis(self):
+        if getattr(self, "is_last_time", False):
+            self._last_time_habis()
+            return
         if self.sesi_kosong():
             return
+        # Flag dipakai saat kartu di-repaint agar teks WAKTU HABIS tidak
+        # hilang sampai kasir menutup/menambah sesi.
+        self._waktu_habis = True
+        self._last_time_done = False
         self.itemconfig(self._ids['lbl_timer'], text="WAKTU HABIS \u23f9", fill=C_RED)
         total_akhir = self._total_setelah_diskon()
         pesanan_txt = ", ".join(f"{nm}\u00d7{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
@@ -11658,6 +11795,78 @@ hdmi_port=0, **kwargs):
             "promo_url": promo_url,
         }
 
+    def _mulai_last_time(self):
+        """Beri tambahan waktu Last Time sesuai Pengaturan Overlay.
+
+        Sesi utama sudah habis (sisa_waktu 0) dan TV sedang lockscreen.
+        START_TIMER membuka lockscreen sekaligus menampilkan countdown N di
+        pojok kanan atas. is_last_time membuat TimerService tahu bahwa saat
+        countdown habis yang dikirim adalah lockscreen Last Time, bukan
+        tagihan/sesi biasa.
+        """
+        app = self.winfo_toplevel()
+        menit = _clamp_int(getattr(app, "tv_last_time_minutes", 5), 1, 240, 5)
+        detik = menit * 60
+        self.is_last_time = True
+        self.sisa_waktu = detik
+        self._billing_paused = False
+        self._waktu_habis = False
+        self._last_time_done = False
+        self.idle_on_seconds = 0
+        self.idle_escalated = False
+        h, rem = divmod(detik, 3600)
+        m, s = divmod(rem, 60)
+        self.itemconfig(self._ids['bg'], fill="white")
+        self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}",
+                        fill=C_YELLOW)
+        self.itemconfig(self._ids['lbl_estimasi'],
+                        text=f"LAST TIME — {menit} menit", fill=C_YELLOW)
+        self._ws_send_start(detik, is_last_time=True)
+        if getattr(self, "tv_type", "android") == "webos":
+            self._webos_toast(f"LAST TIME {menit} MENIT — {self.label_tv}")
+        log_event = getattr(app, "log_event", None)
+        if callable(log_event):
+            log_event("waktu", "last_time_mulai", "info", {
+                "tv": self.label_tv,
+                "menit": menit,
+            })
+        print(f"[TV TIMER] {self.label_tv}: LAST TIME {menit} menit dimulai")
+
+    def _last_time_habis(self):
+        """Last Time selesai: kunci TV dengan pesan + gambar khusus."""
+        if not getattr(self, "is_last_time", False):
+            return
+        self.is_last_time = False
+        self.sisa_waktu = 0
+        self._waktu_habis = True
+        self._last_time_done = True
+        app = self.winfo_toplevel()
+        self.itemconfig(self._ids['lbl_timer'], text="LAST TIME HABIS", fill=C_RED)
+        self.itemconfig(self._ids['lbl_estimasi'],
+                        text="Silahkan tambah sesi waktu anda", fill=C_RED)
+        total_akhir = self._total_setelah_diskon()
+        lunas_now, tagihan_now = self._split_payment()
+        detail = self._payload_lock_sewa_habis(total_akhir, lunas_now, tagihan_now)
+        detail["pesan"] = "LAST TIME HABIS"
+        detail["notice"] = "Silahkan tambah sesi waktu anda."
+        try:
+            detail["last_time_image_url"] = app._tv_last_time_image_url()
+        except Exception:
+            detail["last_time_image_url"] = ""
+        if getattr(self, "tv_type", "android") == "webos":
+            self._webos_toast(
+                f"LAST TIME HABIS — {self.label_tv}\n"
+                "Silahkan tambah sesi waktu anda.")
+        else:
+            self._ws_send_lock("LAST TIME HABIS", detail)
+        log_event = getattr(app, "log_event", None)
+        if callable(log_event):
+            log_event("waktu", "last_time_habis", "warning", {
+                "tv": self.label_tv,
+                "total": fmt_rp(total_akhir),
+            })
+        print(f"[TV TIMER] {self.label_tv}: LAST TIME HABIS -> LOCK_SCREEN")
+
     def _tampilkan_dialog_sesi_habis(self):
         """Buka DialogSesiHabis — kasir pilih: lockscreen / tambah waktu / matikan.
 
@@ -11694,7 +11903,9 @@ hdmi_port=0, **kwargs):
         try:
             self._dlg_sesi_habis = DialogSesiHabis(
                 self.winfo_toplevel(), _selesai, label_tv=self.label_tv,
-                rincian=rincian, sisa_label_tv=self.sisa_waktu)
+                rincian=rincian, sisa_label_tv=self.sisa_waktu,
+                last_time_minutes=getattr(
+                    self.winfo_toplevel(), "tv_last_time_minutes", 5))
             self._dlg_sesi_habis.lift()
         except Exception as e:
             # Dialog gagal dibangun (mis. widget CustomTkinter berubah API).
@@ -11728,6 +11939,10 @@ hdmi_port=0, **kwargs):
         app = self.winfo_toplevel()
         log_event = getattr(app, "log_event", None)
         is_webos = getattr(self, "tv_type", "android") == "webos"
+
+        if aksi == "last_time":
+            self._mulai_last_time()
+            return
 
         if aksi == "buka":
             # Buka kunci layar TV tanpa menutup sesi. Sesi tetap jalan supaya
@@ -11848,7 +12063,7 @@ hdmi_port=0, **kwargs):
         # Untuk Main Bebas, hitung total = waktu berjalan + pesanan
         if self.is_bebas:
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
-            biaya_waktu = tarif_menit * menit
+            biaya_waktu = bulatkan_biaya_bebas(tarif_menit * menit)
             harga = int(self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan) or 0)
         else:
             harga = int(self._total_setelah_diskon() or 0)
@@ -11911,7 +12126,7 @@ hdmi_port=0, **kwargs):
         if self.is_bebas:
             menit_total = self._total_menit_terpakai()
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
-            biaya_waktu = tarif_menit * menit_total
+            biaya_waktu = bulatkan_biaya_bebas(tarif_menit * menit_total)
             total_akhir = self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan)
             pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
             if not messagebox.askyesno(
@@ -12013,6 +12228,7 @@ hdmi_port=0, **kwargs):
         self.paket_aktif   = None
         self.sisa_waktu    = 0
         self.is_bebas      = False
+        self.is_last_time  = False
         self.waktu_mulai   = None
         self._tarif_bebas_cache = None
         self.menit_dipakai_awal = 0
@@ -12026,9 +12242,11 @@ hdmi_port=0, **kwargs):
         self.diskoni       = 0
         self.diskoni_mode  = "nominal"
         self._billing_paused = False
+        self._waktu_habis  = False
+        self._last_time_done = False
         self.paid          = True
         self.itemconfig(self._ids['lbl_paket'], text="\u2014", fill=C_MUTED)
-        self.itemconfig(self._ids['lbl_timer'], text="00:00:00", fill=C_MUTED)
+        self.itemconfig(self._ids['lbl_timer'], text="00:00", fill=C_MUTED)
         self.itemconfig(self._ids['bg'], fill=C_CARD)
         self._warning_blink_on = False
         self.itemconfig(self._ids['lbl_estimasi'], text="")
@@ -13031,6 +13249,9 @@ on_hapus=None, nama_grup=None, **kwargs):
         self.menit_dipakai_awal = 0
         self.diskoni = diskoni
         self.diskoni_mode = diskoni_mode
+        # Paket berbayar baru membatalkan mode Last Time (TV); sisa waktunya
+        # tetap dihitung sebagai tambahan seperti sesi normal.
+        self.is_last_time = False
         # ── Sesi member (saldo waktu per grup): waktu sudah dibayar saat isi
         # ulang, jadi harga paket 0. Saldo dipotong saat sesi SELESAI. ──
         if member:
@@ -13209,7 +13430,7 @@ on_hapus=None, nama_grup=None, **kwargs):
         self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill=C_YELLOW)
         tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
         menit_berjalan = total_detik / 60
-        biaya_waktu_berjalan = tarif_menit * menit_berjalan
+        biaya_waktu_berjalan = bulatkan_biaya_bebas(tarif_menit * menit_berjalan)
         total_berjalan = self._total_setelah_diskon(biaya_waktu_berjalan + self.biaya_pesanan)
         self.itemconfig(self._ids['lbl_estimasi'],
             text=f"Total berjalan: {fmt_rp(total_berjalan)}",
@@ -13228,7 +13449,7 @@ on_hapus=None, nama_grup=None, **kwargs):
             self.itemconfig(self._ids['lbl_timer'], text=f"{h:02d}:{m:02d}:{s:02d}", fill=C_YELLOW)
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
             menit_berjalan = total_detik / 60
-            biaya_waktu_berjalan = tarif_menit * menit_berjalan
+            biaya_waktu_berjalan = bulatkan_biaya_bebas(tarif_menit * menit_berjalan)
             total_berjalan = self._total_setelah_diskon(biaya_waktu_berjalan + self.biaya_pesanan)
             self.itemconfig(self._ids['lbl_estimasi'],
                 text=f"Total berjalan: {fmt_rp(total_berjalan)}",
@@ -13351,15 +13572,19 @@ on_hapus=None, nama_grup=None, **kwargs):
         """Data transaksi untuk popup cetak struk (panggil SEBELUM sesi direset)."""
         menit = int(getattr(self, "menit_dipakai_awal", 0) or 0)
         if self.is_bebas:
+            try:
+                menit = self._total_menit_terpakai() or 0
+            except Exception:
+                menit = getattr(self, "menit_dipakai_awal", 0)
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
-            biaya_waktu = tarif_menit * menit
+            biaya_waktu = bulatkan_biaya_bebas(tarif_menit * menit)
             harga = int(self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan) or 0)
         else:
             harga = int(self._total_setelah_diskon() or 0)
         return {
             "pc": getattr(self, "label_kursi", None) or "-",
             "paket": self.paket_aktif or "Main Bebas",
-            "menit": menit,
+            "menit": int(menit or 0),
             "harga": harga,
         }
 
@@ -13437,7 +13662,7 @@ on_hapus=None, nama_grup=None, **kwargs):
         if self.is_bebas:
             menit_total = self._total_menit_terpakai()
             tarif_menit = hitung_tarif_per_menit(self.get_paket_data())
-            biaya_waktu = tarif_menit * menit_total
+            biaya_waktu = bulatkan_biaya_bebas(tarif_menit * menit_total)
             total_akhir = self._total_setelah_diskon(biaya_waktu + self.biaya_pesanan)
             pesanan_txt = ", ".join(f"{nm}×{qty}" for nm, qty in self.pesanan_aktif.items()) or "Tidak ada pesanan"
             if not messagebox.askyesno(
@@ -13526,6 +13751,7 @@ on_hapus=None, nama_grup=None, **kwargs):
         self.paket_aktif = None
         self.sisa_waktu = 0
         self.is_bebas = False
+        self.is_last_time = False
         self.waktu_mulai = None
         self.menit_dipakai_awal = 0
         self.pesanan_aktif = {}
@@ -13954,6 +14180,9 @@ class AutoRentApp(ctk.CTk):
             cfg.get("tv_bebas_popup_interval"), 1, 600, 60)
         self.tv_bebas_popup_durasi = _clamp_int(
             cfg.get("tv_bebas_popup_durasi"), 1, 600, 30)
+        # ── Last Time: tambahan waktu singkat saat sesi sudah habis ─────────
+        self.tv_last_time_minutes = _clamp_int(
+            cfg.get("tv_last_time_minutes"), 1, 240, 5)
         self.tv_ws_hub = None
         self.tv_test_api = None
         self.tv_media_server = None
@@ -13964,9 +14193,18 @@ class AutoRentApp(ctk.CTk):
                     port=cfg.get("warnet_tv_ws_port", 8080),
                     get_nama_rental=self._get_nama_rental_dinamis,
                     state_extra=self._media_state_extra,
+                    on_locked_changed=self._simpan_locked_state,
                 )
                 self.tv_ws_hub._r4_log_dir = app_log_dir()
                 self.tv_ws_hub.start()
+                # Pulihkan lockscreen terakhir (termasuk Last Time HABIS)
+                # supaya TV yang reconnect setelah app restart tetap terkunci
+                # dengan pesan + gambar yang sama.
+                try:
+                    self.tv_ws_hub.restore_locked_state(
+                        ConfigManager.get("tv_locked_state", {}) or {})
+                except Exception as e:
+                    print(f"[TV WS HUB] Restore lock state gagal: {e}")
                 self.tv_test_api = TvTestApi(self.tv_ws_hub, port=cfg.get("warnet_tv_api_port", 8081))
                 self.tv_test_api.start()
                 self.tv_media_server = TvMediaServer(
@@ -14045,6 +14283,13 @@ class AutoRentApp(ctk.CTk):
         except Exception:
             pass
         self.destroy()
+
+    def _simpan_locked_state(self, state):
+        """Persist state lockscreen TV (termasuk Last Time) lintas restart."""
+        try:
+            ConfigManager.set("tv_locked_state", state or {})
+        except Exception as e:
+            _LOGGER.warning("simpan state lock TV gagal: %s", e)
 
     def _get_nama_rental_dinamis(self) -> str:
         """Nama rental dari profil user aktif untuk dikirim ke overlay TV.
@@ -14290,6 +14535,31 @@ class AutoRentApp(ctk.CTk):
             versi = 0
         return f"{base}logo_lock.png?v={versi}"
 
+    # ── Gambar khusus lockscreen Last Time ──────────────────────────────────
+    LAST_TIME_IMAGE_NAMA = "last_time_lock.png"
+
+    def _last_time_image_path(self) -> str:
+        """Path file gambar lockscreen Last Time (kosong bila server mati)."""
+        ms = getattr(self, 'tv_media_server', None)
+        if not ms or not ms.running:
+            return ""
+        return os.path.join(ms.media_dir, self.LAST_TIME_IMAGE_NAMA)
+
+    def _tv_last_time_image_url(self) -> str:
+        """URL gambar lockscreen Last Time (kosong bila belum di-upload)."""
+        if not self._fitur_premium():
+            return ""
+        path = self._last_time_image_path()
+        if not path or not os.path.isfile(path):
+            return ""
+        ms = getattr(self, 'tv_media_server', None)
+        base = f"http://{self._get_lan_ip()}:{ms.port}/media/"
+        try:
+            versi = int(os.path.getmtime(path))
+        except Exception:
+            versi = 0
+        return f"{base}{self.LAST_TIME_IMAGE_NAMA}?v={versi}"
+
     # ── Gambar bergerak (MP4 loop) untuk background lockscreen & layar QR ──
     BG_GERAK_NAMA = "bg_gerak.mp4"
     BG_GERAK_MAX_MB = 60
@@ -14430,6 +14700,50 @@ class AutoRentApp(ctk.CTk):
         if lbl is not None:
             lbl.configure(text=f"✅ Tersimpan — dikirim ke {n} TV", text_color=C_GREEN)
         messagebox.showinfo("Gambar Bergerak", ket, parent=win)
+
+    def _buka_upload_last_time_image(self, parent=None):
+        """Upload gambar khusus untuk lockscreen saat Last Time habis."""
+        win = parent or self
+        if not self._fitur_premium():
+            messagebox.showwarning(
+                "Fitur Premium (Trial / LIFETIME)",
+                "Gambar lockscreen Last Time hanya tersedia saat trial aktif "
+                "atau lisensi LIFETIME.",
+                parent=win)
+            return
+        path_dest = self._last_time_image_path()
+        if not path_dest:
+            messagebox.showwarning(
+                "Gambar Last Time",
+                "Server media (port 8082) tidak berjalan.\n"
+                "Mulai ulang aplikasi billing lalu coba lagi.",
+                parent=win)
+            return
+        path = filedialog.askopenfilename(
+            parent=win, title="Pilih Gambar Lockscreen Last Time",
+            filetypes=[("Gambar", "*.png *.jpg *.jpeg *.bmp"),
+                       ("Semua file", "*.*")])
+        if not path:
+            return
+        try:
+            img = Image.open(path)
+            img.load()
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            max_w, max_h = 1920, 1080
+            if img.width > max_w or img.height > max_h:
+                img.thumbnail((max_w, max_h), Image.LANCZOS)
+            img.save(path_dest, "PNG")
+        except Exception as e:
+            messagebox.showerror(
+                "Gambar Last Time",
+                f"Tidak bisa menyimpan gambar:\n{e}", parent=win)
+            return
+        messagebox.showinfo(
+            "✅ Gambar Last Time Tersimpan",
+            "Gambar akan tampil di lockscreen TV saat waktu Last Time habis.\n"
+            f"File: {os.path.basename(path_dest)}",
+            parent=win)
 
     def _simpan_logo_lock(self, path) -> str:
         """Simpan logo lock sebagai PNG ASLI (di-normalisasi) di media_promo.
@@ -19853,6 +20167,7 @@ class AutoRentApp(ctk.CTk):
             style=getattr(self, "tv_overlay_style", None),
             bebas_interval=getattr(self, "tv_bebas_popup_interval", 60),
             bebas_durasi=getattr(self, "tv_bebas_popup_durasi", 30),
+            last_time_minutes=getattr(self, "tv_last_time_minutes", 5),
             on_send_style=self._kirim_overlay_style,
             on_send_bebas=self._kirim_jadwal_bebas,
             auto_cut_enabled=getattr(self, "tv_auto_off_enabled", True),
@@ -19924,7 +20239,8 @@ class AutoRentApp(ctk.CTk):
 
     def _save_overlay_setting(self, mode, minutes, webos_toast_enabled=True,
                               webos_toast_minutes=None, style=None,
-                              bebas_interval=60, bebas_durasi=30):
+                              bebas_interval=60, bebas_durasi=30,
+                              last_time_minutes=5):
         self.tv_overlay_mode = mode
         self.tv_overlay_last_minutes = minutes
         self.tv_overlay_webos_toast_enabled = webos_toast_enabled
@@ -19951,6 +20267,9 @@ class AutoRentApp(ctk.CTk):
         ConfigManager.set("tv_bebas_popup_interval", bebas_interval)
         ConfigManager.set("tv_bebas_popup_durasi", bebas_durasi)
 
+        self.tv_last_time_minutes = _clamp_int(last_time_minutes, 1, 240, 5)
+        ConfigManager.set("tv_last_time_minutes", self.tv_last_time_minutes)
+
         toast_info = f"Toast webOS: {'Aktif' if webos_toast_enabled else 'Nonaktif'}"
         if webos_toast_enabled:
             toast_info += f" (menit: {', '.join(str(m) for m in self.tv_overlay_webos_toast_minutes)})"
@@ -19960,7 +20279,8 @@ class AutoRentApp(ctk.CTk):
             f"Tampil sejak sisa waktu {minutes} menit.\n\n"
             f"Popup: transparansi {style['bg_alpha']}% · warna {style['accent']} · "
             f"ukuran {style['scale']}% · font {style['timer_size']}pt\n"
-            f"Main Bebas: {bebas_durasi} detik setiap {bebas_interval} menit\n\n"
+            f"Main Bebas: {bebas_durasi} detik setiap {bebas_interval} menit\n"
+            f"Last Time: {self.tv_last_time_minutes} menit\n\n"
             f"{toast_info}\n\n"
             "Tekan 📤 Kirim Gaya Popup untuk menerapkan langsung ke TV.",
             parent=self)
